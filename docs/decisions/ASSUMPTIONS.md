@@ -58,6 +58,10 @@
 
 - **選択:** `[state] graph = "ksdls-loop"`（ksd-ls のグラフ層へ記録）。実機の `kloop run`・`kloop graph` は利用者の端末（サンドボックスの外）で起動する
 - **理由:** Claude Code のサンドボックスの中からは、グラフ DB の接続先と Claude の資格が読めない（2026-11-10 実測：グラフの doctor が TargetError、`kloop doctor` が「認証・課金先が見つからない」）
+- **起動の口:** Claude Code の入力欄で利用者が打つ `!` の行（シェルモード）は、前景のセッションではサンドボックスの外で動く
+  （公式文書 code.claude.com/docs/en/sandboxing。v2.1.260 以降で、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` が無いとき。2026-11-10 の版は 2.1.322）。
+  `! cd ~/ksd-project && nohup kloop graph graphs/implement.toml > .kloop/kick.log 2>&1 &` で、会話を離れずに起動できる。
+  エージェントの Bash（サンドボックスの中）では起動しない（2026-11-10 実測：入れ子の `claude -p` が「Not logged in」）
 - **限界:** サンドボックスの中で確かめたのは dry-run・mock の配線と検証器だけである
 
 
