@@ -1,0 +1,39 @@
+
+# kloop の実行時生成物
+.kloop/
+
+.ksdls/
+.ksdx/
+spec-ids.draft.toml
+# 開発環境・生成物
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+*.db
+# エディタ（サンドボックスの中では /dev/null の置き換えとして見える）
+.idea
+.vscode
+.cache/
+# サンドボックスが中に置く /dev/null の置き換え（実体は無い。コミットしない）
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc
+/.gitmodules
+/.claude/.cc-writes/
+/.claude/commands
+/.claude/launch.json
+/.claude/loop.md
+/.claude/output-styles
+/.claude/routines
+/.claude/scheduled_tasks.json
+/.claude/settings.local.json
+/.claude/workflows
+# 端末ごとの MCP の設定（絶対パスを含む。各自の端末で生成する）
+/.mcp.json

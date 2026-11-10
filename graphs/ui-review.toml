@@ -1,0 +1,92 @@
+# 画面を実装し、実ブラウザで評価し、独立レビューで終わる
+#
+#   kloop graph graphs/ui-review.toml --dry-run
+#   kloop graph graphs/ui-review.toml -v
+#
+# 実機で回すと費用（Claude の契約の利用の枠。USD は CLI の見積もり）を使う。**回す前の費用の承認は取らない**
+# （2026-10-20。ksd-ls の Q-LS-34・LS-D32。kloop の CR-088）。--dry-run で計画を見るのは勧める（任意）。
+# 使った量は run.json の usage_total に残るので、報告に出す（kloop 7.1.0 / CR-074。利用の窓に当たると
+# PAUSED_FOR_RATE_LIMIT で止まり、kloop resume で続く）。
+#
+# ## なぜこの順番か
+#
+# 静的な ID 突合（`check_traceability.py`）が見ているのは
+# **ソースに ID とルートの文字列があること**だけである。
+# 画面が実際に開くか・未捕捉例外が出ないか・WCAG 違反が無いかは見ていない。
+# それを見るのが `check_ui_runtime.py` だが、**アプリが起動していることが前提**である。
+# 検証器はアプリを起動しない（起動していなければ「見ていない」と報告する）。
+#
+# そのため「実装 → **人がアプリを起動** → 実ブラウザ評価 → レビュー」の順にする。
+#
+# **コミットの前の承認ゲート（gate-commit）は置かない**（CR-073。ksd-ls の CR-LS-KL-008・Q-LS-34）。
+# 人の承認のゲートはクラウドの資源の構成変更にだけ置く。成果物（findings-ui.md・.kloop/ui-runtime.json）は残る。
+#
+# ## この構成が見ていないもの
+#
+# - **見た目の良し悪し。** 実ブラウザ評価は決定論的な判定しか行わない
+#   （非決定的な判定を failures に混ぜると進捗判定と振動検出が壊れる。ADR-007）。
+#   レイアウトの崩れ・文言の妥当性は review ノードと人が見る
+# - **パラメータ付きルート。** `[ui_runtime].route_params` に値が無い画面は
+#   検証対象から外れる。外れたことは notes に出る
+
+[graph]
+name = "ui-review"
+description = "画面を実装し、実ブラウザで評価し、独立レビューで終わる"
+max_parallel = 1          # 実装ノードが同じ作業ツリーを触るため直列にする
+fail_fast = false
+
+# --- 1. 有界ループで画面を実装する（**現状把握はループの事前検証**。CR-086）
+#
+# ループは反復の前に、タスクの検証器（`[tasks.ui.verify]` の `bash scripts/verify.sh ui`。静的な ID 突合）を
+# 1 度回す。**PASS ならエージェントを呼ばずに終わる**（空振り。指示書 §4.1）。FAIL なら実装する。
+# 2026-10-21 までは、同じ検証器の `verify` ノード（verify-static）を前に置き、`needs` で待っていた。
+# verify ノードは FAIL で FAILED になり、既定の `on_fail = "stop"` で run が止まり、**実装ノードは
+# 実装するものが無いときにしか走らなかった**（ksd-ls の作業 L3-X-004）。同じ検証の 2 回目でもあったので外した
+[[nodes]]
+id = "implement"
+kind = "loop"
+task = "ui"
+max_iterations = 8
+on_fail = "continue"      # 収束しなくても、そこまでの実装を評価する（gate-serve が needs_optional で待つ）
+
+# --- 2. アプリを起動する（人の作業。検証器は起動しない）
+#
+# **これは承認ではなく、人の作業を待つ停止である。CR-073 でも command ノードに置き換えずに残した**。理由：
+#   - 起動のコマンドは導入先ごとに違い（npm・vite・rails …）、雛形は知らない
+#   - 開発サーバは終わらない。command ノードは子の終了を待ち（標準出力・標準エラーを読み切る）、
+#     切り離して残すと run の後も動き続ける。ノードが切り離した子プロセスは CR-040 で承認の偽装に使われた経路でもある
+# 起動して base_url の応答を待って終わるスクリプトと、止めるノードを導入先が書けるなら、
+# この節をその command ノード（needs_optional = ["implement"]）に置き換えてよい（プランナも計画から外せる。理由を残す）
+#
+# **implement を `needs_optional` で待つ**（CR-086）。`needs` だと implement が FAILED（収束しない）のとき
+# kloop がこのノードと下流を SKIPPED にし、評価もレビューも走らなかった（implement の注記が効いていなかった）。
+# 任意依存は implement が終われば走る。完了しなかったことは承認の要求（`missing_upstream`）に事実として載る
+[[nodes]]
+id = "gate-serve"
+kind = "approval"
+needs_optional = ["implement"]
+message = """開発サーバを起動してから承認してください（例: npm --prefix frontend run dev）。
+起動していない場合、実ブラウザでの評価は実行されず「見ていない」として報告されます。
+spec-ids.toml の [ui_runtime].base_url が起動先と一致していることも確認してください。"""
+
+# --- 3. 実ブラウザでの評価（到達性・未捕捉例外・WCAG 違反）
+[[nodes]]
+id = "verify-runtime"
+kind = "verify"
+needs = ["gate-serve"]
+command = ["bash", "scripts/verify.sh", "ui"]
+on_fail = "continue"      # 違反があってもレビューは行う（review が needs_optional で待つ。人が全体を見て判断する）
+
+# --- 4. 独立レビュー（fresh context。実装者の仮定を引き継がない）
+#
+# **verify-runtime を `needs_optional` で待つ**（CR-086）。`needs` だと違反（FAILED）のときレビューが
+# SKIPPED になっていた。完了しなかったこと（状態と理由）はレビューのプロンプトへ事実として渡る。
+# 違反が残った run は、レビューが済んでも `BLOCKED_NO_PROGRESS`（失敗したノード: verify-runtime）で終わる
+[[nodes]]
+id = "review"
+kind = "agent"
+needs_optional = ["verify-runtime"]
+prompt_file = "prompts/review-ui.md"
+outputs = ["findings-ui.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git status:*)"]
+effort = "high"

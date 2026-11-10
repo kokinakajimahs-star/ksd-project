@@ -1,0 +1,533 @@
+# kloop 設定（指示書 §8.3）— PMT（WBS・工数・進捗管理システム）
+#
+# 正: docs/pmt-design.md（設計）・docs/pmt-requirements.md（要求）
+# 分母: spec-ids.toml（設計ID 187 件）・trace.toml（要求 64 件 → 設計）
+# 回し方（設計書 13.4）:
+#   1. kloop run scaffold                                   … 構成づくり（設計IDは実装しない）
+#   2. kloop graph run graphs/implement.toml                … スコープ（種別×群）ごとの実装ループ → 独立レビュー
+# **このファイルは保護パスである。** 上限・保護パス・push の許可はここにだけ書ける。
+
+[project]
+name = "ksd-project"
+# グラフ DB（ksd-ls の Spanner Graph）上のプロジェクトの ID
+id = "ksd-project"
+require_kloop_version = ">=11.9.0"
+
+[loop]
+# --- 外側ループのハード上限（指示書 §4.5、§7.3）
+max_iterations   = 8       # 反復上限。到達で BLOCKED_MAX_ITERATIONS
+max_no_progress  = 3       # 進捗が無い連続反復数の上限。到達で BLOCKED_NO_PROGRESS
+# min_iterations = 1       # 事前検証が PASS でもエージェントを呼ぶ回数（既定 0）。
+#                          # **検証器が緑のまま行う作業**（レビュー指摘の修正など）に要る。
+#                          # その反復では進捗を判定できない（指示書 §4.1）
+# 費用の承認は取らない（ksd-ls Q-LS-34）。上限は暴走の止め。グラフの loop ノードでは入れ子ループ 1 本ごとに効く
+max_budget_usd   = 30.0    # run（loop ノードなら 1 スコープ）の推定コスト上限。到達で BUDGET_EXCEEDED
+max_wall_seconds = 10800   # run（同上）の経過時間上限。到達で TIMEOUT
+
+# --- 内側ループ（claude プロセス 1 回）の上限
+max_turns = 80             # 1 反復で API・画面を数件ずつ実装し試験まで流すため、雛形の 12 では足りない
+max_budget_usd_per_call = 10.0
+
+# --- 権限（指示書 §10.1）。push / PR / デプロイは既定で禁止する
+permission_mode  = "acceptEdits"
+allowed_tools    = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"]
+disallowed_tools = [
+  "Bash(git push:*)",
+  "Bash(gh pr create:*)",
+  "Bash(gh release:*)",
+  "Bash(terraform apply:*)",
+  "Bash(terraform destroy:*)",
+  "Bash(kubectl delete:*)",
+  "Bash(git checkout main:*)",
+  "Bash(git switch main:*)",
+  "Bash(git merge:*)",
+  "Bash(git reset --hard:*)",
+]
+
+# model / effort はセッション既定に従う場合は空のままにする
+model  = ""
+effort = ""
+
+feedback_max_chars = 8000
+attempts_history   = 5
+# fingerprint の対象（進捗の判定に使う）
+watch_paths = ["backend", "frontend", "scripts"]
+
+[verify]
+# 検証器（指示書 §5）。exit code と verify-result.json が合否を決める
+command          = ["bash", "scripts/verify.sh"]
+timeout_seconds  = 1800
+result_json      = ".kloop/verify-result.json"
+# 「小さいほど良い」指標を優先順に並べる（指示書 §4.3）
+# 検証器が最初の失敗で止めるなら（例：ksd-ls の子 `ksdls test plan --run --fail-fast --result-json …` を [[checks]] に置く）、
+# `failures` は 1 に張り付き、直しても進捗が出ない（max_no_progress で BLOCKED_NO_PROGRESS）。止めたために流さなかった試験も
+# 数える `unverified`（選んだ数 − 通った数）を後ろに足す（辞書式：`failures` が同じなら `unverified` で比べる。CR-117）：
+#   progress_metrics = ["failures", "unverified"]
+# `unverified` を出さない検証器では ["failures"] と同じに動く。止めた反復（`stopped_tests > 0`）の feedback.md には
+# 「最初の失敗で止めた」の 1 行が載る。前回の落ちを先に流す順（`--order risk`）と併せると、落ちた群が先頭へ移って後ろの群を
+# 流さなくなるので、直しても `unverified` が上がることがある（進捗なしと数える）。止めるのを既定にするかは測ってから決める
+progress_metrics = ["failures"]
+# 検証器の弱体化を構造的に検出する（指示書 §5.3）。分母・写像・正の文書・開発環境の準備を保護する
+protected_paths  = [
+  "scripts/verify.sh",
+  "scripts/verify-baseline.sh",
+  "scripts/setup-dev.sh",
+  "scripts/extract_spec_ids.py",
+  "scripts/generate_task_prompts.py",
+  "spec-ids.toml",
+  "trace.toml",
+  "docs/pmt-requirements.md",
+  "docs/pmt-design.md",
+  "graphs/group-needs.toml",
+  "graphs/implement.toml",
+  "ksdls.toml",
+  ".githooks",
+]
+# グラフの verify ノードが env で名乗れる名前（CR-020）。既定は空＝何も渡せない。
+# **ここはグラフ定義の外（保護パス）である。** BASH_ENV / PATH / LD_PRELOAD を足すと、
+# 上の command を 1 行も実行しないまま PASS を作れる（kloop doctor が WARN を出す）
+allowed_env      = []
+# 検証の結果の再利用（K-1。指示書 §5.2・CR-097）は既定で効く（グラフの loop ノードの事前検証が、同じ実行の中の
+# 同じ入力の検証を写す）。検査ごとに外すのは spec-ids.toml の [[checks]] の reuse = false。全体で切るなら次の行を有効にする
+# reuse           = false
+
+[backend]
+kind   = "claude"      # claude | mock
+binary = "claude"
+# json | stream-json（CR-034。既定 json）。stream-json にすると --verbose が付き、
+# ノード／反復のディレクトリへ live-stream.jsonl（生）と live-stream.log（整形）を
+# **逐次**書く。終わるまで中間出力が一切見えない問題への対応。kloop 1.20.0 以降
+output_format = "json"
+# mock で配線確認する場合はここにスクリプトを指定する
+mock_command = []
+# 子プロセスへ素通しする環境変数を**足す**（既定 PATH/HOME/LANG/... は消えない）
+# 置き換えたい場合だけ env_passthrough を使う。PATH を落とすと検証器が起動できず、
+# それは「検証器が FAIL（失敗 0 件）」に見える（CR-019）。kloop 1.6.0 以降
+# npm の置き場（~/.npm はサンドボックスの中で書けない。scripts/setup-dev.sh と同じ既定）
+env_passthrough_extra = ["npm_config_cache"]
+
+[state]
+dir = ".kloop"
+
+# run をまたいで引き継ぐ小さな状態の置き場（指示書 §2.3）。
+# **版管理下に置く**（.gitignore に入れない）。dir（.kloop）は無視対象であり、
+# そこへ置くと別クローン・CI・削除で失われる。失うと基準が既定へ落ちる。
+# kloop は場所を用意して KLOOP_SHARED_DIR として渡すだけで、中身には触れない。
+shared_dir = "kloop-state"
+
+# run の記録をグラフ DB（ksd-ls の Spanner Graph の名前空間 ksdls-loop）へも書くか（CR-075）。
+#   "off"（既定）   : 何も読み込まず、何も書かない（ファイルの記録だけ）
+#   "ksdls-loop"     : ファイルの記録（正本）に加えて、ノード・反復の終わりごとにグラフへも書く。
+#                      ksd-ls の環境（ksdls を import できる・接続先がある）で動かす
+# 宣言したときの止まり方：
+#   - run の始めに繋がらない・確かめが通らない・ksdls を読めない → ENVIRONMENT_ERROR（7）。run を始めない
+#   - 途中で届かなくなった → 走っているノードは終わらせ、次のノード（kloop run では次の反復）を始めずに
+#     ENVIRONMENT_ERROR。run.json に理由・ジャーナルの残り・再開の手順を残す。直してから kloop resume
+#     （はじめにジャーナルの送り残しを送り直す）
+# 接続先と資格は kloop の実行器だけが読む。env_passthrough(_extra)・allowed_env に書くと始めに止まる（CR-070）。
+# 2026-11-10：ksd-ls のグラフ層へ書く。**接続先と資格の読める端末（サンドボックスの外）で回すこと**
+graph = "ksdls-loop"
+
+# 再開の状態の正本（CR-081・CR-101）。graph = "ksdls-loop" のとき、書かなければ "graph"（kloop 10 から）。
+#   "graph" : 再開の状態をグラフの状態の表から読む。checkpoint.json はファイルにだけあるものに縮む
+#   "file"  : 9.x までの振る舞い（正本はファイル。グラフへは写しを書く）。戻すときはこれを書く
+# graph の宣言が無ければ "file" で、"graph" は書けない。始めた run は run.json の graph_store.source のまま再開する。
+# source = "file"
+
+# graph = "ksdls-loop" のとき、kloop graph はノードごとにグラフの上の claim を取ってから始める（CR-079）。
+# 書かなければ既定の値。graph = "off" で書くと設定の誤り。
+# [state.claims]
+# lease_seconds = 60       # claim の期限（秒。1〜3600）。1/3 ごとに延ばす。止まった実行器の claim は期限の後に取り直せる
+# window_threshold = 0.8   # 利用の窓（five_hour・seven_day）の利用率がこれを超えたら新しい claim を控える（0 より大きく 1 以下）
+# window_parallel = 1      # 控えている間に同時に走らせるノードの数（1〜16）
+
+[report]
+inline_max_chars = 2000
+
+# --------------------------------------------------------------------------
+# `command` ノードが起動してよいコマンド（指示書 §6.2、CR-014）
+# --------------------------------------------------------------------------
+# **`command` ノードは claude を介さない。** したがって上の disallowed_tools も、
+# .claude/settings.json の permissions.deny も、ガード Hook も**いずれも効かない**。
+# ここを宣言しない限り、グラフに 3 行書くだけで無検査のまま不可逆操作が走る。
+#
+# 宣言すると、前方一致しない argv を持つ `command` ノードは
+# **読み込み時に** ENVIRONMENT_ERROR で停止する（実行前に止まる）。
+# 既存のグラフを壊さないため既定は「宣言しない」にしてある。**不可逆操作を
+# `command` ノードで行うなら、コメントを外して許可一覧を宣言すること。**
+#
+[graph.command_policy]
+allow = [
+  ["bash", "scripts/verify.sh"],
+  ["bash", "scripts/verify-baseline.sh"],   # ksdx plan graph の verify-before（ksd-x が供給するラッパ）
+  ["bash", "scripts/kloop-commit.sh"],      # graphs/review-pipeline.toml の commit ノード
+]
+deny_substrings = ["-auto-approve", "destroy"]
+#
+# 注意:
+#   - 宣言している間、`bash -c "..."` は使えない（argv からは中身を判定できないため）。
+#     スクリプトへ切り出し、そのスクリプトを allow へ足すこと
+#   - **許可したスクリプトの中身は見ない。** allow へ足すことは、そのスクリプトを
+#     信頼すると決めることである
+#
+# --------------------------------------------------------------------------
+# グラフのノードが `env` で名乗れる名前（指示書 §6.2、CR-024）
+# --------------------------------------------------------------------------
+# **既定は空＝何も渡せない。** `[[nodes]].env` に書いた名前は、危険かどうかに
+# 関わらずここに無ければ**読み込み時に停止する**（`[graph.command_policy]` の
+# 宣言の有無とは無関係である）。
+#
+#   [graph]
+#   allowed_env = ["KSD_SCOPE", "KSD_TEST_DSN"]
+#
+# **PATH を差し替えられると、許可した argv のまま別のバイナリが起動する**
+# （実測: 許可した `bash scripts/emit.sh` が fakebin/bash を起動し、本物の
+# スクリプトは 1 行も走らないままノードが SUCCEEDED になった）。
+# PATH / BASH_ENV / LD_PRELOAD / PYTHONPATH / NODE_OPTIONS … を許可すること自体は
+# 禁じないが、`kloop doctor` と `--dry-run` が名指しで警告する。
+#
+# `verify` ノードは別の一覧を見る（`[verify].allowed_env`。既定は同じく空）。
+#
+# **この宣言は argv 経由の環境変数を塞がない。**
+# `command = ["env", "PATH=…", "bash", "x.sh"]` は `env` を 1 文字も書かずに
+# 同じことをする。塞ぐには上の `[graph.command_policy]` を宣言すること。
+
+# --------------------------------------------------------------------------
+# クラウドを変える口・push の口を閉じ込めたラッパ（CR-124）
+# --------------------------------------------------------------------------
+# argv の字面の検査（クラウドの書込み・`git push`）は**スクリプトの中身を見ない**。
+# `terraform apply`・`firebase deploy`・実 DB の削除・`git push` をスクリプトに閉じ込めて
+# いるなら、そのスクリプトを根からの相対のパスで宣言する（glob は無し。絶対パス・`..` は誤り）。
+# 宣言したスクリプトを起動する `command` / `verify` ノード（`bash scripts/apply.sh`・
+# `./scripts/apply.sh`・`env X=1 scripts/apply.sh`・`sh -c "scripts/apply.sh …"` も同じ）は:
+#   - writes_cloud … `effects = ["writes-cloud:<環境>"]` と上流の承認ゲートが要る（無ければ読み込みで止まる）
+#   - push         … 読み込みで止まる（`kind = "push"` のノードを使う。11 規則を通らない経路だから）
+# 宣言しなければ何も変わらない。
+#
+# [graph.wrappers]
+# writes_cloud = ["scripts/apply.sh"]
+# push         = ["scripts/push.sh"]
+#
+# クラウドを変えるノードの前に必ず通したい検査（保存した plan の検査など）があるなら、
+# 表の配列で宣言する。`before_effects`（glob。既定 ["writes-cloud:*"]）に当たる effects を
+# 持つノードは、必須の上流（needs を辿る。needs_optional・record_only の検証は数えない）に、
+# argv が `script` を起動する `command` / `verify` ノードが無ければ読み込みで止まる。
+# 項が複数あれば全部を満たす。計画の版（planner・外の書き手）がその検査を外したら
+# POLICY_DENIED で走らせない。
+#
+# [[graph.required_upstream]]
+# script = "scripts/plan-check.sh"
+# before_effects = ["writes-cloud:infra"]
+#
+# 注意:
+#   - **guard（エージェントの Bash）はこの宣言を読まない。** エージェントにラッパを
+#     打たせないなら、.claude/guard-rules.toml の `[bash].deny` に同じパスの行を足すこと
+#     （`[bash].deny` は組み込みの表を置き換えるので、雛形の行を残したまま足す）
+#   - `make`・`npm run`・`find -exec` の先と、`{{item}}` の置換後に現れる語は見えない
+#   - どちらも `config_hash` に入らない（読み込みの検査だけを変える。足しても前の run を再開できる）
+
+# --------------------------------------------------------------------------
+# 計画の見直し（ksd-ls 統合設計書 §11.7、CR-078・CR-089）
+# --------------------------------------------------------------------------
+# **既定は `review = "deterministic"`**（kloop 8.0.0 から。7.x までは "off"）。
+# `kloop graph` の run の始めとノードの終わりごとに、見積り（同じ名前のグラフの
+# 過去の run の中央値）・刈り込み（上流の失敗で飛ぶノード）・優先度（残りの
+# 最長経路）を決定論で直し、同時に始められるノードを優先度の高い順に始める。
+# 依存・effects・スロット・排他は変えない。記録は run のディレクトリの `plan.jsonl`。
+# 7.x の振る舞い（ノードの実行の ID の順に始める・見直しを記録しない）に戻すには:
+#
+#   [graph]
+#   review = "off"
+
+# --------------------------------------------------------------------------
+# push ノードの push ポリシー（指示書 §6.8、CR-038）
+# --------------------------------------------------------------------------
+# **`git push` は不可逆・外部公開操作である。** 実行するのは `kind = "push"` の
+# ノードだけで、**決定論的な 11 規則すべてが `pass`** のときにだけ走る。
+# エージェント（`agent` / `loop` ノード）は上の disallowed_tools により今も push しない。
+#
+# **push ノードの上流に承認ゲートは要らない**（CR-073。ksd-ls の CR-LS-KL-008・Q-LS-34）。
+# 通すのは 11 規則と下の `allowed_branches` である。人の承認のゲートは
+# **クラウドの資源の構成変更**（`effects = ["writes-cloud:<環境>"]`）にだけ置く。
+# 承認ゲートを置くこと自体は今も禁じない（置けば実行時にその承認も要る）。
+#
+# **`allowed_branches` の既定は空＝全閉である。** 宣言しない限り、push ノードを
+# 持つグラフは規則 `branch_is_base` で止まる（`POLICY_DENIED`）。
+# **閾値も許可もここ（保護パス）にだけ書ける。** グラフ定義から書けるのは
+# `branch` / `remote` を名乗ることだけである。
+#
+# [push]
+# remote           = "origin"   # リモート名。**URL は書けない**（追跡参照を見るため）
+# allowed_remotes  = []         # remote 以外に許すリモート名（既定は空＝remote だけ）
+# allowed_branches = ["main"]   # push してよい base ブランチ
+# require_verify_result = true  # 検証結果（§5.2）を要求する。false にもできる
+# log_dir = "kloop-state/push-policy-log"   # **verify-result.json とは別台帳**
+# max_changed_files = 300
+# max_blob_bytes    = 5242880
+# # 既定へ**足す**（置き換えない）
+# forbidden_path_patterns_extra = []
+# sensitive_path_patterns_extra = []
+# secret_content_patterns_extra = []        # "名前=正規表現"
+#
+# 判定だけを見る（**push しない**）: kloop push-policy --branch main
+#
+# 注意:
+#   - `fail` は `POLICY_DENIED`(6)、`undetermined` は `NEEDS_HUMAN`(5)。
+#     **「確認できなかった」を「問題なし」として扱わない**
+#   - **`command` / `verify` ノードの argv に `git push` は書けない**（読み込み時に停止する）。
+#     11 規則を通らない経路だからである
+#   - **`command` / `verify` ノードの argv がクラウドの資源を変えるなら**
+#     （gcloud の create / delete / deploy …・terraform apply・kubectl apply・gh api -X POST …）、
+#     `effects = ["writes-cloud:<環境>"]` の宣言と上流の承認ゲートが要る（読み込み時に停止する。CR-073）
+#   - **承認ゲート自身の偽装耐性は未修正である**（指示書 §6.8 の「保証しないもの」）。
+#     承認ゲートの上流に**ファイルを書けるノードを置かない**こと
+#   - 規則は**差分の妥当性を見ない**。「出してよい形か」だけを測る
+#   - ssh のリモートを使うなら `[backend].env_passthrough_extra` へ
+#     `SSH_AUTH_SOCK` を足すこと（素通し一覧は allowlist であり既定に無い）
+
+# --------------------------------------------------------------------------
+# タスク定義（指示書 §8.3）。`kloop run <キー>` で実行する
+# --------------------------------------------------------------------------
+[tasks.fix-tests]
+description = "失敗しているテストと型エラーを収束させる"
+prompt_file = "prompts/fix-tests.md"
+max_iterations = 8
+
+# 構成づくり（spec-ids.toml の [[extra_tasks]] scaffold。設計書 13.4 の 1）
+[tasks.scaffold]
+description = "設計書 2.1・2.2 の構成を作り、試験・型検査・DB の移行が走る状態にする（設計IDは実装しない）"
+prompt_file = "prompts/scaffold.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "scaffold"] }
+
+# --- ここから下は `ksdx plan tasks -C . --scope-by group --group-needs graphs/group-needs.toml` の生成物を人が貼ったもの
+# （手で直さない。生成し直して貼り替える）
+[tasks.implement-api-chg]
+description = "api:CHG の未実装 10 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:CHG"] }
+
+[tasks.implement-api-cmn]
+description = "api:CMN の未実装 8 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:CMN"] }
+
+[tasks.implement-api-eff]
+description = "api:EFF の未実装 7 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:EFF"] }
+
+[tasks.implement-api-est]
+description = "api:EST の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:EST"] }
+
+[tasks.implement-api-int]
+description = "api:INT の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:INT"] }
+
+[tasks.implement-api-prg]
+description = "api:PRG の未実装 9 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:PRG"] }
+
+[tasks.implement-api-prj]
+description = "api:PRJ の未実装 11 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:PRJ"] }
+
+[tasks.implement-api-rpt]
+description = "api:RPT の未実装 4 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:RPT"] }
+
+[tasks.implement-api-sch]
+description = "api:SCH の未実装 13 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:SCH"] }
+
+[tasks.implement-api-wbs]
+description = "api:WBS の未実装 23 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "api:WBS"] }
+
+[tasks.implement-db-chg]
+description = "db:CHG の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:CHG"] }
+
+[tasks.implement-db-cmn]
+description = "db:CMN の未実装 4 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:CMN"] }
+
+[tasks.implement-db-eff]
+description = "db:EFF の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:EFF"] }
+
+[tasks.implement-db-est]
+description = "db:EST の未実装 1 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:EST"] }
+
+[tasks.implement-db-prg]
+description = "db:PRG の未実装 5 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:PRG"] }
+
+[tasks.implement-db-prj]
+description = "db:PRJ の未実装 5 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:PRJ"] }
+
+[tasks.implement-db-sch]
+description = "db:SCH の未実装 4 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:SCH"] }
+
+[tasks.implement-db-wbs]
+description = "db:WBS の未実装 10 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "db:WBS"] }
+
+[tasks.implement-rule-auth]
+description = "rule:AUTH の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:AUTH"] }
+
+[tasks.implement-rule-cal]
+description = "rule:CAL の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:CAL"] }
+
+[tasks.implement-rule-chg]
+description = "rule:CHG の未実装 6 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:CHG"] }
+
+[tasks.implement-rule-eff]
+description = "rule:EFF の未実装 5 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:EFF"] }
+
+[tasks.implement-rule-est]
+description = "rule:EST の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:EST"] }
+
+[tasks.implement-rule-int]
+description = "rule:INT の未実装 1 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:INT"] }
+
+[tasks.implement-rule-prg]
+description = "rule:PRG の未実装 7 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:PRG"] }
+
+[tasks.implement-rule-rpt]
+description = "rule:RPT の未実装 1 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:RPT"] }
+
+[tasks.implement-rule-sch]
+description = "rule:SCH の未実装 6 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:SCH"] }
+
+[tasks.implement-rule-wbs]
+description = "rule:WBS の未実装 8 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "rule:WBS"] }
+
+[tasks.implement-ui-chg]
+description = "ui:CHG の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:CHG"] }
+
+[tasks.implement-ui-cmn]
+description = "ui:CMN の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:CMN"] }
+
+[tasks.implement-ui-eff]
+description = "ui:EFF の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:EFF"] }
+
+[tasks.implement-ui-int]
+description = "ui:INT の未実装 1 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:INT"] }
+
+[tasks.implement-ui-prg]
+description = "ui:PRG の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:PRG"] }
+
+[tasks.implement-ui-prj]
+description = "ui:PRJ の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:PRJ"] }
+
+[tasks.implement-ui-rpt]
+description = "ui:RPT の未実装 2 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:RPT"] }
+
+[tasks.implement-ui-sch]
+description = "ui:SCH の未実装 3 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:SCH"] }
+
+[tasks.implement-ui-wbs]
+description = "ui:WBS の未実装 4 件を実装する"
+prompt_file = "prompts/implement.md"
+max_iterations = 6
+verify = { command = ["bash", "scripts/verify.sh", "ui:WBS"] }
+
+# 全体の収束（kloop bootstrap の生成物から取り込んだ）
+[tasks.all]
+description = "全体の収束"
+prompt_file = "prompts/all.md"
+max_iterations = 12
+max_budget_usd = 40.0
+verify = { command = ["bash", "scripts/verify.sh", "all"] }

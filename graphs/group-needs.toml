@@ -1,0 +1,50 @@
+# graphs/group-needs.toml — 実装スコープの順（ksdx plan graph --group-needs）
+#
+# 設計書 13.4 の順：テーブル → ルール → API → 画面。群をまたぐ依存（外部キー・計算の部品・認証）も宣言する。
+# ksdx は推移を足さない。ここに書いた辺だけが needs になる。
+# **待つスコープが収束しなければ（FAILED・SKIPPED）下流は SKIPPED になる。** 再開は kloop resume。
+#
+# 変えたら生成し直す：
+#   ksdx plan graph -C . --scope-by group --group-needs graphs/group-needs.toml --out graphs/implement.toml --force …
+
+[needs]
+# --- テーブル（外部キーの向き）
+"db:PRJ" = ["db:CMN"]
+"db:WBS" = ["db:PRJ"]
+"db:EST" = ["db:WBS"]
+"db:SCH" = ["db:WBS"]
+"db:PRG" = ["db:SCH"]
+"db:EFF" = ["db:SCH"]
+"db:CHG" = ["db:WBS"]
+
+# --- ルール（ドメインは純粋。テーブルを待たない。計算の部品の向き）
+"rule:SCH" = ["rule:CAL"]
+"rule:PRG" = ["rule:SCH"]
+"rule:WBS" = ["rule:EST"]
+"rule:EFF" = ["rule:EST"]
+"rule:CHG" = ["rule:SCH", "rule:WBS"]
+"rule:INT" = ["rule:WBS"]
+"rule:RPT" = ["rule:PRG"]
+
+# --- API（その群のテーブルとルール、認証・プロジェクトの土台）
+"api:CMN" = ["db:CMN", "rule:AUTH"]
+"api:PRJ" = ["api:CMN", "db:PRJ", "rule:CAL"]
+"api:WBS" = ["api:PRJ", "db:WBS", "rule:WBS"]
+"api:EST" = ["api:WBS", "db:EST", "rule:EST"]
+"api:SCH" = ["api:WBS", "db:SCH", "rule:SCH"]
+"api:PRG" = ["api:SCH", "db:PRG", "rule:PRG"]
+"api:EFF" = ["api:SCH", "db:EFF", "rule:EFF"]
+"api:CHG" = ["api:SCH", "db:CHG", "rule:CHG"]
+"api:RPT" = ["api:PRG", "rule:RPT"]
+"api:INT" = ["api:EFF", "rule:INT"]
+
+# --- 画面（その群の API と、画面の土台）
+"ui:CMN" = ["api:CMN", "api:WBS"]
+"ui:PRJ" = ["ui:CMN", "api:PRJ"]
+"ui:WBS" = ["ui:PRJ", "api:WBS", "api:EST"]
+"ui:SCH" = ["ui:PRJ", "api:SCH", "api:PRG"]
+"ui:PRG" = ["ui:SCH"]
+"ui:EFF" = ["ui:PRJ", "api:EFF"]
+"ui:CHG" = ["ui:PRJ", "api:CHG"]
+"ui:RPT" = ["ui:PRG", "api:RPT"]
+"ui:INT" = ["ui:PRJ", "api:INT"]

@@ -1,0 +1,181 @@
+# spec-ids.toml — PMT（WBS・工数・進捗管理システム）の設計ID ↔ 実装の対応
+#
+# 設計書（docs/pmt-design.md）の 4.1・5.1・6.2・7.1 の表の 1 行が 1 件である。
+#   db 35 / rule 40 / api 90 / ui 22 = 187 件（2026-11-10 に kloop bootstrap --survey と手の数えで検算）
+#
+# このファイルは kloop の検証器（scripts/verify.sh → kloop verify）の設定であり、
+# ksdx（trace.toml の from_spec_ids）が設計層の抽出に再利用する。**設計層の抽出式はここだけに置く。**
+#
+# **保護パスである**（kloop.toml の [verify].protected_paths）。変更・baseline の引き上げは人の判断。
+# **baseline を下げない。**
+#
+# 何をもって「実装済み」と数えるか（設計書 2.3・13.3）:
+#   db   : models に `__tablename__ = "<テーブル名>"` がある（regex。ID ではなく実体を見る）
+#   rule : domain に行頭の `# RULE-…` の宣言があり、かつ試験に同じ ID がある（declaration_and_test）
+#   api  : api に docstring の先頭 `"""API-… …"""` の宣言がある（declaration）
+#   ui   : frontend/src に `data-screen-id="UI-…"` の宣言があり、7.1 のルートが書かれている（declaration + route_key）
+# **どれも「その ID を名乗る実体がある」しか測らない。** 実体が設計どおりかは独立レビューと受入試験で見る（設計書 13.6）。
+
+[spec]
+document = "docs/pmt-design.md"
+# 突合しない章（記述だけ）。書かなかった章は「未分類」として notes に出る
+chapters_not_verified = [
+  "0",   # 本書について（ID 体系の説明）
+  "1",   # 方式設計（記述）
+  "2",   # 実装の置き場と規約（記述）
+  "3",   # ドメインモデル（4.1 の ER 図。ID は 4.1 で数える）
+  "8",   # 非機能設計（ID を振っていない。性能の試験は 12 章の方針。検証器は見ていない）
+  "9",   # 権限設計（RULE-AUTH-001 の中身。表の全組合せは検証器が見ていない）
+  "10",  # 構成管理（記述）
+  "11",  # 要求→設計 対応表（ksdx trace verify が見る。kloop は見ない）
+  "12",  # 試験方針（記述）
+  "13",  # 実装ループの規約（記述）
+  "14",  # 判断の記録（記述）
+  "15",  # R2・R3 の拡張点（R1 の対象外）
+]
+ui_pptx = ""
+loop_chapter = "13"
+
+[project]
+name = "ksd-project"
+watch_paths = ["backend", "frontend", "scripts", "docs"]
+
+# ===========================================================================
+# ID 種別
+# ===========================================================================
+
+[[kinds]]
+key = "db"
+label = "テーブル"
+section = '^## 4\.1 '
+row = '^\|\s*(?P<id>DB-[A-Z]{3}-\d{3})\s*\|\s*`(?P<table>[a-z_]+)`\s*\|\s*(?P<name>[^|]+?)\s*\|'
+group_from = '^DB-(?P<group>[A-Z]{3})-'
+target_dirs = ["backend/app/models"]
+evidence = "regex"
+evidence_regex = '__tablename__\s*=\s*["\x27]{table}["\x27]'
+baseline = 35
+chapter = "4.1"
+hint = 'backend/app/models/ に SQLAlchemy のモデルを作り __tablename__ = "{table}" とすること（列は設計書 4.1 の行どおり。クラスの直前の行に # {id} を書く）'
+
+[[kinds]]
+key = "rule"
+label = "計算・判定ルール"
+section = '^## 5\.1 '
+row = '^\|\s*(?P<id>RULE-[A-Z]{3,4}-\d{3})\s*\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<criteria>[^|]+?)\s*\|\s*`(?P<module>[a-z_]+\.py)`\s*\|'
+group_from = '^RULE-(?P<group>[A-Z]+)-'
+target_dirs = ["backend/app/domain"]
+test_dirs = ["backend/tests"]
+evidence = "declaration_and_test"
+baseline = 40
+chapter = "5.1"
+hint = 'backend/app/domain/{module} に関数かクラスを作り、その直前の行に「# {id} {name}」と書くこと（式は設計書 5 章の該当節どおり）。backend/tests/domain/ に {id} を docstring に書いた試験を置くこと'
+
+[[kinds]]
+key = "api"
+label = "API"
+section = '^## 6\.2 '
+row = '^\|\s*(?P<id>API-[A-Z]{3}-\d{3})\s*\|(?P<sigcell>[^|]*)\|\s*(?P<name>[^|]*?)\s*\|'
+signature = '`(?P<sig>[A-Z][A-Z/]*\s+/[^`]*)`'
+group_from = '^API-(?P<group>[A-Z]{3})-'
+target_dirs = ["backend/app/api"]
+evidence = "declaration"
+baseline = 90
+chapter = "6.2"
+hint = 'backend/app/api/ にルート関数を実装し、docstring の先頭を """{id} {name}""" とすること（メソッドとパスは設計書 6.2 の行どおり。backend/tests/api/ に試験を置く）'
+
+[[kinds]]
+key = "ui"
+label = "画面"
+section = '^## 7\.1 '
+row = '^\|\s*(?P<id>UI-[A-Z]{3}-\d{3})\s*\|\s*(?P<name>[^|]+?)\s*\|\s*`(?P<route>[^`]+)`\s*\|'
+group_from = '^UI-(?P<group>[A-Z]{3})-'
+target_dirs = ["frontend/src"]
+test_globs = ["frontend/src/**/*.test.ts", "frontend/src/**/*.test.tsx"]
+evidence = "declaration"
+route_key = "route"
+baseline = 22
+chapter = "7.1"
+hint = 'frontend/src/pages/ に画面の部品を作り、最上位の要素に data-screen-id="{id}" を付け、frontend/src/App.tsx にルート `{route}` を定義すること'
+
+# ===========================================================================
+# ID 体系に紐づかないタスク
+# ===========================================================================
+
+[[extra_tasks]]
+key = "scaffold"
+scope = "scaffold"
+description = "設計書 2.1・2.2 の構成を作り、サーバと画面の試験・型検査・DB の移行が走る状態にする（設計IDは実装しない）"
+# 空にしない（空だと検証器が何も見ずに PASS する）
+requires = [
+  "scripts/setup-dev.sh",
+  "backend/pyproject.toml",
+  "backend/requirements.lock",
+  "backend/alembic.ini",
+  "backend/alembic/env.py",
+  "backend/app/main.py",
+  "backend/app/config.py",
+  "backend/app/infra/db.py",
+  "backend/app/api",
+  "backend/app/domain",
+  "backend/app/models",
+  "backend/app/services",
+  "backend/app/schemas",
+  "backend/tests/conftest.py",
+  "frontend/package.json",
+  "frontend/package-lock.json",
+  "frontend/tsconfig.json",
+  "frontend/vite.config.ts",
+  "frontend/src/main.tsx",
+  "frontend/src/App.tsx",
+]
+
+# ===========================================================================
+# 追加の検証（試験・型検査・DB の移行・層間写像）
+# ===========================================================================
+# 依存は scripts/setup-dev.sh が .venv と frontend/node_modules へ入れる（ksdls.toml の [gate] prepare も同じ）。
+# requires が無ければ「実行しなかった」になり、required（既定 true）なので FAIL に数える。
+# **実行していない検証は合格の根拠にならない。**
+
+[[checks]]
+name = "backend-tests"
+scopes = ["all", "scaffold", "db", "rule", "api"]
+requires = [".venv/bin/python", "backend/tests"]
+probe = [".venv/bin/python", "-m", "pytest", "--version"]
+command = [".venv/bin/python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "backend/tests"]
+failures = '^(?:FAILED|ERROR)\s+(\S+)'
+skip_note = "サーバの試験（ルール・API）を実行していない"
+
+[[checks]]
+name = "db-migrations"
+scopes = ["all", "scaffold", "db"]
+requires = [".venv/bin/python", "backend/alembic.ini"]
+probe = [".venv/bin/python", "-m", "alembic", "--version"]
+command = [".venv/bin/python", "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"]
+env = { PMT_DATABASE_URL = "sqlite:///{check_tmp}/verify.db" }
+skip_note = "空の DB へ移行（alembic upgrade head）が通ることを確かめていない"
+# 見ていないもの: PostgreSQL での移行（SQLite だけで流す）。モデルと移行の差（autogenerate の差分）
+
+[[checks]]
+name = "frontend-typecheck"
+scopes = ["all", "scaffold", "ui"]
+requires = ["frontend/package.json", "frontend/node_modules/.bin/tsc"]
+probe = ["npm", "--version"]
+command = ["npm", "--prefix", "frontend", "run", "--silent", "typecheck"]
+skip_note = "画面が型検査を通ることを確かめていない"
+
+[[checks]]
+name = "frontend-test"
+scopes = ["all", "scaffold", "ui"]
+requires = ["frontend/package.json", "frontend/node_modules/.bin/vitest"]
+probe = ["npm", "--version"]
+command = ["npm", "--prefix", "frontend", "run", "--silent", "test"]
+skip_note = "画面の挙動を機械的に確かめていない（API へ送る値・認証状態による分岐・ガントの座標）"
+
+# 要求→設計の写像（ksdx。docs/adoption-guide.md §5）。どのループでも走らせる（"*"）
+[[checks]]
+name = "trace"
+scopes = ["*"]
+requires = ["trace.toml"]
+command = ["ksdx", "trace", "verify"]
+result_json = ".ksdx/verify-result.json"
+skip_note = "要求→設計の写像（GAP・ORPHAN・分母の減少）を確かめていない"

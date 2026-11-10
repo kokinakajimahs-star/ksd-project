@@ -1,0 +1,12 @@
+# ksdls.toml — ksd-ls の関門（`ksdls test gate --verify --root <リポジトリ>`。docs/branch-rules.md §8.1）
+#
+# 関門は測るコミットを <リポジトリ>.wt/gate-<sha12> に取り出し、[gate] prepare を流してから `kloop verify all` を流す。
+# 取り出した木には .venv も frontend/node_modules も無い（無視されたファイル）ので、準備で作る。
+# 準備はネットワーク（PyPI・npm）を使う。
+
+[gate]
+prepare = [
+  ["bash", "scripts/setup-dev.sh"],
+]
+# 準備（依存の取得）と kloop verify all（試験・型検査・DB の移行・写像）を合わせた上限
+timeout_seconds = 3600

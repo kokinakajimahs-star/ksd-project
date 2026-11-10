@@ -1,0 +1,1210 @@
+# **このファイルは `ksdx plan graph` が生成した。手で編集しない。**
+#
+# 手で直すと次の生成で消える。変えたいのは、たいてい生成の入力側である。
+#   - 分割の単位        spec-ids.toml の [[kinds]] と group_from
+#   - どの分母を回すか  trace.toml / spec-ids.toml
+#
+# **ksd-x はこれを実行しない**（指示書 §7.1）。実行するのは kloop である。
+
+#
+#   **タスク定義が別に要る。**`ksdx plan tasks` の出力を kloop.toml へ貼ること（生成した task を参照している）
+
+# --- 書く範囲（write_set。ksd-ls の作業 L8-X-003・CR-I-057）
+# 実装の loop ノードに、スコープが書く見込みのファイルを宣言した（パスはリポジトリの根（git rev-parse --show-toplevel）からの相対）。
+# 出どころ：AG 0・証拠の grep 0・target_dirs の宣言 37・分からない 0（分からないスコープは ["**"]＝木の全体。ほかのすべてと重なる）
+#   impl-api-chg    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 10 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-cmn    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 8 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-eff    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 7 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-est    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 3 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-int    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-prg    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 9 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-prj    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 11 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-rpt    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 4 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-sch    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 13 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-api-wbs    9 件  target_dirs の宣言：ID の文字 を backend/app/api で探し、ID 23 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/api）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-chg     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-cmn     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-eff     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-est     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-prg     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-prj     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-sch     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-db-wbs     9 件  target_dirs の宣言：evidence_regex が ID のほかの名前（table）を埋める形なので探していない。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/models）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-auth  9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-cal   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-chg   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 6 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-eff   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 5 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-est   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-int   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 1 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-prg   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 7 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-rpt   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 1 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-sch   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 6 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-rule-wbs   9 件  target_dirs の宣言：ID の文字 を backend/app/domain（試験は ID の文字を backend/tests） で探し、ID 8 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（backend/app/domain, backend/tests）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-chg     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 3 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-cmn     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 3 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-eff     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-int     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 1 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-prg     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-prj     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-rpt     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 2 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-sch     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 3 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+#   impl-ui-wbs     9 件  target_dirs の宣言：ID の文字 を frontend/src で探し、ID 4 件のうち 0 件がファイル 0 件を引いた。ID を引くファイルが無いので、種別の宣言のディレクトリ（frontend/src）を書く範囲にした。--write-set-add の 8 件を足した
+# 重なる組（kloop の write_sets_overlap。実装の loop どうし）：666 / 666（verify-before・変異検査は宣言が無く木の全体だが、needs で前後が決まっている）
+#   impl-api-chg – impl-api-cmn（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-eff（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-est（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-int（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-prg（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-chg – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-chg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-api-eff（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-est（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-int（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-prg（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-cmn – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-cmn – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-api-est（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-int（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-prg（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-eff – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-eff – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-api-int（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-api-prg（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-est – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-est – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-api-prg（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-int – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-int – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-int – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-int – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-int – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-int – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-api-prj（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prg – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prg – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prg – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prg – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-api-rpt（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prj – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prj – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-prj – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-prj – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-api-sch（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-rpt – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-rpt – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-rpt – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-api-wbs（例 backend/alembic、backend/app/api、backend/app/main.py）
+#   impl-api-sch – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-sch – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-api-wbs – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-db-cmn（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-chg – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-chg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-db-eff（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-cmn – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-cmn – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-db-est（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-eff – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-eff – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-eff – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-eff – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-eff – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-eff – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-db-prg（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-est – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-est – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-est – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-est – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-est – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-db-prj（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-prg – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-prg – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-prg – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-db-sch（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-prj – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-prj – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-prj – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-db-wbs（例 backend/alembic、backend/app/main.py、backend/app/models）
+#   impl-db-sch – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-sch – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-auth（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-cal（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-est（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-rule-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-db-wbs – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-rule-cal（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-chg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-eff（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-est（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-int（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-auth – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-auth – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-rule-chg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-eff（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-est（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-int（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-cal – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-cal – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-rule-eff（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-est（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-int（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-chg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-chg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-rule-est（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-rule-int（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-eff – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-eff – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-rule-int（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-est – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-est – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-est – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-est – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-est – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-est – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-rule-prg（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-int – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-int – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-int – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-int – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-int – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-rule-rpt（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-prg – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-prg – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-prg – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-prg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-rule-sch（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-rpt – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-rpt – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-rpt – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-rule-wbs（例 backend/alembic、backend/app/domain、backend/app/main.py）
+#   impl-rule-sch – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-sch – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-chg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-rule-wbs – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-cmn（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-chg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-eff（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-cmn – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-int（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-eff – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-int – impl-ui-prg（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-int – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-int – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-int – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-int – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prg – impl-ui-prj（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prg – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prg – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prg – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prj – impl-ui-rpt（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prj – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-prj – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-rpt – impl-ui-sch（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-rpt – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+#   impl-ui-sch – impl-ui-wbs（例 backend/alembic、backend/app/main.py、backend/app/schemas）
+# ID を引くファイルが無いスコープは、種別の target_dirs・test_dirs の宣言のディレクトリを書く範囲にした（L10-X-002・CR-I-062。宣言が無ければ ["**"]）
+# --write-set-add で足した：backend/alembic, backend/app/main.py, backend/app/schemas, backend/app/services, backend/tests, docs/decisions/ASSUMPTIONS.md, docs/instruction-change-requests.md, docs/open-questions.md（["**"] でないすべてのスコープに）
+# ksdx は宣言を書くだけで、重なる組を計画で直列にしない（needs を足さない）。排他は kloop が実行のときに取る（L8-KL-006）。
+# K-7（L8-KL-006）の前の kloop では、宣言があっても書き手は今と同じ直列（writes-tree は 1 つの排他）。10.11.0 より前の kloop は write_set を読まずに捨てる。
+
+# --- 群の順（ksd-ls の作業 L10-X-002・CR-I-062）
+# 群の順は宣言（`--group-needs graphs/group-needs.toml`）から。**ksdx は順を推し量らない**（宣言を写すだけ）。
+# 宣言のあるスコープの実装の loop は、verify-before のほかに待つスコープの実装の loop を needs に持つ
+# （宣言の順。推移を足さない。宣言の無いスコープは今のまま verify-before だけを待つ）。
+# kloop の needs は依存が SUCCEEDED であることを求めるので、待つスコープが収束しなければ（FAILED・SKIPPED）
+# 下流は SKIPPED になる（on_fail = "continue" は今のまま。review は今のまま全ての実装の loop を needs_optional で待つ）。
+# 宣言 33 件（待つ組 61）：
+#   impl-api-chg   ← impl-api-sch, impl-db-chg, impl-rule-chg
+#   impl-api-cmn   ← impl-db-cmn, impl-rule-auth
+#   impl-api-eff   ← impl-api-sch, impl-db-eff, impl-rule-eff
+#   impl-api-est   ← impl-api-wbs, impl-db-est, impl-rule-est
+#   impl-api-int   ← impl-api-eff, impl-rule-int
+#   impl-api-prg   ← impl-api-sch, impl-db-prg, impl-rule-prg
+#   impl-api-prj   ← impl-api-cmn, impl-db-prj, impl-rule-cal
+#   impl-api-rpt   ← impl-api-prg, impl-rule-rpt
+#   impl-api-sch   ← impl-api-wbs, impl-db-sch, impl-rule-sch
+#   impl-api-wbs   ← impl-api-prj, impl-db-wbs, impl-rule-wbs
+#   impl-db-chg    ← impl-db-wbs
+#   impl-db-eff    ← impl-db-sch
+#   impl-db-est    ← impl-db-wbs
+#   impl-db-prg    ← impl-db-sch
+#   impl-db-prj    ← impl-db-cmn
+#   impl-db-sch    ← impl-db-wbs
+#   impl-db-wbs    ← impl-db-prj
+#   impl-rule-chg  ← impl-rule-sch, impl-rule-wbs
+#   impl-rule-eff  ← impl-rule-est
+#   impl-rule-int  ← impl-rule-wbs
+#   impl-rule-prg  ← impl-rule-sch
+#   impl-rule-rpt  ← impl-rule-prg
+#   impl-rule-sch  ← impl-rule-cal
+#   impl-rule-wbs  ← impl-rule-est
+#   impl-ui-chg    ← impl-ui-prj, impl-api-chg
+#   impl-ui-cmn    ← impl-api-cmn, impl-api-wbs
+#   impl-ui-eff    ← impl-ui-prj, impl-api-eff
+#   impl-ui-int    ← impl-ui-prj, impl-api-int
+#   impl-ui-prg    ← impl-ui-sch
+#   impl-ui-prj    ← impl-ui-cmn, impl-api-prj
+#   impl-ui-rpt    ← impl-ui-prg, impl-api-rpt
+#   impl-ui-sch    ← impl-ui-prj, impl-api-sch, impl-api-prg
+#   impl-ui-wbs    ← impl-ui-prj, impl-api-wbs, impl-api-est
+
+[graph]
+name = "implement-by-scope"
+description = "スコープごとに実装ループを回し、独立レビューを経て終わる（コミットは作業者が行う）（37 スコープ / 設計 ID 187 件）"
+max_parallel = 4
+fail_fast = false
+
+# --- 現状把握（**着手前の基準を残すだけ。合否には使わない**）
+#
+# **kind = "verify" にしてはならない**（2026-08-16 に実機で踏んだ）。
+# このグラフは未実装 ID を実装するために在るので、着手前の検証は
+# **必ず FAIL する。** verify ノードにすると、そこで run が止まる。
+# `on_fail = "continue"` を足しても解決しない——kloop の `needs` は
+# 依存が **SUCCEEDED** であることを要求し、FAILED なら後続を
+# 「上流ノードが失敗またはスキップされた」として SKIPPED にする
+# （kloop graph.py の _scan_ready）。完了だけを待つ `needs_optional`（kloop 1.19.0 から）で
+# 実装ループを走らせても、途中のノードが FAILED なら run は BLOCKED_NO_PROGRESS で
+# 終わる——**実装ループがすべて収束しても run は成功にならない**（CR-I-037 と同じ判断）。
+#
+# 実測: run_20260816T040816_aef3df は verify-before が
+# 「検証器が FAIL（失敗 32 件）」で BLOCKED_NO_PROGRESS。完了ノード 0 件。
+#
+# したがって command ノードにし、**検証器の FAIL（exit 1）を 0 にする**。
+# 0・1 の他（kloop が無い 7 など）は基準を取れていないので、返して止める（CR-I-039）。
+# 基準は .kloop/runs/<run>/nodes/verify-before/ に残る（command.log の baseline= の行と、
+# kloop の検証器なら verify-result.json。ラッパが KLOOP_RESULT_PATH をそこへ向ける。CR-I-040）。
+#
+# **FAIL を 0 にするのは `bash -c "... || true"` ではなくスクリプトの中で行う**
+# （指示書 §7.4 / CR-I-009）。kloop.toml へ [graph.command_policy] を
+# 宣言すると、`-c` を含む argv は**グラフの読み込みで拒否される**
+# （kloop 指示書 §6.2 / kloop CR-014。ENVIRONMENT_ERROR / 終了コード 7。
+# on_fail は効かず、run は 1 ノードも実行しない）。
+# ラッパは ksd-x が供給する（無ければ `ksdx plan graph` が書き出す）。
+#
+# このグラフを [graph.command_policy] の下で動かすには、kloop.toml へ:
+#
+#   [graph.command_policy]
+#   allow = [["bash", "scripts/verify-baseline.sh"]]
+#
+# **許可することは、そのスクリプトの中身を信頼すると決めることである。**
+# kloop も ksd-x も中身は見ない。
+#
+# **kloop は 1.3.0 以上が要る。**1.2.0 には command_policy の読み取り側が
+# 無く、宣言しても**黙って無視される**（require_kloop_version も上げること）。
+[[nodes]]
+id = "verify-before"
+kind = "command"
+command = ["bash", "scripts/verify-baseline.sh", "all"]
+
+# --- api:CHG: 設計 ID 10 件
+[[nodes]]
+id = "impl-api-chg"
+kind = "loop"
+needs = ["verify-before", "impl-api-sch", "impl-db-chg", "impl-rule-chg"]
+task = "implement-api-chg"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:CMN: 設計 ID 8 件
+[[nodes]]
+id = "impl-api-cmn"
+kind = "loop"
+needs = ["verify-before", "impl-db-cmn", "impl-rule-auth"]
+task = "implement-api-cmn"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:EFF: 設計 ID 7 件
+[[nodes]]
+id = "impl-api-eff"
+kind = "loop"
+needs = ["verify-before", "impl-api-sch", "impl-db-eff", "impl-rule-eff"]
+task = "implement-api-eff"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:EST: 設計 ID 3 件
+[[nodes]]
+id = "impl-api-est"
+kind = "loop"
+needs = ["verify-before", "impl-api-wbs", "impl-db-est", "impl-rule-est"]
+task = "implement-api-est"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:INT: 設計 ID 2 件
+[[nodes]]
+id = "impl-api-int"
+kind = "loop"
+needs = ["verify-before", "impl-api-eff", "impl-rule-int"]
+task = "implement-api-int"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:PRG: 設計 ID 9 件
+[[nodes]]
+id = "impl-api-prg"
+kind = "loop"
+needs = ["verify-before", "impl-api-sch", "impl-db-prg", "impl-rule-prg"]
+task = "implement-api-prg"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:PRJ: 設計 ID 11 件
+[[nodes]]
+id = "impl-api-prj"
+kind = "loop"
+needs = ["verify-before", "impl-api-cmn", "impl-db-prj", "impl-rule-cal"]
+task = "implement-api-prj"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:RPT: 設計 ID 4 件
+[[nodes]]
+id = "impl-api-rpt"
+kind = "loop"
+needs = ["verify-before", "impl-api-prg", "impl-rule-rpt"]
+task = "implement-api-rpt"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:SCH: 設計 ID 13 件
+[[nodes]]
+id = "impl-api-sch"
+kind = "loop"
+needs = ["verify-before", "impl-api-wbs", "impl-db-sch", "impl-rule-sch"]
+task = "implement-api-sch"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- api:WBS: 設計 ID 23 件
+[[nodes]]
+id = "impl-api-wbs"
+kind = "loop"
+needs = ["verify-before", "impl-api-prj", "impl-db-wbs", "impl-rule-wbs"]
+task = "implement-api-wbs"
+write_set = ["backend/alembic", "backend/app/api", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:CHG: 設計 ID 3 件
+[[nodes]]
+id = "impl-db-chg"
+kind = "loop"
+needs = ["verify-before", "impl-db-wbs"]
+task = "implement-db-chg"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:CMN: 設計 ID 4 件
+[[nodes]]
+id = "impl-db-cmn"
+kind = "loop"
+needs = ["verify-before"]
+task = "implement-db-cmn"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:EFF: 設計 ID 3 件
+[[nodes]]
+id = "impl-db-eff"
+kind = "loop"
+needs = ["verify-before", "impl-db-sch"]
+task = "implement-db-eff"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:EST: 設計 ID 1 件
+[[nodes]]
+id = "impl-db-est"
+kind = "loop"
+needs = ["verify-before", "impl-db-wbs"]
+task = "implement-db-est"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:PRG: 設計 ID 5 件
+[[nodes]]
+id = "impl-db-prg"
+kind = "loop"
+needs = ["verify-before", "impl-db-sch"]
+task = "implement-db-prg"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:PRJ: 設計 ID 5 件
+[[nodes]]
+id = "impl-db-prj"
+kind = "loop"
+needs = ["verify-before", "impl-db-cmn"]
+task = "implement-db-prj"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:SCH: 設計 ID 4 件
+[[nodes]]
+id = "impl-db-sch"
+kind = "loop"
+needs = ["verify-before", "impl-db-wbs"]
+task = "implement-db-sch"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- db:WBS: 設計 ID 10 件
+[[nodes]]
+id = "impl-db-wbs"
+kind = "loop"
+needs = ["verify-before", "impl-db-prj"]
+task = "implement-db-wbs"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/models", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:AUTH: 設計 ID 2 件
+[[nodes]]
+id = "impl-rule-auth"
+kind = "loop"
+needs = ["verify-before"]
+task = "implement-rule-auth"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:CAL: 設計 ID 2 件
+[[nodes]]
+id = "impl-rule-cal"
+kind = "loop"
+needs = ["verify-before"]
+task = "implement-rule-cal"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:CHG: 設計 ID 6 件
+[[nodes]]
+id = "impl-rule-chg"
+kind = "loop"
+needs = ["verify-before", "impl-rule-sch", "impl-rule-wbs"]
+task = "implement-rule-chg"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:EFF: 設計 ID 5 件
+[[nodes]]
+id = "impl-rule-eff"
+kind = "loop"
+needs = ["verify-before", "impl-rule-est"]
+task = "implement-rule-eff"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:EST: 設計 ID 2 件
+[[nodes]]
+id = "impl-rule-est"
+kind = "loop"
+needs = ["verify-before"]
+task = "implement-rule-est"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:INT: 設計 ID 1 件
+[[nodes]]
+id = "impl-rule-int"
+kind = "loop"
+needs = ["verify-before", "impl-rule-wbs"]
+task = "implement-rule-int"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:PRG: 設計 ID 7 件
+[[nodes]]
+id = "impl-rule-prg"
+kind = "loop"
+needs = ["verify-before", "impl-rule-sch"]
+task = "implement-rule-prg"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:RPT: 設計 ID 1 件
+[[nodes]]
+id = "impl-rule-rpt"
+kind = "loop"
+needs = ["verify-before", "impl-rule-prg"]
+task = "implement-rule-rpt"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:SCH: 設計 ID 6 件
+[[nodes]]
+id = "impl-rule-sch"
+kind = "loop"
+needs = ["verify-before", "impl-rule-cal"]
+task = "implement-rule-sch"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- rule:WBS: 設計 ID 8 件
+[[nodes]]
+id = "impl-rule-wbs"
+kind = "loop"
+needs = ["verify-before", "impl-rule-est"]
+task = "implement-rule-wbs"
+write_set = ["backend/alembic", "backend/app/domain", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:CHG: 設計 ID 3 件
+[[nodes]]
+id = "impl-ui-chg"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prj", "impl-api-chg"]
+task = "implement-ui-chg"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:CMN: 設計 ID 3 件
+[[nodes]]
+id = "impl-ui-cmn"
+kind = "loop"
+needs = ["verify-before", "impl-api-cmn", "impl-api-wbs"]
+task = "implement-ui-cmn"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:EFF: 設計 ID 2 件
+[[nodes]]
+id = "impl-ui-eff"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prj", "impl-api-eff"]
+task = "implement-ui-eff"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:INT: 設計 ID 1 件
+[[nodes]]
+id = "impl-ui-int"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prj", "impl-api-int"]
+task = "implement-ui-int"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:PRG: 設計 ID 2 件
+[[nodes]]
+id = "impl-ui-prg"
+kind = "loop"
+needs = ["verify-before", "impl-ui-sch"]
+task = "implement-ui-prg"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:PRJ: 設計 ID 2 件
+[[nodes]]
+id = "impl-ui-prj"
+kind = "loop"
+needs = ["verify-before", "impl-ui-cmn", "impl-api-prj"]
+task = "implement-ui-prj"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:RPT: 設計 ID 2 件
+[[nodes]]
+id = "impl-ui-rpt"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prg", "impl-api-rpt"]
+task = "implement-ui-rpt"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:SCH: 設計 ID 3 件
+[[nodes]]
+id = "impl-ui-sch"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prj", "impl-api-sch", "impl-api-prg"]
+task = "implement-ui-sch"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- ui:WBS: 設計 ID 4 件
+[[nodes]]
+id = "impl-ui-wbs"
+kind = "loop"
+needs = ["verify-before", "impl-ui-prj", "impl-api-wbs", "impl-api-est"]
+task = "implement-ui-wbs"
+write_set = ["backend/alembic", "backend/app/main.py", "backend/app/schemas", "backend/app/services", "backend/tests", "docs/decisions/ASSUMPTIONS.md", "docs/instruction-change-requests.md", "docs/open-questions.md", "frontend/src"]
+max_iterations = 6
+on_fail = "continue"        # 収束しないスコープがあっても他を止めない
+
+# --- 独立レビュー（fresh context。実装者の仮定を引き継がない）
+#
+# **実機で出た欠陥を反映してある**（run_20260815T143202_5de048）:
+#   max_turns の既定 12 では effort=high のレビューが切れる
+#   Bash は git にしか開かない。Read / Grep / Glob を使わせる
+#
+# **実装ループを `needs_optional` で待つ**（CR-I-039。2026-10-21 までは `needs`）。`needs` だと
+# 1 つのスコープが収束しない（FAILED）だけで kloop がレビューを SKIPPED にした——
+# 実装ループの `on_fail = "continue"`（他を止めない）がレビューには効いていなかった。
+# 任意依存はループが終われば（SUCCEEDED・FAILED・SKIPPED）走り、収束しなかったスコープは
+# 「完了しなかった上流ノード」として事実がレビューのプロンプトに渡る（kloop CR-033）。
+# 収束しないスコープがある run は、レビューが済んでも BLOCKED_NO_PROGRESS で終わる。
+# verify-before が止まった（検証器を起こせない）なら run はそこで止まり、レビューは走らない。
+# **kloop 1.19.0 以上が要る。**それ未満は `needs_optional` を読まずに黙って捨てるので、
+# レビューが依存なしで最初に走る（ノードの未知のキーを拒まない。kloop graph.py）。
+[[nodes]]
+id = "review"
+kind = "agent"
+needs_optional = ["impl-api-chg", "impl-api-cmn", "impl-api-eff", "impl-api-est", "impl-api-int", "impl-api-prg", "impl-api-prj", "impl-api-rpt", "impl-api-sch", "impl-api-wbs", "impl-db-chg", "impl-db-cmn", "impl-db-eff", "impl-db-est", "impl-db-prg", "impl-db-prj", "impl-db-sch", "impl-db-wbs", "impl-rule-auth", "impl-rule-cal", "impl-rule-chg", "impl-rule-eff", "impl-rule-est", "impl-rule-int", "impl-rule-prg", "impl-rule-rpt", "impl-rule-sch", "impl-rule-wbs", "impl-ui-chg", "impl-ui-cmn", "impl-ui-eff", "impl-ui-int", "impl-ui-prg", "impl-ui-prj", "impl-ui-rpt", "impl-ui-sch", "impl-ui-wbs"]
+prompt_file = "prompts/review-diff.md"
+outputs = ["findings.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git status:*)"]
+effects = ["reads-tree"]
+effort = "high"
+max_turns = 40
+
+# コミットの前の承認ゲート（gate-commit）は置かない（ksd-ls の Q-LS-34・kloop の CR-073・CR-I-034）。
+# 人の承認のゲートはクラウドの資源の構成変更にだけ置く。findings.md は review の成果物に残る
