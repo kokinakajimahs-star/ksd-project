@@ -61,4 +61,37 @@
 
 ## 現在の CR
 
-None
+## CR-001 : 画面の依存の主版（React Router 6・Vite 5・Vitest 2）に、その主版では直らない脆弱性の勧告がある
+
+- 状態：起票（承認待ち）。2026-11-10。構成づくり（scaffold）の独立レビューの指摘から
+
+### 対象箇所
+設計書 §1.1 の表の「画面」（React・React Router・Vite：18・6・5）と「試験（画面）」（Vitest・Testing Library：2）
+
+### 現行の記載
+`| 画面 | React・React Router・Vite | 18・6・5 | |` と `| 試験（画面） | Vitest・Testing Library | 2 | |`
+
+### 問題
+各主版の最新に固定しても（react-router-dom 6.30.6・vite 5.4.21・vitest 2.1.9）、`npm audit` の勧告が残る。直る版は次の主版以降にしか無い。
+
+- 実行時（利用者のブラウザに届く）：react-router 6 の 2 件（moderate）
+  - GHSA-wrjc-x8rr-h8h6：`<Link>`・`useNavigate` のバックスラッシュによる外部への遷移（6.0.0 以上 7.18.0 未満）
+  - GHSA-337j-9hxr-rhxg：SSR の復元の deserializeErrors（6.4.0 以上 7.18.0 未満）。PMT は SSR を使わないので届かない
+- 開発・試験の時だけ（配布物に入らない）：vite 5（開発サーバの fs.allow の迂回・別オリジンからのスクリプト実行など。6.4.4 以上で直る）、esbuild 0.21（開発サーバへの別オリジンからの要求）、vitest 2・tinypool・@vitest/mocker（UI サーバ・モックの登録の経路。vitest 4.1.12 以上・tinypool 2.1.2 以上で直る）
+
+### 根拠
+`npm --prefix frontend audit`（2026-11-10。lock は frontend/package-lock.json）。`--omit=dev` でも react-router の 2 件が残る
+
+### 提案する変更後の記載
+`| 画面 | React・React Router・Vite | 18・7・6 以上（勧告の無い版） | |`、`| 試験（画面） | Vitest・Testing Library | 4 以上（勧告の無い版） | |`。
+あわせて「依存は版を固定し、`npm audit` で high 以上の勧告が無い版を選ぶ」を 1.1 の注に足す
+
+### 影響範囲
+- 設計ID・7.1 のルートの文字列には影響しない（React Router 7 も `path` の書き方は同じ）
+- 画面の実装はまだ構成づくりの枠だけ（`frontend/src/App.tsx`・`main.tsx`・`api/client.ts`）。主版を上げる費用は今が最小
+- `vite.config.ts` の `test` の書き方が Vitest 4 で変わる可能性がある
+
+### 暫定対応
+承認までは設計書どおり 6・5・2 の主版の中の最新（react-router-dom 6.30.6・vite 5.4.21・vitest 2.1.9）で進める。
+開発サーバ（`npm run dev`）は `127.0.0.1` だけで待ち受け、信頼できない Web ページを同じブラウザで開かない。
+画面のスコープ（ui:*）は、外部の URL や利用者の入力の文字列を `<Link to>`・`navigate()` にそのまま渡さない
