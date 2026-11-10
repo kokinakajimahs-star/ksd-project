@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# main へのマージは、関門（ksdls test gate --verify）を通った dev のコミットを ksdls escalate が入れるときだけ
+# （docs/branch-rules.md §2・§3。ksdls setup project が置いた雛形）。記録は有無だけを見る（2 行目 mode verify の記録もそのまま通す）。
+set -euo pipefail
+branch="$(git symbolic-ref --quiet --short HEAD || true)"
+[ "$branch" = "main" ] || exit 0
+git_dir="$(git rev-parse --git-dir)"
+common_dir="$(git rev-parse --git-common-dir)"
+# このフックが動く時点では MERGE_HEAD はまだ無い。git merge が置く GIT_REFLOG_ACTION（"merge <ref>"）から相手を決める
+merge_head="$(head -1 "$git_dir/MERGE_HEAD" 2>/dev/null || true)"
+if [ -z "$merge_head" ]; then
+  case "${GIT_REFLOG_ACTION:-}" in
+    "merge "*) target="${GIT_REFLOG_ACTION#merge }"
+               [ "${target#* }" = "$target" ] && merge_head="$(git rev-parse --verify --quiet "$target^{commit}" || true)" ;;
+  esac
+fi
+if [ "${KSDLS_ESCALATE:-}" != "1" ]; then
+  echo "pre-merge-commit: main へのマージは ksdls escalate --root <導入先> だけが行う（docs/branch-rules.md）" >&2
+  exit 1
+fi
+if [ -z "$merge_head" ] || [ ! -f "$common_dir/ksdls/full-gate/$merge_head" ]; then
+  echo "pre-merge-commit: ${merge_head:-?} に関門の合格の記録が無い（ksdls test gate --verify を先に流す）" >&2
+  exit 1
+fi

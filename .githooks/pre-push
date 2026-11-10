@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""push の前の確かめ（docs/branch-rules.md §4。ksdls setup project が置いた雛形）.
+
+- `main` は、エスカレーションのマージ（`KSDLS-Escalation:` の行を持つ）だけを送る
+- 早送りでない更新（`--force` に当たるもの）と、ブランチの削除を拒む
+- 送るコミットの数を出す
+
+中身（名前・データ）の確かめはこの導入先の決めること（ksd-ls の実データの名前の一覧は見ない）。
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+
+ZERO = "0" * 40
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+
+def main() -> int:
+    remote = sys.argv[1] if len(sys.argv) > 1 else "?"
+    updates = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+    errors: list[str] = []
+    for _local_ref, local_sha, remote_ref, remote_sha in updates:
+        if local_sha == ZERO:
+            errors.append(f"{remote_ref}: ブランチの削除は push しない（利用者の判断）")
+            continue
+        if remote_sha != ZERO:
+            try:
+                git("merge-base", "--is-ancestor", remote_sha, local_sha)
+            except subprocess.CalledProcessError:
+                errors.append(f"{remote_ref}: 早送りでない更新（--force に当たる）は push しない")
+                continue
+            rev_range = [f"{remote_sha}..{local_sha}"]
+        else:
+            # 新しいブランチ：リモートが既に持つコミットを除く
+            rev_range = [local_sha, "--not", f"--remotes={remote}"]
+        commits = git("rev-list", *rev_range).split()
+        print(f"pre-push: {remote_ref} へ {len(commits)} コミット", file=sys.stderr)
+        if remote_ref == "refs/heads/main":
+            body = git("log", "-1", "--format=%B", local_sha)
+            if "KSDLS-Escalation:" not in body:
+                errors.append("refs/heads/main: エスカレーションのマージ（KSDLS-Escalation:）だけを送る")
+    for e in errors:
+        print(f"pre-push: {e}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# main への直接のコミットを拒む（docs/branch-rules.md §4。ksdls setup project が置いた雛形）。
+# main へ入るのは ksdls escalate --root <この導入先> のマージだけ。
+set -euo pipefail
+branch="$(git symbolic-ref --quiet --short HEAD || true)"
+if [ "$branch" = "main" ]; then
+  git_dir="$(git rev-parse --git-dir)"
+  if [ "${KSDLS_ESCALATE:-}" = "1" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
+    exit 0   # エスカレーションのマージで衝突を解いたあとのコミット
+  fi
+  echo "pre-commit: main へ直接コミットしない。dev（または wt/<task_id>）で作業する（docs/branch-rules.md）" >&2
+  exit 1
+fi
