@@ -49,6 +49,18 @@
 1 回の反復で全件を終える必要は無い。**進んだ分が検証器で測れる状態**（試験が通る・型が通る）で反復を終えること。
 壊れた途中の状態で終えると、次の反復は直すことから始まる。
 
+## 計算資源の使い方
+
+このループは利用者の仮想 PC（WSL2）の上で、別の開発セッションと同時に動く。2026-11-11 に、試験の同時実行が重なった最中に
+VM ごと落ちた（`docs/decisions/ASSUMPTIONS.md` の A-24）。次を守る。
+
+- 試験・検証は**一度に 1 本、前景で**流す。`bash scripts/verify.sh …` を裏（`&`・`nohup`・出力をファイルへ回して `sleep` で待つ）で
+  流しながら、別の試験を流さない。全体の試験は 2 分を超えるので、Bash の `timeout` を延ばして（最大 600000 ms）前景で流す
+- 開発中は最も狭い検査（試験ファイル 1 本・`-k`）を流す。スコープの検証 `bash scripts/verify.sh <scope>` は反復の終わりに 1 回でよい
+  （反復の後に kloop が同じ検証器を流す）
+- 並列化を足さない（`pytest -n`・pytest-xdist の導入・vitest の `--maxWorkers` を上げる・`frontend/vite.config.ts` の `maxWorkers` を上げる）
+- 常駐するものを起動しない（`vite`・`npm run dev`・`uvicorn --reload`・`run` の無い `vitest`・watch のたぐい）
+
 ## 完了の定義
 
 - `bash scripts/verify.sh <scope>` が exit 0（範囲の未実装 0 件・試験・型検査・DB の移行・要求→設計の写像が通る）

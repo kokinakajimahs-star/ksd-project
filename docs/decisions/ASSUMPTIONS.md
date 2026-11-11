@@ -61,6 +61,7 @@
 - **起動の口:** Claude Code の入力欄で利用者が打つ `!` の行（シェルモード）は、前景のセッションではサンドボックスの外で動く
   （公式文書 code.claude.com/docs/en/sandboxing。v2.1.260 以降で、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` が無いとき。2026-11-10 の版は 2.1.322）。
   `! cd ~/ksd-project && nohup kloop graph graphs/implement.toml > .kloop/kick.log 2>&1 &` で、会話を離れずに起動できる。
+  **2026-11-11 から、資源の上限の中で起動する A-24 の口を使う。**
   エージェントの Bash（サンドボックスの中）では起動しない（2026-11-10 実測：入れ子の `claude -p` が「Not logged in」）
 - **限界:** サンドボックスの中で確かめたのは dry-run・mock の配線と検証器だけである
 
@@ -579,3 +580,39 @@
   完了見込み日を寄せないなら `forecast_end` の `roll_backward` を外し、試験 `test_forecast_on_non_working_day_rolls_back` を直す
 - **限界:** サービス・API（api:PRG）からはまだ呼んでいない。過去の線の暦日上の座標は、写しの位置を**今の**カレンダーとプロジェクトの開始日で直す（OQ-24 (1)）。
   プロジェクト全体の進捗率（7.4 の KPI）・ETC（RULE-EFF-001）はこの群に入れていない
+
+## A-24: RUN を資源の上限の中で起動する（2026-11-11 に VM が落ちた後の対策）
+
+- **事実（2026-11-11）:** 13:10:33 JST に WSL の VM が外から止まった（前回の起動のジャーナルが、停止の手順なしで途切れている。
+  Linux 側に OOM・ハングの記録は無い）。そのとき重なっていたもの：
+  - RUN（run_20261110T094851_c358e7 の impl-rule-prg、反復 1）。エージェントが `verify.sh rule:PRG` を裏で流しながら、別の pytest も流していた
+  - ksd-ls のセッションの試験の計画の実行（pytest `-n 4`）。33 分以上走っていた
+
+  VM は 8 コア・16GB で、`.wslconfig` にはメモリ・CPU の上限も、メモリを Windows へ返す設定も無い。sysstat は無効なので、落ちる前の負荷の推移は残っていない
+- **実測（2026-11-11。ほかに何も走らせずに測った）:** `pytest backend/tests` の 1100 件は、1 コア・最大 RSS 216MB・2 分 8 秒で、約 1.1GB を書き込む（試験ごとの SQLite）。
+  RUN の試験 1 本はメモリの主因ではない
+- **推定（確かめていない）:** 原因は RUN 単体ではない。同時に走った試験（ksd-ls の 4 並列と RUN の 2 本）と claude 群の CPU・メモリの合計、
+  それに 1 日走らせた間に溜まったページキャッシュを、WSL が Windows へ返さないことが重なった
+- **選択:**
+  - RUN は `scripts/run_capped.py` で起動する。systemd のユーザの scope（cgroup v2）で包み、MemoryHigh を MemTotal の 40%・MemoryMax を 50%・
+    MemorySwapMax を 1G・CPUQuota をコア数の半分・TasksMax を 2048 にする。そのうえで nice 10・ionice best-effort 7 にする。
+    上限を掛けられないときは起動しない（上限なしで走らせるのは `--allow-uncapped` を明示したときだけ）
+  - 負荷を `.kloop/load-monitor/<name>-<時刻>.tsv` へ 15 秒ごとに書く（行ごとに fsync）。VM 全体の空きメモリ・PSI・scope のメモリと CPU・常駐の大きいプロセスを記録する
+  - 歯止めを置く。VM 全体の空きメモリが 10% を 1 分割り続けたら kloop へ SIGINT を送る（kloop は走っているノードの終わりを待ち、CANCELLED で止まる）。
+    5% を 1 分割り続けたら scope の全プロセスへ SIGTERM を送り、30 秒後に残っていれば SIGKILL を送る
+  - `nohup … &` で起動すると、SIGINT が無視されたまま始まって kloop を穏当に止められない。これを、起動の直前に SIGINT を既定へ戻すことで解く
+  - エージェントには `prompts/implement.md` で次を指示する：試験は一度に 1 本・前景・最も狭いものを流す。並列化と常駐するものを足さない
+  - vitest のワーカーを 2 つまでにする（`frontend/vite.config.ts`。既定は CPU 数 − 1 の 7）。UI の 9 スコープがこれから毎回 vitest を流すため
+  - kloop.toml とグラフ定義は変えない。変えると run_20261110T094851_c358e7 を再開できない
+    （config_hash とグラフの hash を 2026-11-11 に今の kloop 11.11.0 で計算し、run の値と一致することを確かめた）
+- **起動の口（A-06 の口を置き換える）:**
+  - 再開：`! cd ~/ksd-project && nohup python3 scripts/run_capped.py --name implement -- kloop resume --run-id run_20261110T094851_c358e7 --graph-file graphs/implement.toml > .kloop/kick.log 2>&1 &`
+  - 新しい run：`--` の後を `kloop graph graphs/implement.toml` にする
+  - 止める：`! cd ~/ksd-project && python3 scripts/run_capped.py --stop implement`（もう一度打つと SIGTERM）
+- **覆す場合:** 上限は引数で変える（`--mem-max 60%`・`--cpus 6` など）。歯止めは `--no-brake` で外す
+- **限界:**
+  - サンドボックスの中からは systemd のユーザのバスに繋がらない。上限を掛ける経路（systemd-run）は利用者の端末で確かめた
+    （2026-11-11 の `--name probe`：`app.slice/ksd-probe-….scope` の中で走り、memory.max 8269070336・cpu.max `400000 100000`・pids.max 2048・nice 10）。
+    非常停止と `--stop` の段（SIGINT → SIGTERM → SIGKILL）は、サンドボックスの中で上限なし（`--allow-uncapped`）でだけ確かめた
+  - ほかのセッション（ksd-ls の試験）には上限が掛からない。同じスクリプトで包むか、RUN と重ねないこと
+  - Windows 側（`.wslconfig`）はこのリポジトリの外にある
