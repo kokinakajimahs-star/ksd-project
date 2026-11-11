@@ -6,3 +6,8 @@
 """
 
 from app.infra.db import Base as Base
+from app.models import cmn as cmn
+from app.models import prg as prg
+from app.models import prj as prj
+from app.models import sch as sch
+from app.models import wbs as wbs

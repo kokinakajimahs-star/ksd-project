@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any
 
@@ -20,6 +22,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import Settings, get_settings
 from app.errors import AppError
 from app.infra.db import create_db_engine, create_session_factory
+from app.services.project_access import ProjectMembersTable
+from app.services.projects import NumberingRulesTable
+from app.services.schedule import ScheduleCalculator, ScheduleLinks, progress_entries_latest
+from app.services.users import ensure_initial_admin
+from app.services.wbs import ActivitiesTable, ChangeRequestsTableAbsent, CrossGroupReaders
 
 API_PREFIX = "/api/v1"
 
@@ -88,9 +95,26 @@ def _unhandled_error_handler(_request: Request, _exc: Exception) -> JSONResponse
 
 def register_routers(api: APIRouter) -> None:
     """群ごとのルータを ``/api/v1`` の下に登録する。群のルータを足したらここに 1 行足す。"""
-    from app.api import health
+    from app.api import auth, health, projects, schedule, users, wbs
 
     api.include_router(health.router)
+    api.include_router(auth.router)
+    api.include_router(users.router)
+    api.include_router(projects.router)
+    api.include_router(wbs.router)
+    api.include_router(schedule.router)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # 最初のシステム管理者（NFR-10）。両方とも未指定なら何もしない。片方だけなら起動を止める（fail fast）
+    settings: Settings = app.state.settings
+    if settings.initial_admin_login or settings.initial_admin_password:
+        with app.state.session_factory() as session:
+            ensure_initial_admin(
+                session, login_id=settings.initial_admin_login, password=settings.initial_admin_password
+            )
+    yield
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -98,10 +122,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     engine = create_db_engine(settings.database_url)
 
-    app = FastAPI(title="PMT", version="0.1.0", openapi_url=f"{API_PREFIX}/openapi.json")
+    app = FastAPI(title="PMT", version="0.1.0", openapi_url=f"{API_PREFIX}/openapi.json", lifespan=_lifespan)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
+    # プロジェクトの有無とメンバーを読む口（app.services.project_access。docs/decisions/ASSUMPTIONS.md A-10・A-11）。
+    # 割当の活動は assignments（DB-EFF-001）を作るスコープ（db:EFF）が読み手を差し替える
+    app.state.project_access = ProjectMembersTable()
+    # 別の群の表に書く口（app.services.projects。A-14・A-15）。採番規則は表（DB-WBS-002）に書く。
+    # 日程の再計算は、日程計算（RULE-SCH-001〜003）を保存まで通す実装（api:SCH で差し替えた。A-19・A-21）
+    app.state.numbering_rules = NumberingRulesTable()
+    app.state.schedule_recalculator = ScheduleCalculator()
+    # WBS の判定・集計が読む活動（app.services.wbs。A-17）。活動の表（DB-SCH-001）を読む（db:SCH で差し替えた。A-19）
+    app.state.wbs_activities = ActivitiesTable()
+    # 責任分担表・横断照会が読む別の群の表（割当・見積の記録・実績・変更要求・是正措置・EAC。A-18）。既定は「表がまだ無い」。
+    # 表を作るスコープ（db:EFF・db:EST・db:CHG・api:EFF）が、その表を読む関数へ差し替える
+    app.state.wbs_readers = CrossGroupReaders()
+    # 変更要求の承認申請への判断（API-WBS-019）を変更要求へ反映する口。api:CHG のスコープが差し替える（A-18）
+    app.state.change_request_approvals = ChangeRequestsTableAbsent()
+    # スケジュールの API が読み書きする別の群の表（割当・最新の進捗。app.services.schedule。A-21）。
+    # 割当は「表がまだ無い」の既定のまま（db:EFF のスコープが差し替える）。最新の進捗は進捗の表を読む（db:PRG で差し替えた。A-22）
+    app.state.schedule_links = ScheduleLinks(latest_progress=progress_entries_latest)
 
     app.add_exception_handler(AppError, _app_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)

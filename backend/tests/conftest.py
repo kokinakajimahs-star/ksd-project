@@ -2,12 +2,16 @@
 
 - ``settings``：一時ファイルの SQLite を指す設定（試験ごとに別の DB）
 - ``app``：その設定で作ったアプリ。``Base.metadata`` の全てのテーブルを作ってある
+  （テーブルを作った SQLite のファイルを試験の流れごとに 1 度だけ作り、試験ごとに複製する。
+  DDL を試験ごとに流すと 1 件 1 秒を超え、検証が重くなるため。複製の後にも ``create_all`` を呼ぶので、
+  足りないテーブルがあれば作られる）
 - ``client``：FastAPI の TestClient
 - ``db_session``：同じ DB へのセッション（試験の準備・確認に使う）
 """
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,7 +22,7 @@ from sqlalchemy.orm import Session
 
 import app.models as _all_models  # noqa: F401  全てのモデルを Base.metadata に載せる
 from app.config import Settings
-from app.infra.db import Base
+from app.infra.db import Base, create_db_engine
 from app.main import create_app
 
 
@@ -27,8 +31,34 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
 
 
+_SQLITE_FILE_PREFIX = "sqlite:///"
+
+
+@pytest.fixture(scope="session")
+def schema_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """``Base.metadata`` の全てのテーブルを作った SQLite のファイル（試験の流れで 1 度だけ作る）。"""
+    path = tmp_path_factory.mktemp("schema-template") / "template.db"
+    engine = create_db_engine(f"{_SQLITE_FILE_PREFIX}{path}")
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    return path
+
+
+def _seed_from_template(database_url: str, template: Path) -> None:
+    """接続先がまだ無い SQLite のファイルなら、テーブルを作ったひな形を複製しておく。ほかの接続先には何もしない。"""
+    if not database_url.startswith(_SQLITE_FILE_PREFIX):
+        return
+    target = Path(database_url.removeprefix(_SQLITE_FILE_PREFIX))
+    if target.name == ":memory:" or target.exists():
+        return
+    shutil.copyfile(template, target)
+
+
 @pytest.fixture()
-def app(settings: Settings) -> Iterator[FastAPI]:
+def app(settings: Settings, schema_template: Path) -> Iterator[FastAPI]:
+    _seed_from_template(settings.database_url, schema_template)
     application = create_app(settings)
     Base.metadata.create_all(application.state.engine)
     yield application
