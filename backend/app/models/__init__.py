@@ -6,7 +6,10 @@
 """
 
 from app.infra.db import Base as Base
+from app.models import chg as chg
 from app.models import cmn as cmn
+from app.models import eff as eff
+from app.models import est as est
 from app.models import prg as prg
 from app.models import prj as prj
 from app.models import sch as sch

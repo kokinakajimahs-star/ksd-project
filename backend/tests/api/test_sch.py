@@ -15,13 +15,14 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.domain.wbs_rules import AssignmentRef
 from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, User
+from app.models.eff import Assignment
 from app.models.sch import Activity, ActivityDependency, ScheduleBaselineItem
 from app.services.clock import get_now
 from app.services.project_access import ProjectMembersTable
@@ -358,7 +359,9 @@ def test_bulk_update_applies_all_or_nothing(world: World, client: TestClient) ->
 def test_bulk_update_assignees(app: FastAPI, world: World, client: TestClient) -> None:
     a = world.add("A", duration_days=1)["id"]
     executor = world.users["contractor"].id
-    # 割当の表（DB-EFF-001）がまだ無い既定の口：担当を置こうとしたら止める（保存したふりをしない）。空にするのは今と同じ
+    # 割当の表（DB-EFF-001）が無かった間の口：担当を置こうとしたら止める（保存したふりをしない）。空にするのは今と同じ。
+    # アプリの既定は db:EFF で表を読み書きする口に変わった（A-27）ので、表の無い口を明示して載せる
+    app.state.schedule_links = ScheduleLinks(assignments=AssignmentsTableAbsent())
     assert client.patch(world.url("/activities"), json={"changes": [{"activity_id": a, "assignee_user_ids": []}]},
                         headers=world.h["planner"]).status_code == 200
     with pytest.raises(RuntimeError, match="DB-EFF-001"):
@@ -377,6 +380,46 @@ def test_bulk_update_assignees(app: FastAPI, world: World, client: TestClient) -
     )
     gantt = client.get(world.url("/gantt"), headers=world.h["viewer"]).json()
     assert sorted(gantt["rows"][0]["assignees"]) == ["contractor-PRJ-Sさん", "planner-PRJ-Sさん"]
+
+
+def test_default_assignments_port_reads_and_writes_assignments_table(
+    world: World, client: TestClient, db_session: Session
+) -> None:
+    """アプリの既定の割当の口（db:EFF。A-27）は assignments（DB-EFF-001）を読み書きする。
+
+    一括更新（API-SCH-004）は担当を置き換え（外れた担当の行を消し、残る担当の割当工数は変えない）、一覧の担当・委託先の絞り込み
+    （9.2 の注記）はその行を読み、活動を消す（API-SCH-005）と割当の行も消える。
+    """
+    a = world.add("A", duration_days=1)["id"]
+    b = world.add("B", duration_days=1)["id"]
+    contractor, planner, pm = (world.users[n].id for n in ("contractor", "planner", "pm"))
+
+    def assign(activity_id: int, user_ids: list[int]) -> None:
+        response = client.patch(world.url("/activities"), headers=world.h["planner"],
+                                json={"changes": [{"activity_id": activity_id, "assignee_user_ids": user_ids}]})
+        assert response.status_code == 200, response.text
+
+    def rows() -> list[tuple[int, int, Decimal | None]]:
+        db_session.expire_all()
+        found = db_session.scalars(select(Assignment).order_by(Assignment.activity_id, Assignment.user_id))
+        return [(r.activity_id, r.user_id, r.planned_hours) for r in found]
+
+    assign(a, [contractor, planner])
+    assert rows() == sorted([(a, contractor, None), (a, planner, None)])
+    # 割当工数は API-EFF-001 が書く。ここでは表に直接置いて、担当の置き換えで残ることを確かめる
+    db_session.execute(update(Assignment).where(Assignment.user_id == planner).values(planned_hours=Decimal("6")))
+    db_session.commit()
+    assign(a, [planner, pm])
+    assert rows() == sorted([(a, planner, Decimal("6.00")), (a, pm, None)])
+    listed = world.activities()[a]["assignees"]
+    assert [(x["user_id"], x["planned_hours"]) for x in listed] == sorted([(planner, 6.0), (pm, None)])
+
+    assign(b, [contractor])
+    body = client.get(world.url("/activities"), headers=world.h["contractor"]).json()
+    assert [x["id"] for x in body["items"]] == [b] and body["restricted"] is True
+
+    assert client.delete(world.url(f"/activities/{a}"), headers=world.h["planner"]).status_code == 204
+    assert rows() == [(b, contractor, None)]
 
 
 # ---------------------------------------------------------------------------

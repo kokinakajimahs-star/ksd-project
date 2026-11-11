@@ -616,3 +616,351 @@
     非常停止と `--stop` の段（SIGINT → SIGTERM → SIGKILL）は、サンドボックスの中で上限なし（`--allow-uncapped`）でだけ確かめた
   - ほかのセッション（ksd-ls の試験）には上限が掛からない。同じスクリプトで包むか、RUN と重ねないこと
   - Windows 側（`.wslconfig`）はこのリポジトリの外にある
+
+## A-25: 共通の画面（ui:CMN）の UI-CMN-001・002・003 で決めたこと
+
+- **選択:**
+  - **ログインのトークンは sessionStorage に置く**（`frontend/src/auth/session.tsx`。タブを閉じると忘れる）。読み出すときに `expires_at`（API-CMN-001 の応答）を過ぎたものは捨てる。
+    トークンを付けた要求が 401 になったら（失効・期限切れ）、この端末のログインを忘れてログインの画面へ戻す（`setUnauthorizedHandler`。トークンを付けない 401＝ログインの失敗では戻さない）。
+    6.1 は「Bearer トークン・有効期間 12 時間」だけを定め、画面での保持の仕方は定めていない。localStorage（ブラウザを閉じても残る）にしなかったのは、共有の端末で残さないため
+  - ログインが要る画面（UI-CMN-002・003）は、ログインしていなければ `/login` へ送り、ログインの後に元の画面へ戻す。元の画面が無ければ 7.2 の遷移どおり `/projects`（UI-PRJ-001）へ進む。
+    **UI-PRJ-001 は ui:PRJ のスコープなので、それまでは `/projects` が「ページが見つかりません」になる**
+  - ログアウト（API-CMN-002）はサーバでの失効に失敗しても（接続できない・既に失効している）、この端末のログインは忘れる
+  - 日時の表示は端末の時刻帯で `YYYY-MM-DD HH:mm`（NFR-09 の日付の形に時刻を足した）。サーバは UTC で記録する（`app/services/clock.py`）ので、時差の指定が無い値は UTC とみなす（`frontend/src/lib/format.ts`）
+  - ユーザー管理（UI-CMN-002）：一覧は user.admin か member.manage で見られる（API-CMN-003 の権限）が、作成・変更・無効化の部品は user.admin（システム管理者）にだけ出す（7.2）。
+    変更は変えた項目だけを送る（API-CMN-005）。メール・所属を空欄にしたら null、パスワードは入れたときだけ送る。ヘッダのユーザー管理への行き先はシステム管理者にだけ出す（主な利用者がシステム管理者のため）
+  - 承認待ち一覧（UI-CMN-003）：判断の部品は、申請の対象ごとの権限（WBS は wbs.approve、変更要求は change.approve。システム管理者は全て）を `GET /api/v1/me` で見て出す。
+    差戻しのボタンの呼び名は WBS を「差戻し」（WBS-21）、変更要求を「却下」（CHG-03）にした。送る値はどちらも `REJECT`（API-WBS-019）。
+    判断の後と判断の失敗（403 自分の申請・409 判断済み）の後は一覧を読み直す。対象の画面への行き先は UI-WBS-003（`/projects/:projectId/wbs-review`）と
+    UI-CHG-001（`/projects/:projectId/change-requests`）。**どちらも別のスコープの画面なので、それまでは「ページが見つかりません」になる**
+- **覆す場合:** 保持の場所は `SessionProvider` の `storage` で差し替えられる。ログインの後の行き先は `frontend/src/pages/cmn/LoginPage.tsx` の `AFTER_LOGIN_PATH`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバ（uvicorn）と繋いでは確かめていない。応答の形は `backend/app/schemas` を読んで合わせた
+
+## A-26: 進捗（PRG）の API（api:PRG）で決めたこと
+
+- **選択:**
+  - ルータは `backend/app/api/progress.py`（2.1 の群のファイル名）、ユースケースは `backend/app/services/progress.py`、入出力は `backend/app/schemas/progress.py`、試験は `backend/tests/api/test_prg.py`。
+    報告日を作る・確定するは status_report.manage、算定方式は schedule.edit、読むのは project.view（`authorize_project`）。
+    **進捗・算定項目を書くのは progress.enter_own**：先に活動を問わない粗い確認（enter_own か enter_all を持つか。無ければ 403。活動の有無を見せない）、
+    次に報告日・活動の 404、最後に RULE-AUTH-001 の `authorize(..., activity_id=…)` で自分の割当か（enter_all を持てば割当に関わらず許す）。委託先だけで読む利用者は自分の割当の活動に絞る（`restricted`）
+  - **進捗率は読むたびに RULE-PRG-001 で求める**（効いている方式・算定項目・その報告日の入力）。`progress_entries.percent_complete` には書いた時点の算定値を保存する
+    （直接入力は入力値。実績終了日があれば 100）。算定項目（API-PRG-004）・方式（API-PRG-005）を変えたら **OPEN の報告日の行だけ**求め直す（ガントが読む 4.2 の「最新の値」と食い違わせない。確定済みは変えない）。
+    直接入力へ戻したときは、それまでの算定値を入力値として引き継ぐ。**直接入力以外の方式の活動へ進捗率を入れたら 400**（OQ-25 (3)）
+  - 報告日を作る（API-PRG-001）：同じ日付は 409 `DUPLICATE_STATUS_REPORT`。**この日付より前の最も新しい報告日から、進捗率・実績開始日・実績終了日だけを写す**（PRG-01 の入力の枠。OQ-25 (1)）。
+    残工数・遅延理由・完了見込みはその報告日の時点の評価なので写さない（残工数は自動に戻る）
+  - 進捗の入力（API-PRG-003）は PUT＝全ての項目の置き換え。確かめる順はプロジェクト 404 → 権限 403 → 報告日・活動 404 → 自分の割当 403 → 確定済み 409 `INVALID_STATE`（BR-13）→ 入力 400
+  - 算定項目（API-PRG-004）：`id` を載せた項目は変え、載せない項目は足し、載せなかった既存の項目は消す。完了の時刻は完了になったときに「今」、完了のままなら保つ。
+    作業項目の「承認済み」を誰が付けるかは定めが無いので、進捗を書く権限で付けられる
+  - イナズマ線（API-PRG-006）：**OPEN は今の計画（`activities` の日程の列。OQ-03）とその報告日の入力だけから計算（CALCULATED）、FINALIZED は写しだけから（SNAPSHOT。BR-13）**。
+    行にはその報告日の入力（残工数・遅延理由・完了見込み）と効いている方式を載せた（UI-PRG-001 が今の入力を読む API が 6.2 に無いため。OQ-25 (2)）。SNAPSHOT の方式は写しに無いので null。
+    日程の計算結果の無い活動があれば 409（日程を計算し直す）
+  - 確定（API-PRG-007）：RULE-PRG-007 で全ての活動をガントの行の順に写す。許容幅・抽出の閾値は今の `projects.settings`（欠けていれば 4.2 の既定）。
+    **実績工数・ETC は口 `app.state.progress_links.effort`（`SnapshotEffort`）から読む**。既定 `EffortTablesAbsent` は実績工数を空、ETC を入力した残工数だけにする
+    （自動の ETC は RULE-EFF-001 で、まだ無い。値を作らない）。**db:EFF・rule:EFF・api:EFF は表と RULE-EFF-001 を使う実装へ差し替える**。
+    差し替え忘れは `backend/tests/api/test_prg.py::test_effort_port_is_wired_once_time_entries_table_exists` が落とす
+  - 重ねる線（API-PRG-008）：`report_ids` は繰り返しのクエリ。空・重複は 400、確定していない報告日は 409 `INVALID_STATE`（PRG-18 は確定済みを選ぶ）
+  - 遅延（API-PRG-009）：ずれ・判定・進捗率は API-PRG-006 と同じ元（FINALIZED は写し。今の計画に無い活動は除く）、影響は今の計画で求める（OQ-25 (4)）。
+    抽出の閾値は OPEN なら今の設定、FINALIZED なら写した値。委託先には自分の割当の遅延活動だけ、影響の一覧も自分の割当の活動に絞り、プロジェクトの終了のずれは返さない
+  - **活動を消す（API-SCH-005。`app/services/schedule.py` の `remove_activity`）は、算定項目と全ての報告日の入力を消し、写しは紐付けだけ空にする**（A-22 の申し送り。OQ-23 (3)・OQ-25 (5)）
+- **理由:** 設計書 1.3・1.4・2.1・4.1・4.2・5.4・5.6・5.7・5.10・6.1・6.2・9 章、要求仕様書 PRG-01〜03・05・08〜13・17〜19、EFF-06、BR-06・09・13。A-21・A-22・A-23 の申し送り
+- **影響範囲:** `backend/app/api/progress.py`・`backend/app/services/progress.py`・`backend/app/schemas/progress.py`・`backend/app/main.py`・`backend/app/services/schedule.py`・`backend/tests/api/test_prg.py`
+- **覆す場合:** 報告日を作るときに写さないなら `create_status_report` の写す部分を消し、試験 `test_new_report_carries_forward_actuals_but_not_assessments` を直す。
+  直接入力以外の進捗率を黙って無視するなら `put_progress` の 400 を外し、試験 `test_put_progress_validates_and_derives_percent` を直す。
+  確定済みの入力を残して活動を消せなくするなら `remove_activity` で確定済みの報告日の入力があれば 409 にする
+- **限界:** 割当の表（DB-EFF-001）が無いので、自分の割当の判定は試験の中の代わり（`FakeAssigned`）でだけ確かめた。実績工数・自動の ETC は写していない（口の既定）。
+  変更履歴（6.1）は記録していない（OQ-08）。同時に 2 人が同じ日付の報告日を作ったとき（一意制約で後の方が 500）・確定と入力が重なったときは扱っていない。PostgreSQL では流していない
+
+## A-27: 工数（EFF）のテーブル（db:EFF）で決めたこと
+
+- **選択:**
+  - 置き場は `backend/app/models/eff.py`（DB-EFF-001〜003）、移行は `0006_eff`
+  - 外部キー：4.1 の `*_id`・`created_by` に張った。`ON DELETE` は付けない（A-11・A-15・A-19・A-22 と同じ）。割当・実績工数のある活動、差異の理由のある WBS要素・報告日は DB が消させない。
+    **`variance_notes.corrective_action_id` は外部キーをまだ張らない**（`scope_baselines.change_request_id` と同じ形。A-15・A-19）。**db:CHG のスコープは `corrective_actions` を作る移行で、この列にも外部キーを張る**。
+    張り忘れると `backend/tests/models/test_models_eff.py::test_variance_notes_corrective_action_id_references_corrective_actions_once_it_exists` が落ちる
+  - 必須の列：割当の `activity_id`・`user_id`、実績工数の `user_id`・`activity_id`・`work_date`・`hours`、差異の理由の `project_id`・`element_id`・`reason`・`created_by`・`created_at`。
+    任意：割当工数（NULL は「決めていない」。API-SCH-004 の担当の置き換えは割当工数を書かない）、備考、差異の理由の報告日（報告日を指定しない分析。5.8。OQ-26 (1)）・是正措置
+  - 一意制約は 4.1 に書かれた割当の（activity_id, user_id）と実績工数の（user_id, activity_id, work_date）だけ。**差異の理由には一意を置かない**（4.1 に定めが無い。上書きか追記かは API-EFF-007。OQ-26 (1)）
+  - 値の検査（CHECK）：割当工数は 0 以上、**実績工数は 0 以上 24 以下**（RULE-EFF-005 の「負の値の禁止」と、EFF-02 の「1 日の合計 24 時間以下」の 1 行での必要条件。日の合計は行をまたぐのでドメインが見る）。
+    工数は人時の `Numeric(10,2)`（2.4）、備考・理由は長さの定めが無いので `Text`、作成の時刻はモデルの既定値 `utc_now`
+  - **別の群の口を差し替えた**（A-11・A-18・A-21・A-26 の申し送り）：
+    - 委託先の絞り込み・自分の割当の判定 `app.state.project_access.assignments` を `AssignmentsTable`（`app/services/project_access.py`）へ
+    - スケジュールの担当の読み書き `app.state.schedule_links.assignments` を `AssignmentsStore`（`app/services/schedule.py`）へ。置き換えは外れた担当の行を消し、新しい担当を割当工数なしで足す（残る担当の割当工数は変えない）。活動を消すときは割当の行を消す
+    - 責任分担表・横断照会の `app.state.wbs_readers` の `assignments` を同じ `AssignmentsStore.assignments`、`time_entries` を `time_entries_table`（`app/services/wbs.py`）へ
+    - 確定の実績工数・ETC `app.state.progress_links.effort` を `TimeEntriesEffort`（`app/services/progress.py`）へ。**実績工数は報告日以前の `time_entries` の合計（5.8）、行が無ければ 0**。
+      **ETC はまだ入力した残工数だけ**（自動の ETC は RULE-EFF-001 で、rule:EFF のスコープ。値を作らない）。**RULE-EFF-001（`app/domain/effort.py`）を作るスコープは ETC を計算する実装へ差し替える**。
+      差し替え忘れは新しく足した `backend/tests/api/test_prg.py::test_effort_port_computes_etc_once_effort_rules_exist` が落とす
+  - 既定の口が変わったので、既存の試験を 2 つ直した（判定を弱めない向き）：`test_sch.py::test_bulk_update_assignees` は表の無い口 `AssignmentsTableAbsent` を明示して載せてから同じ主張（担当を置けば止まる）を確かめ、
+    表を読み書きする既定の口は新しい `test_default_assignments_port_reads_and_writes_assignments_table` で確かめる。`test_prg.py::test_finalize_freezes_snapshot_and_rejects_later_input` は
+    「実績工数は空」を「報告日以前の実績工数の合計（翌日の行は入れない）、実績の無い活動は 0」に置き換えた
+- **理由:** 設計書 2.4・3 章・4.1・4.2・5.8・6.2・9.2、要求仕様書 EFF-01・02・06・10、WBS-10、BR-11・13。A-11・A-15・A-18・A-19・A-21・A-22・A-26 の申し送り
+- **影響範囲:** `backend/app/models/eff.py`・`backend/app/models/__init__.py`・`backend/alembic/versions/20261111_0006_eff_tables.py`・`backend/app/services/project_access.py`・`backend/app/services/schedule.py`・
+  `backend/app/services/wbs.py`・`backend/app/services/progress.py`・`backend/app/main.py`・`backend/tests/models/test_models_eff.py`・`backend/tests/services/test_effort_tables.py`・`backend/tests/api/test_sch.py`・`backend/tests/api/test_prg.py`
+- **覆す場合:** 差異の理由を要素・報告日ごとに 1 行にするなら一意制約を足す移行を足し、試験 `test_variance_notes_hold_several_notes_per_element` を直す。
+  1 行 24 時間の検査を外す（日の合計だけを見る）なら検査を外す移行を足し、試験 `test_time_entries_rejections` の over-24 を直す。
+  実績の無い活動の実績工数を空にするなら `TimeEntriesEffort` と試験 `test_time_entries_effort_sums_up_to_report_date` を直す
+- **限界:** 移行は SQLite でだけ流した（upgrade・downgrade・upgrade）。PostgreSQL では流していない。
+  割当の利用者がそのプロジェクトのメンバーであること、実績工数の 1 日の合計・自分の割当の活動だけ・確定した報告日より前の日（RULE-EFF-005）は DB では見ていない（rule:EFF・api:EFF の担当）。
+  **実績工数のある活動を消す（API-SCH-005）と、外部キーで止まる（500）**。今は実績工数を書く API が無いので起きない。扱い方は OQ-26 (2)（api:EFF か api:SCH が決める）。
+  変更履歴（`audit_logs`）への記録は CHG のスコープ（OQ-08）で、この群の書き込みも記録していない
+
+## A-28: 工数（EFF）の計算・判定ルール（rule:EFF）で決めたこと
+
+- **選択:**
+  - 置き場は 5.1 どおり `backend/app/domain/effort.py`（RULE-EFF-001〜005）、試験は `backend/tests/domain/test_effort.py`。工数は人時の `Decimal`（`float`・`bool` は拒む。A-13 の見積と同じ）
+  - ETC（RULE-EFF-001。`compute_etc`）：**完了（進捗率 100）を最初に見て 0**、次に入力した残工数、次に 見積×（1−進捗率）、進捗率が未算定なら max(見積−実績, 0)。
+    完了は進捗率 100 で見る（RULE-PRG-001 は実績終了日があれば 100 を返す）。未見積は 0（RULE-EST-001 と同じ）。
+    式の ETC は小数 2 桁へ四捨五入（ROUND_HALF_UP）。出どころ（入力・進捗率・実績・完了・活動の無い WP）を `EtcSource` で返す（EFF-06 の「自動か入力か」）。OQ-27 (1)
+  - EAC と集計（RULE-EFF-002。`rollup_effort`）：木の検査と計画の値は RULE-EST-001（`rollup_estimates`）をそのまま使う。
+    **基準の値は集計の葉（活動と、活動の無い WP）で持ち**、上位は基準にある下位だけを足す（1 つも無ければ `None`＝基準に無い）。
+    どの軸でも合計を一致させる（EFF-09）ためで、基準の後に足した・消した活動の扱いは OQ-27 (5)。基準にあって見積が空の項目は呼び手が 0 にして渡す
+  - 多軸集計（RULE-EFF-003。`aggregate_effort`）：5.8 の表どおり。比で分けた値・稼働日に配った値は**小数 2 桁で最大剰余法**で配り、桶の合計を崩さない（同じ剰余は先の桶）。
+    割当工数が全て空か 0 なら均等。組織は `project_members.organization` を呼び手が渡し、所属が無い・メンバーでない入力者は「所属なし」、割当の無い値は「未割当」の桶。
+    週は月曜から。日付の無い値は「日付なし」、ETC は「残り」の桶。実績工数の行の合計が RULE-EFF-002 の実績と違えば `EffortError`（軸ごとの合計の食い違いを防ぐ）。OQ-27 (2)〜(4)
+  - 差異（RULE-EFF-004。`judge_variance`・`extract_variances`）：「超えた」は不等号（閾値ちょうどは抽出しない）。増えた向き・減った向きの両方。
+    比べ方は |差異| ＞ 差異率の閾値×基準（割り算の丸めを持ち込まない）。基準 0 は差異率 `None`、差異が 0 でなければ差異率の閾値を超えたとみなす。抽出は入力の順。OQ-27 (6)
+  - 実績工数の入力検査（RULE-EFF-005。`check_time_entries`）：**全てのマスを検査して問題を全て返す**（拒むのは呼び手。RULE-SCH-006 と同じ「1 件でも不正なら全体を拒む」の形を API が取れるように）。
+    1 日の合計は呼び手が渡したその利用者の今の行（プロジェクトをまたぐ）に書いた後の値を重ねて数え、ちょうど 24 は通す。
+    「確定した報告日より前の日」は字義どおり報告日ちょうどを含まない。**今の値と同じ値のマス（行の無いマスは 0）は変えていないとみなし、割当・確定の検査を当てない**。値は 0 以上・小数 2 桁まで。OQ-27 (7)(8)
+  - **確定の ETC の口を差し替えた**（A-26・A-27 の申し送り）：`app.state.progress_links.effort` を `ComputedEtcEffort`（`app/services/progress.py`）へ。
+    実績工数は `TimeEntriesEffort` と同じく表から、ETC は RULE-EFF-001 で求める。進捗率は確定が RULE-PRG-001 で求めた値を渡す（口に省ける引数 `percents` を足した。
+    既存の 2 つの口も受けて無視する）。これに合わせて `test_prg.py::test_finalize_freezes_snapshot_and_rejects_later_input` のマイルストーンの ETC を `None` から計算値 0 に直し、
+    `test_effort_port_computes_etc_once_effort_rules_exist` に `ComputedEtcEffort` であることの主張を足した（どちらも判定を弱めない向き）
+- **理由:** 設計書 1.3・2.4・4.1・4.2・5.1・5.8、要求仕様書 7.10 BR-10・7.11 BR-11、EFF-01・02・06〜10。A-23・A-26・A-27 の申し送り
+- **影響範囲:** `backend/app/domain/effort.py`・`backend/tests/domain/test_effort.py`・`backend/app/services/progress.py`・`backend/app/main.py`・
+  `backend/tests/services/test_effort_tables.py`・`backend/tests/api/test_prg.py`
+- **覆す場合:** 入力値を完了より優先するなら `compute_etc` の完了と入力の順を入れ替え、試験 `test_completed_activity_etc_is_zero` を直す。
+  報告日ちょうどの実績も固めるなら `check_time_entries` の `<` を `<=` にし、試験 `test_days_before_finalized_report_are_locked` を直す。
+  割当工数の無い活動を「未割当」にするなら `aggregate_effort` の均等の分岐を外し、試験 `test_every_axis_sums_to_project_total`・`test_assignee_axis_splits_by_assigned_hours` を直す
+- **限界:** API（api:EFF。API-EFF-003〜006）からはまだ呼んでいない（確定の ETC だけが呼ぶ）。権限（effort.enter_own の自分の割当）は RULE-AUTH-001 の担当で、ここは割当の活動の集合を受けるだけ。
+  基準の版の選び方（既定は最新）・`projects.settings` の閾値の読み出し・組織の読み出しは呼び手（api:EFF）が行う。期間の軸の基準は今のカレンダーで配る（基準を取った時点の休日ではない）
+
+## A-29: プロジェクト基盤の画面（ui:PRJ）の UI-PRJ-001・002 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/prj/`。UI-PRJ-002 は 1 つの画面に 5 つの節（基本情報・スコープ・稼働カレンダー・メンバー・権限）を並べ、節ごとに `settings/` の部品に分けた。
+    API の型と呼び出しは `frontend/src/api/prj.ts`（形は `backend/app/schemas/projects.py`・`auth.py` を読んで合わせた）
+  - 出し分け（7.2）：見るのは project.view。変える部品は節ごとの権限を `GET /api/v1/me` で見て出す（基本情報・スコープ・カレンダーは project.manage、メンバーは member.manage、
+    権限の表は permission.manage。システム管理者は全て）。権限が無ければ入力欄を無効にして値だけを見せ、保存のボタンを出さない。
+    判定の部品 `hasProjectPermission`・`canCreateProject` を `api/cmn.ts` に置き、`canDecide`（UI-CMN-003）も同じ部品を通すようにした（振る舞いは同じ）
+  - 一覧（UI-PRJ-001）の行き先は 7.2 の UI-PRJ-001 からの遷移（設定・WBS・タスクリスト・ガント・ベースライン・工数・変更要求・変更履歴・入出力）。
+    工数は effort.view、変更履歴は audit.view、入出力は data.export か data.import を持つときだけ出す（行き先の画面の API の権限）。
+    **設定以外の行き先は別のスコープの画面なので、それまでは「ページが見つかりません」になる**（A-25 と同じ）。ヘッダに一覧への行き先（「プロジェクト」）を足した
+  - 作成（API-PRJ-001）の部品は project.create を持つ人にだけ出す。**責任者の候補はユーザーの一覧（API-CMN-003）の有効な人の先頭 1000 件**。
+    API-CMN-003 は user.admin か member.manage が要る（9.1）ので、project.create だけを持つ人は自分しか選べない（403 は画面のエラーにしない）。
+    作った人はメンバーにならない（OQ-15）ので、システム管理者でない人が作ったプロジェクトは一覧に出ないことがある
+  - 基本情報の節は API-PRJ-004 の「設定」（`projects.settings`：算定方式の既定・遅れの許容幅・抽出の閾値・差異の閾値・100%ルールの許容幅）も変える。
+    変えた項目だけを送り（settings も変えた項目だけ）、空欄にした任意の項目は null。割合の設定（`variance_rate`・`hundred_percent_tolerance`）は保存の値（0.1＝10%）のまま見せる
+  - スコープの置き換え（API-PRJ-006）は載せなかった項目を消すので、**一覧を上限の 1000 件で読み、総数がそれを超えたら保存させない**（読めなかった項目を消さないため）。
+    並びは行の順（上へ・下へで変える）。名称の無い行は送らずに止める
+  - カレンダー（API-PRJ-008）は曜日・稼働時間・休日をまとめて送る。休日は日付の順に並べ、同じ日付は画面で止める（サーバも 400）。稼働日の無いカレンダーはサーバの 422 をそのまま出す
+  - メンバー：足す候補は今の頁のメンバーを除いた有効なユーザー。外すときは画面の中で確かめてから送る（`window.confirm` を使わない）。
+    メンバー・権限の表を変えた後は `/me` を読み直す（自分のロール・権限が変わると出し分けが変わる）
+  - 権限の表（API-CMN-007）は載せなかったロールが何も持たなくなるので、**3 章の 7 つのロールを全て送る**。権限は 9.1 の順に並べ、画面の一覧に無い権限のコードがサーバの表にあれば保つ
+  - 呼び名：ロールは要求仕様書 3 章、算定方式は 7.6 BR-06、権限は 9.1 の「内容」の欄。**WBS の状態（5.10）の呼び名は設計書に無いので決めた**
+    （DRAFT＝作成中・IN_REVIEW＝レビュー中・PENDING_APPROVAL＝承認待ち・BASELINED＝基準化済み。`pages/prj/labels.ts`）
+  - 400 の項目ごとの理由（details の message）も出す（`toErrorView`・`components/ErrorAlert.tsx`）。「入力に誤りがあります」だけではどこを直せばよいか分からないため。
+    入力の検査（pydantic）の理由は英語のまま出る（画面の入力欄の制約で、ふつうは起きない）
+- **理由:** 設計書 6.2（API-PRJ-001〜011・API-CMN-003・006〜008）・7.1・7.2・9.1・9.2、要求仕様書 PRJ-01・02・04・06・CMN-01、A-14・A-25・OQ-15
+- **影響範囲:** `frontend/src/pages/prj/`・`frontend/src/api/prj.ts`・`frontend/src/api/cmn.ts`・`frontend/src/api/errors.ts`・`frontend/src/components/ErrorAlert.tsx`・
+  `frontend/src/lib/form.ts`（`optionalText` を UI-CMN-002 と共有）・`frontend/src/App.tsx`・`frontend/src/test/fixtures.ts`
+- **覆す場合:** 行き先の出し分けは `ProjectListPage.tsx` の `DESTINATIONS`、WBS の状態の呼び名は `labels.ts` の `WBS_STATUS_LABELS`、スコープの読み込みの上限は `ScopeSection.tsx` の `SCOPE_ITEMS_LIMIT`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバ（uvicorn）と繋いでは確かめていない。見た目（CSS）は付けていない。
+  メンバーの頁が 100 件を超えると、足す候補から他の頁のメンバーを除けない（選ぶと API-PRJ-010 がそのロール・所属を置き換える）
+
+## A-30: 工数（EFF）の API（api:EFF）の API-EFF-001〜007 で決めたこと
+
+- **選択:**
+  - 置き場は `backend/app/api/effort.py`（ルート）・`backend/app/services/effort.py`（ユースケース）・`backend/app/schemas/effort.py`（入出力）、試験は `backend/tests/api/test_eff.py`。
+    計算・判定は rule:EFF の `app/domain/effort.py`（RULE-EFF-001〜005）をそのまま呼ぶ（サービス層は DB の行をデータクラスへ直して渡すだけ）
+  - 割当（API-EFF-001）：載せた担当を作る・割当工数を変え、載せなかった担当を外す（全件の置き換え）。担当はプロジェクトの有効なメンバーだけ（API-SCH-004 と同じ判定）。
+    重複・メンバーでない・負・小数 3 桁以降は 400（1 件でもあれば何も変えない）。応答に割当工数の合計と「合計−見積」を付ける（EFF-01 の「見積と比べて表示する」。見積が空なら差は空）
+  - 割当の一覧（API-EFF-002）：並びはガントの行の順→利用者の ID。委託先だけで読む利用者は自分の割当の活動の分だけ（9.2 の注記）
+  - 実績工数を書く（API-EFF-003）：日×活動のマスの置き換え（0 は行を消す。メモだけの変更も「変える」とみなす。0 時間のマスのメモは 400）。プロジェクトをまたいでよい。
+    活動のプロジェクトで effort.enter_own を持たなければ 403。RULE-EFF-005 の「自分の割当」「確定した報告日より前の日」はマスのプロジェクトごとに、
+    「1 日 24 時間以下」はプロジェクトをまたいだ自分の全ての行で見る。問題は全て details に載せ、状態は 400＞403＞409（`INVALID_STATE`）＞422（`DAY_TOTAL_EXCEEDED`）の順で 1 つ選ぶ。OQ-28 (2)(5)
+  - 実績工数を読む（API-EFF-004）：プロジェクトごとに effort.view があれば全ての利用者の行、effort.enter_own だけなら自分の行。他人を指定して effort.view が 1 つも無い・どちらの権限も無いは 403。
+    `from`・`to` は作業日の範囲（両端を含む）。OQ-28 (1)
+  - 集計（API-EFF-005）：5.8 どおり。報告日を指定しなければ 4.2 の「最新」の報告日の入力（進捗率は RULE-PRG-001 でイナズマ線と同じ値を求める。`app.services.progress.report_percents`）、
+    実績は全件。指定すれば実績は報告日以前の分。基準は指定の版、無ければ最新の版、版が無ければ基準は全て空。基準の項目の見積の空は 0（A-28 の申し送り）。
+    行は軸ごと：wbs は WBS の並びの全ての要素、member は利用者の ID の順と最後に「未割当」、organization は桶の種類→所属名、week・month は桶の順。OQ-28 (4)
+  - 差異（API-EFF-006）：WBS の全ての要素を WBS の並びで RULE-EFF-004 に掛け、超えた要素と追加の要素だけを返す。閾値は `projects.settings`（4.2 の既定を重ねる）。
+    スケジュールベースラインが 1 つも無ければ 409 `INVALID_STATE`。各行に同じ報告日（指定しなければ「報告日を指定しない分析」）の差異の理由を付ける。OQ-28 (3)
+  - 差異の理由（API-EFF-007）：WBS要素・報告日（空も 1 つの鍵）ごとに 1 行を上書きする（PUT の冪等。`created_by`・`created_at` は最後に書いた人・時刻）。OQ-26 (1)
+  - **是正措置を読む口 `EffortLinks.corrective_actions` を `app.state.effort_links` に載せた**。是正措置の表（DB-CHG-002）がまだ無いので既定は `CorrectiveActionsTableAbsent`（是正措置は無い＝紐付けは 404）。
+    **db:CHG のスコープが表を読む実装へ差し替える。** 差し替え忘れは `test_eff.py::test_corrective_actions_port_is_wired_once_table_exists` が落とす
+  - **横断照会（API-WBS-023）の EAC の口を差し替えた**（A-18 の申し送り）：`app.state.wbs_readers.eac_hours` を `app.services.effort.eac_by_element`（最新の報告日の入力・全ての実績での RULE-EFF-002）へ
+  - **実績工数のある活動を消す（API-SCH-005）は 409 `INVALID_STATE`（details に `HAS_TIME_ENTRIES`）**。実績を書く API ができて、外部キーの 500 が起き得るようになったため（A-27 の限界・OQ-26 (2)）。
+    実績を黙って消さない向き（人が決めるまで消さない）を取った。実績を 0 にすれば消せる
+- **理由:** 設計書 1.3・2.4・4.1・4.2・5.8・6.1・6.2・9 章、要求仕様書 EFF-01・02・06〜10、WBS-10、BR-10・11・13。A-18・A-26・A-27・A-28 の申し送り
+- **影響範囲:** `backend/app/api/effort.py`・`backend/app/services/effort.py`・`backend/app/schemas/effort.py`・`backend/app/main.py`・`backend/app/services/progress.py`（`report_percents`・`entries_of_report` を足した）・
+  `backend/app/services/schedule.py`（`remove_activity` の 409）・`backend/tests/api/test_eff.py`
+- **覆す場合:** 差異の理由を追記にするなら `put_variance_note` の上書きを外し、試験 `test_variance_extracts_elements_over_both_thresholds` の `again["id"] == note["id"]` を直す。
+  実績工数のある活動を実績ごと消すなら `remove_activity` の 409 を `delete(TimeEntry)` に替え、試験 `test_activity_with_time_entries_is_not_deleted` を直す。
+  基準が無いときに空の差異を返すなら `variance` の 409 を外し、試験の `no_baseline` を直す
+- **限界:** 変更履歴（`audit_logs`）への記録は CHG のスコープ（OQ-08）で、この群の書き込みも記録していない。PostgreSQL では流していない。
+  同時の書き込み（同じ利用者が同じ日に 2 つの要求で書く）で 1 日 24 時間の検査をすり抜ける競合は扱っていない（DB に日の合計の制約は無い）。
+  集計・差異は要求のたびに全件を読んで計算する（キャッシュしない。性能は実データで見ていない）。画面（ui:EFF）はまだ無い
+
+## A-31: 変更管理（CHG）のテーブル（db:CHG）で決めたこと
+
+- **選択:**
+  - 置き場は `backend/app/models/chg.py`（DB-CHG-001〜003）、移行は `0007_chg`
+  - 外部キー：4.1 の `*_id`・`created_by`・`applied_by` に張った。`ON DELETE` は付けない（A-11・A-15・A-19・A-22・A-27 と同じ）。版を作った変更要求・差異の理由が指す是正措置は DB が消させない。
+    **先に作った表の列へ外部キーを張った**（A-15・A-19・A-27 の申し送り）：`scope_baselines.change_request_id`・`schedule_baselines.change_request_id` → `change_requests.id`、
+    `variance_notes.corrective_action_id` → `corrective_actions.id`（SQLite では表の作り直し）。`audit_logs.entity_id` は対象の種類で指す表が変わるので外部キーを持たない（対象が消えても履歴は残る）
+  - 必須の列：変更要求の `project_id`・`number`・`title`（200 文字）・`reason`・`target_codes`・`operations`（既定は空の配列）・`status`・`created_by`、
+    是正措置の `project_id`・`cause`・`action`・`status`、変更履歴の `occurred_at`・`entity_type`（64 文字）・`entity_id`・`action`。
+    任意：影響分析（提出の前）・提出／反映の時刻と反映した人、是正措置の紐付け（要素・活動・報告日）・担当・期限・効果、変更履歴の変更者・プロジェクト・WBS ID・変更前後の値。OQ-29 (1)
+  - 一意制約は 4.1 の「プロジェクト内の連番」から変更要求の（project_id, number）。値の検査（CHECK）：番号は 1 以上、変更要求の状態は 5.10 の 5 つ（起票は DRAFT）、
+    是正措置の状態は 4.1 の 3 つ（登録は NOT_STARTED）、変更履歴の操作は 4.1 の 3 つ。遷移（RULE-CHG-003・005）は DB では見ない
+  - 変更要求の `operations` は JSON の配列をそのまま持つ（5.9 の形の検査は RULE-CHG-001）。`target_codes` は起票した時点の WBS ID（改番の後は RULE-WBS-008 が新旧対応で解決する）
+  - **変更履歴は追記だけ**（4.2・NFR-05）：ORM からの更新・削除を `before_update`・`before_delete` のイベントで止める（`AuditLogImmutableError`）。
+    検索（API-CHG-010）のために、時刻とプロジェクト・変更者・対象（種類と ID）・WBS ID に索引を置いた。**記録する仕組み（infra の `before_flush`・RULE-CHG-006）はこのスコープでは作っていない**
+  - **別の群の口を差し替えた**（A-18・A-30 の申し送り）：
+    - 横断照会の `app.state.wbs_readers` の `change_requests` を `change_requests_table`、`corrective_actions` を `corrective_actions_table`（`app/services/wbs.py`）へ。プロジェクトの全件を ID の順に読む（状態で絞らない）
+    - 差異の理由の紐付け `app.state.effort_links.corrective_actions` を `CorrectiveActionsTable`（`app/services/effort.py`）へ。別のプロジェクトの是正措置は「無い」（404）
+    - 変更要求の申請への判断 `app.state.change_request_approvals` を `ChangeRequestTransitionNotWired`（`app/services/wbs.py`）へ。
+      **状態遷移（RULE-CHG-003）は rule:CHG、変更要求へ通すのは api:CHG の担当で、このスコープには無い**（A-19 の `SchedulingNotWired` と同じ形）。
+      申請の指す変更要求が無ければ食い違いとして、あっても状態を動かす実装が無いので止める（RuntimeError。変更要求の状態は変えない）。変更要求の申請は提出（API-CHG-005）でしか作られないので今は起きない。
+      **api:CHG は API-CHG-005 と同時に RULE-CHG-003 を通す実装へ差し替える**。差し替え忘れは新しく足した
+      `backend/tests/api/test_wbs.py::test_change_request_approvals_apply_transition_once_change_api_exists` が落とす
+  - 試験：`backend/tests/models/test_models_chg.py`（列・一意・検査・外部キー・追記だけ・移行）、`backend/tests/services/test_change_tables.py`（読む口と止める口）、
+    `backend/tests/api/test_eff.py::test_variance_note_links_corrective_action_of_same_project`（差異の理由が同じプロジェクトの是正措置にだけ紐付く）を足した。
+    既存の `test_eff.py` の「表がまだ無いので 404」のコメントを「1 つも登録していないので 404」に直した（主張は変えていない）。
+    既存の `test_models_sch.py::test_schedule_baselines_versions_increase_per_project` は実在しない変更要求 7 を指していたので、外部キーを張った後は実在する変更要求を作って指すように直した（主張は変えていない）
+- **理由:** 設計書 2.4・3 章・4.1・4.2・5.9・5.10・6.2・8 章 NFR-05、要求仕様書 CHG-01〜04・06・09、EFF-10、BR-12。A-15・A-18・A-19・A-27・A-30 の申し送り
+- **影響範囲:** `backend/app/models/chg.py`・`backend/app/models/__init__.py`・`backend/app/models/wbs.py`・`backend/app/models/sch.py`・`backend/app/models/eff.py`・
+  `backend/alembic/versions/20261111_0007_chg_tables.py`・`backend/app/services/wbs.py`・`backend/app/services/effort.py`・`backend/app/main.py`・
+  `backend/tests/models/test_models_chg.py`・`backend/tests/services/test_change_tables.py`・`backend/tests/api/test_wbs.py`・`backend/tests/api/test_eff.py`
+- **覆す場合:** 是正措置の担当・期限を必須にするなら NOT NULL の移行を足し、試験 `test_corrective_actions_links_and_owner_are_optional` を直す。
+  変更履歴の更新・削除を ORM で許す（保守の手段が要る）なら `_refuse_audit_log_change` のイベントを外し、試験 `test_audit_logs_are_append_only` を直す
+- **限界:** 移行は SQLite でだけ流した（upgrade・downgrade・upgrade）。PostgreSQL では流していない。追記だけの歯止めは ORM の単位の操作だけで、
+  `update(AuditLog)`・`delete(AuditLog)` の一括の文や SQL の直接の実行は止めない（DB の権限・トリガは R1 で扱わない）。
+  **是正措置の紐付いた要素・活動を消す（API-WBS-005・API-SCH-005）と外部キーで止まる（500）**。今は是正措置を作る API が無いので起きない（OQ-29 (2)。api:CHG が決める）。
+  変更履歴は**まだ 1 行も記録されない**（記録の仕組みは OQ-08・RULE-CHG-006 のスコープ）。変更要求・是正措置がプロジェクトの WBS・活動・報告日と同じプロジェクトを指すことは DB では見ていない（サービス層の担当）
+
+## A-32: 見積（EST）のテーブル（db:EST）で決めたこと
+
+- **選択:**
+  - 置き場は `backend/app/models/est.py`（DB-EST-001）、移行は `0008_est`（`0007_chg` の次）
+  - **見積を書くたびに 1 行を足す履歴の表**として作った（EST-08 の「見積値を変えた履歴が残る」）。一意制約は置かない（4.1 に定めが無い）。
+    今の見積の値は `wbs_elements.own_estimate_hours`・`activities.estimate_hours` のまま（両方へ書くのは API-EST-001。api:EST の担当）
+  - **`target_id` は外部キーを持たない**：対象の種類（ELEMENT＝`wbs_elements.id`、ACTIVITY＝`activities.id`）で指す表が変わり、4.2 の `<単数形>_id` に当たらない
+    （`approval_requests.target_id`・`audit_logs.entity_id` と同じ）。対象の WBS要素・活動を消しても記録は残る（履歴を黙って消さない）。
+    対象がそのプロジェクトの要素・活動であることは書く API（API-EST-001）が確かめる。`project_id`・`entered_by` には外部キーを張り、`ON DELETE` は付けない（A-11・A-15・A-19・A-22・A-27・A-31）
+  - 必須の列：`project_id`・`target_type`・`target_id`・`hours`・`input_value`・`input_unit`・`entered_by`・`entered_at`（既定は `utc_now`）。
+    **任意：`method`・`assumptions`・`references`**（EST-08 の受入基準は「保存でき」。RULE-EST-002 の `record_estimate` も省ける）
+  - 値の検査（CHECK）：対象の種類は 4.1 の 2 つ、入力の単位は 2 つ、手法は空か EST-08 の 5 つ、`hours`・`input_value` は 0 以上（EST-01 の「負の値は入力できない」）。
+    値の一覧は `app.domain.estimate` の `TargetType`・`InputUnit`・`EstimateMethod` と同じ（試験 `test_value_lists_match_design_4_1_and_estimate_rules` が食い違いを落とす）。
+    工数は人時の `Numeric(10,2)`（2.4）、前提・参照資料は長さの定めが無いので `Text`。人日の換算（`hours` と `input_value` の関係）は RULE-EST-002 の担当で DB では見ない
+  - 索引：対象ごとの履歴（API-EST-002）のために（project_id, target_type, target_id）、利用者の外部キーに `entered_by`
+  - **別の群の口を差し替えた**（A-18・A-31 の申し送り）：横断照会の `app.state.wbs_readers.estimate_records` を `estimate_records_table`（`app/services/wbs.py`）へ。
+    プロジェクトの全ての記録（同じ対象の古い記録も）を ID の順に読む
+- **理由:** 設計書 2.4・3 章・4.1・4.2・5.1（RULE-EST-002）・5.8・6.2（API-EST-001〜003）、要求仕様書 EST-01・08。A-18・A-31 の申し送り
+- **影響範囲:** `backend/app/models/est.py`・`backend/app/models/__init__.py`・`backend/alembic/versions/20261111_0008_est_tables.py`・`backend/app/services/wbs.py`・`backend/app/main.py`・
+  `backend/tests/models/test_models_est.py`・`backend/tests/services/test_estimate_tables.py`
+- **覆す場合:** 手法を必須にするなら NOT NULL の移行を足し、試験 `test_estimate_records_keep_history_per_target` を直す。
+  対象を消したら記録も消すなら、消す API（API-WBS-005・API-SCH-005）で記録を消し、試験 `test_estimate_records_target_has_no_foreign_key_and_survives_its_target` を直す
+- **限界:** 移行は SQLite でだけ流した（upgrade・downgrade・upgrade）。PostgreSQL では流していない（`references` は SQL の予約語で、SQLAlchemy が引用符で囲む）。
+  見積を書く API（api:EST）はまだ無いので、行を作るのは試験だけ。横断照会（API-WBS-023）を実際の表と繋いだ API の試験は足していない（読む口の単体の試験だけ）。
+  変更履歴（`audit_logs`）への記録は OQ-08・RULE-CHG-006 のスコープで、この表の書き込みも記録していない
+
+## A-33: 変更管理（CHG）の計算・判定ルール（rule:CHG）で決めたこと
+
+- **選択:**
+  - 置き場は 5.1 どおり：RULE-CHG-001・002 は `backend/app/domain/change.py`、RULE-CHG-003・005 は `workflow.py`、RULE-CHG-004 は `baseline.py`、
+    RULE-CHG-006 は `audit.py`。試験は `backend/tests/domain/` の `test_change.py`・`test_workflow.py`・`test_baseline.py`・`test_audit.py`
+  - 変更内容の適用（RULE-CHG-001。`apply_operations`）：計画のモデル（`PlanModel`。不変のデータ）の写しへ 5.9 の操作を**順に**当てる。
+    1 件でも不正ならその操作の位置（`index`）を付けた `ChangeError` で止め、何も返さない（途中まで当てた計画は返さない）。
+    新しく作る要素・活動には負の仮の ID（-1, -2, … の作った順）を振る（DB の ID と重ならない。入力の計画の ID は 1 以上でなければ拒む）。
+    新しい要素の WBS ID は RULE-WBS-002 の `new_element_code`（削除で空いた番号は再利用しない）、表示順は兄弟の最大＋1（API-WBS の要素の追加と同じ）。
+    WBS ID は今の ID、無ければ新旧対応の旧 ID で解決する。仮の参照名（`ref`）は要素と活動で 1 つの名前空間（重なれば `DUPLICATE_REF`）。
+    業務ルールは操作ごとに RULE-WBS-003（WP は子を持たない・活動は WP にだけ・区分の変更も含む）と RULE-SCH-001（`cycle_if_added`。`SCHEDULE_CYCLE` の
+    `details` は循環の活動）を当て、最後に当てた後の木を `check_hierarchy` で検査し直す。期間 0 の活動をマイルストーンにする（4.2）。OQ-30 (1)〜(5)(9)
+  - 影響分析（RULE-CHG-002。`analyze_impact`）：前後の計画それぞれに `calculate_schedule`（RULE-SCH-002・003）と `rollup_estimates`（RULE-EST-001）を流す。
+    ずれは稼働日（`working_day_difference`。前へずれたら負）。`milestones` は前後の両方にあって日付の変わったもの、`critical_path` は加わった（後の順）・外れた（前の順。消した活動を含む）、
+    `elements` は追加（作った順）・`update_element` の 4 項目が変わった要素・消した要素（配下を含む）。新しく作ったものは ID を出さず `ref` を出す。
+    `ImpactAnalysis.to_json()` が `change_requests.impact` に保存する形（日付は ISO 8601、工数は小数 2 桁の文字列）を作る。OQ-30 (6)
+  - 変更要求の状態遷移（RULE-CHG-003。`transition_change_request`）：5.10 の表どおり（提出・承認・却下・取り下げ・反映）。状態を先に見て、
+    承認・却下は提出者と同じ人なら `SELF_APPROVAL_FORBIDDEN`（RULE-WBS-006 と同じ `ensure_not_self_approval`）。反映は APPROVED だけ。
+    直せるのは DRAFT だけ（`ensure_change_request_editable`。6.2 の API-CHG-003）
+  - 再基準化（RULE-CHG-004。`plan_rebaseline`）：反映した後の WBS と日程から、スコープとスケジュールの**足す版だけ**を作る（今ある版の最大＋1、理由 CHANGE_REQUEST、元の変更要求）。
+    写し方は手動の版（API-SCH-011 の `save_baseline`）と承認の版（`_snapshot_scope`）と同じ。スケジュールの版の名前は呼び手が渡す（OQ-20 (3)。空・201 文字は拒む）
+  - 是正措置（RULE-CHG-005）：`transition_corrective_action` は 5.10 の 3 つの遷移と、同じ状態のまま（効果だけの更新）を通す。
+    `is_corrective_action_overdue` は「期限 ＜ 今日 かつ DONE でない」。期限ちょうどは超過でない、期限の無い措置は超過にならない。OQ-30 (8)
+  - 変更履歴の差分（RULE-CHG-006。`make_audit_diff`）：CREATE は後の全ての値、DELETE は前の全ての値、UPDATE は変わった項目だけ（変わらなければ記録しない `None`）。
+    値は JSON の形へ直す（日付・時刻は ISO、Decimal は文字列、列挙は値）。**ハッシュの列（`password_hash`・`token_hash`）は既定で `***` に伏せる**（OQ-08 の提案。変わったことは残る）
+- **理由:** 設計書 1.3・4.1・4.2・5.1・5.2・5.5・5.8・5.9・5.10・6.1・6.2、要求仕様書 CHG-01〜04・06・09、BR-02・BR-12、NFR-05。OQ-08・OQ-16・OQ-20
+- **影響範囲:** `backend/app/domain/change.py`・`backend/app/domain/workflow.py`・`backend/app/domain/baseline.py`・`backend/app/domain/audit.py`・
+  `backend/tests/domain/test_change.py`・`backend/tests/domain/test_workflow.py`・`backend/tests/domain/test_baseline.py`・`backend/tests/domain/test_audit.py`
+- **覆す場合:** `add_element` に `parent_ref` を足すなら `_OPERATION_KEYS` の任意の項目に足して `_add_element` で引き、試験を足す。
+  足した・消したマイルストーンも出すなら `analyze_impact` の `milestones` の条件を変え、試験 `test_impact_reports_updated_and_removed_elements` を直す。
+  ハッシュの値も履歴に写すなら `SECRET_FIELDS_DEFAULT` を空にし、試験 `test_secret_values_are_redacted` を直す
+- **限界:** ドメインの関数だけで、API（api:CHG）・サービス・infra の記録の口（`audit_listener`）からはまだ呼んでいない。
+  `app.state.change_request_approvals` は `ChangeRequestTransitionNotWired` のまま（A-31。API-CHG-005 と同時に api:CHG が差し替える）。
+  影響分析は今のカレンダーとプロジェクトの開始日で前後を計算する（変更内容でカレンダーは変えられない）。権限（change.create・change.approve・change.apply・action.manage・audit.view）は RULE-AUTH-001 の担当
+
+## A-34: 表形式の入出力（rule:INT）の RULE-INT-001 で決めたこと
+
+- **選択:**
+  - 置き場は 5.1 どおり `backend/app/domain/tabular.py`、試験は `backend/tests/domain/test_tabular.py`
+  - **xlsx のファイルの読み書きはドメインに置かない**（1.3：ドメインは標準ライブラリのみ。openpyxl は使えない）。ドメインは
+    「セルの格子（1 行目が見出し）↔ 6.3 の行」と CSV（標準の `csv`。UTF-8 の BOM 付き・カンマ区切り・CRLF）を受け持つ。
+    xlsx は api:INT が openpyxl で 1 枚目のシートの格子を読み書きし、読んだセルの値は `cell_text` で同じ文字列に直す（数・日付・真偽・空）
+  - 見出しは 6.3 の列の名前から Markdown の ` を外した文字（`先行の活動ID（; 区切り）` など）を、この順で完全一致で照らす。違えば
+    `HEADER_MISMATCH`（1 行目）だけを返し、行は読まない。見出しの右の空のセルは許す。全てが空の行は読み飛ばす。BOM の無い UTF-8 も読む。OQ-31 (1)(7)
+  - 誤りは `ImportIssue`（`row`＝ファイルの行。見出しが 1、xlsx の行番号と同じ／`column`＝列の見出し、行の誤りは `None`／`code`／`message`）。
+    コードは `ImportIssueCode`（形式・範囲・必須・文字数・重複・参照先、と全件の検査の RULE-WBS-003・RULE-SCH-001・RULE-EFF-005 の名前）。
+    並びは行の順、同じ行は列の順
+  - 検査の段：行ごとの検査（参照先の有無・照合キーの重複を含む）を全行に当てて全件を返し、それが通ったときだけ取り込んだ後の全体へ
+    RULE-WBS-003（WP の子・親子の循環・活動のある要素の区分の変更）・RULE-SCH-001（依存の循環）・RULE-EFF-005（自分の割当・1 日 24 時間・確定した報告日）を当てる。
+    全体の検査の誤りはファイルの行に関わるものだけ（今のデータのままの不整合は取込の誤りにしない）
+  - 誤りが 1 件でもあれば `ImportPlan.changes` は空（何も書かない）。書くのはサービス層（1 つのトランザクション）。`dry_run` は `ImportPlan` をそのまま返せばよい
+  - 照合：`wbs` は WBS ID を RULE-WBS-002 の `resolve_code`（今の ID → 旧 ID）で解決し、解決できれば更新、できなければ追加。
+    追加の行の WBS ID は仮の ID で、親の参照に使う（実際の ID はサービス層が `new_element_code` で振る）。追加は親を先に並べる。
+    親の WBS ID の変更は移動（`move_element` で ID は変えない）。`activities` は活動ID（空なら追加、無い ID は `NOT_FOUND`）。
+    `time-entries` はログインID＋活動ID＋作業日（行の無いキーは 0 時間・備考なしとみなし、同じなら変更なし）。OQ-31 (3)
+  - ファイルに無い要素・活動・実績は消さない。先行には今の活動の ID だけを書ける。OQ-31 (4)(5)
+  - 区分はコード（`DELIVERABLE` など）。マイルストーン（0/1）は期間 0 と組でだけ置ける（4.2・DB の検査制約と同じ）。
+    工数は 0 以上・小数 2 桁まで（見積は 99999999.99 以下、実績の 1 行は 24 以下）。名称は 200 文字・ログインID は 100 文字・WBS ID は 100 文字まで。OQ-31 (2)
+  - 自由な文字（名称・辞書・備考）は前後の空白も含めてそのまま持つ（往復で一致させるため）。空・空白だけは「無い」とみなす。
+    識別子（WBS ID・ログインID）・日付・数は前後の空白を外す
+  - 実績工数の備考だけの変更は RULE-EFF-005 の「変えない」マスだが、確定した報告日より前の日では `LOCKED_DATE` で拒む。OQ-31 (6)
+  - 往復の一致：出力（`export_grid`。先行・担当者は昇順、工数は小数 2 桁）した直後の表を取り込むと `changes` が空・全ての行が `unchanged`。
+    比べ方は列ごと（先行・担当者は集合、工数は `Decimal` の値、文字の空は `None`）
+- **理由:** 設計書 1.3・2.4・4.1・4.2・5.1・5.2・6.2・6.3、要求仕様書 INT-01・BR-02・BR-13・EFF-02。A-28・A-30・A-33
+- **影響範囲:** `backend/app/domain/tabular.py`・`backend/tests/domain/test_tabular.py`
+- **覆す場合:** 見出しを変えるなら `WBS_COLUMNS`・`ACTIVITY_COLUMNS`・`TIME_ENTRY_COLUMNS` と試験 `test_columns_follow_design_6_3` を直す。
+  区分を日本語にするなら `_Cells.kind` と `format_row` に対応表を足す。ファイルに無いものを消すなら `ImportPlan` に削除の行を足し、
+  往復の試験はそのまま通る（全てがファイルにある）ことを確かめる
+- **限界:** ドメインの関数だけで、API（API-INT-001・002）・サービス・xlsx の読み書きはまだ無い（api:INT の範囲）。
+  サービス層が渡す `login_ids`・`users` は、今の値に現れるログインID（無効にした利用者を含む）を含めないと往復で `NOT_FOUND` になる。
+  出力のセルの式の解釈（CSV インジェクション）は未対策（OQ-31 (8)）。権限（data.export・data.import）は RULE-AUTH-001 の担当
+
+## A-35: 定例会議レポート（rule:RPT）の RULE-RPT-001 で決めたこと
+
+- **選択:**
+  - 置き場は 5.1 どおり `backend/app/domain/report.py`（`build_meeting_report`）、試験は `backend/tests/domain/test_report.py`
+  - 値の源：確定済み（`FINALIZED`）は渡されたスナップショットの写しだけ（今の活動の値を渡すと拒む。報告日が違えば拒む）。
+    確定前（`OPEN`）は写しを受けず、RULE-PRG-007 の `finalize_status_report` を**状態を変えずに**呼んで計算値を求める（保存はサービス層がしない）。
+    確定と同じ計算なので、確定の前後でレポートの値が変わらない
+  - 上段：ガントは RULE-SCH-005 の結果（今の計画）をそのまま載せる。イナズマ線は写しの値だけから `restore_lightning_line` で作り、
+    `overlay_lightning_lines` で今のガントの行へ置き直す（今のガントに無い活動は `missing_activity_ids`）。表示の範囲は報告日の前後 4 週（暦日 28 日。両端を含む）で、行は絞らない。OQ-32 (4)
+  - 下段左：写しの判定とずれ・進捗率と、報告日の完了見込み日を RULE-PRG-006 の `analyze_delays` へ渡し、その抽出（δ ≦ −写しの抽出の閾値）・
+    ずれの順・見込みの終了をそのまま使う。行には WBS ID・名称・予定の終了日（写し）・遅延理由・見込みが入力か計算か・クリティカル（今の網）を付ける。
+    写しの後に消した活動は今の網に無いので影響の計算に渡さない
+  - 下段中：写しのマイルストーン（行の順）。予定日＝写しの日付、見込み日＝遅延の見込みを全て当てた前進計算（5.7 の 4）でずれた日（ずれなければ予定日）、
+    ずれ＝見込み日と予定日の終業の位置の差（稼働日）。OQ-32 (5)
+  - 下段右（KPI）：全体の進捗率＝`Σ(見積×進捗率)/Σ見積`（未算定は分子・分母から外す、見積の空は 0、重みの合計 0 は None、小数 2 桁で四捨五入）。
+    遅れの件数＝写しの判定が `BEHIND` の活動の数（抽出の閾値に関わらない）。EAC と基準の差＝RULE-EFF-002 のプロジェクトの `eac − baseline`（基準が無ければ None）。
+    クリティカルパスの最小フロート＝ガントのクリティカルな行のトータルフロートの最小（無ければ None）。
+    是正措置の期限超過＝RULE-CHG-005 の `is_corrective_action_overdue` を報告日を今日として当てた数。OQ-32 (1)(2)
+  - 入力の誤り（未定義の状態・同じ活動の進捗の入力が 2 つ・同じ是正措置が 2 つ・負の見積・写しと状態の食い違い）は `ReportError`。
+    日程の循環は RULE-SCH-001 の `ScheduleCycleError` のまま返す
+- **理由:** 設計書 1.3・4.1・5.1・5.6・5.7・5.8・7.3・7.4、要求仕様書 RPT-01・BR-09・BR-13。既にあるルール（RULE-SCH-005・RULE-PRG-005〜007・RULE-EFF-002・RULE-CHG-005）を組み合わせ、同じ式を二重に持たない
+- **影響範囲:** `backend/app/domain/report.py`・`backend/tests/domain/test_report.py`
+- **覆す場合:** 未算定を 0 として数えるなら `_overall_progress` の `continue` を外し、試験 `test_overall_progress_excludes_not_computed_and_none_when_no_weight` を直す。
+  期限超過を実際の今日で数えるなら `build_meeting_report` に `today` を足して `_overdue_count` へ渡し、試験 `test_kpi_eac_variance_critical_float_and_overdue_actions` を直す。
+  上段の行を範囲で絞るなら `MeetingReport` に絞った行を足す（線の頂点は全行に要る）
+- **限界:** ドメインの関数だけで、API（API-RPT-001）・サービス・画面（UI-RPT-001）からはまだ呼んでいない（api:RPT・ui:RPT の範囲）。
+  確定済みのレポートでも、ガント・依存の網・フロート・見積・EAC・是正措置の状態は今の値（写しに無い。OQ-32 (3)）。権限（project.view）は RULE-AUTH-001 の担当

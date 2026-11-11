@@ -49,6 +49,7 @@ from app.services.project_access import ProjectMembersTable
 from app.services.wbs import (
     ActivitiesTableAbsent,
     ChangeRequestsTableAbsent,
+    ChangeRequestTransitionNotWired,
     CrossGroupReaders,
     eac_not_available,
 )
@@ -1000,3 +1001,24 @@ def test_change_request_approvals_are_wired_once_change_requests_table_exists(ap
         )
     else:
         assert isinstance(app.state.change_request_approvals, ChangeRequestsTableAbsent)
+
+
+# 変更要求を提出する API（API-CHG-005）のパス。提出が変更要求の承認申請を作る（5.10）
+CHANGE_REQUEST_SUBMIT_PATH = "/api/v1/projects/{project_id}/change-requests/{change_request_id}/submit"
+
+
+def test_change_request_approvals_apply_transition_once_change_api_exists(app: FastAPI) -> None:
+    """変更要求を提出する API（API-CHG-005）ができたら、アプリは申請への判断を変更要求の状態へ通す実装を載せていること（A-31）。
+
+    それまでは ChangeRequestTransitionNotWired（申請の指す変更要求を読み、状態遷移の実装が無いので止める）。
+    api:CHG が差し替えを忘れるとこの試験が落ちる（test_prj.py の日程の再計算の口と同じ形）。
+    """
+    # FastAPI の app.routes は include_router したルートのパスを出さないことがあるので、OpenAPI のパスでも見る
+    paths = {getattr(route, "path", None) for route in app.routes} | set(app.openapi()["paths"])
+    assert "/api/v1/projects/{project_id}/wbs" in paths, "ルートのパスを読めていない（判定の前提が崩れている）"
+    if CHANGE_REQUEST_SUBMIT_PATH in paths:
+        assert not isinstance(
+            app.state.change_request_approvals, (ChangeRequestsTableAbsent, ChangeRequestTransitionNotWired)
+        ), "API-CHG-005 ができたので、app.main.create_app の app.state.change_request_approvals を RULE-CHG-003 を通す実装へ差し替える"
+    else:
+        assert isinstance(app.state.change_request_approvals, ChangeRequestTransitionNotWired)

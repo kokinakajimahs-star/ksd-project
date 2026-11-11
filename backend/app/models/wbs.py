@@ -10,7 +10,7 @@
 
 ``approval_requests.target_id`` は対象の種類（WBS／変更要求）で指す表が変わるので外部キーを持たない（4.2 の ``<単数形>_id`` に当たらない）。
 ``scope_baselines.change_request_id`` の ``change_requests.id``（DB-CHG-001）への外部キーは、
-``change_requests`` を作る移行（db:CHG）で張る（ASSUMPTIONS.md A-15。A-08 と同じ形）。
+``change_requests`` を作る移行（db:CHG の ``0007_chg``）で張った（ASSUMPTIONS.md A-15。A-08 と同じ形）。
 """
 
 from __future__ import annotations
@@ -265,8 +265,8 @@ class ScopeBaseline(Base):
     version: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(String(32))
     approval_request_id: Mapped[int | None] = mapped_column(ForeignKey("approval_requests.id"), index=True)
-    # change_requests（DB-CHG-001）への外部キーは db:CHG の移行で張る（A-15）
-    change_request_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    # change_requests への外部キーは db:CHG の移行（0007_chg）で張った（A-15）
+    change_request_id: Mapped[int | None] = mapped_column(ForeignKey("change_requests.id"), index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 

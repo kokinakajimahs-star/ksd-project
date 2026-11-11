@@ -16,6 +16,21 @@ WBS の状態（``projects.wbs_status``）::
 - 承認で作る版の理由は、初めてなら ``INITIAL_APPROVAL``、既に版があれば ``RE_APPROVAL``（5.10）
 - 承認申請（``approval_requests.status``）：``PENDING → APPROVED / REJECTED``。申請者と同じ人は判断できない
 
+変更要求（``change_requests.status``。RULE-CHG-003）::
+
+    [*] → DRAFT
+    DRAFT → SUBMITTED      提出（影響分析を流して保存し、承認申請を作る）
+    SUBMITTED → APPROVED   承認
+    SUBMITTED → REJECTED   却下
+    SUBMITTED → DRAFT      取り下げ
+    APPROVED → APPLIED     反映（再基準化）
+
+- 承認・却下は提出者と別の人だけ（``SELF_APPROVAL_FORBIDDEN``）。反映は承認済み（APPROVED）だけ
+- 直せる（API-CHG-003）のは DRAFT のときだけ
+
+是正措置（``corrective_actions.status``。RULE-CHG-005）：``NOT_STARTED → IN_PROGRESS → DONE``（DONE から IN_PROGRESS へ戻せる）。
+期限超過は「期限 ＜ 今日 かつ 未完了（DONE でない）」。今日はサービス層が引数で渡す（1.3・NFR-08）。
+
 表に無い遷移は ``INVALID_STATE``。純粋に保つ（1.3）。DB・HTTP・時刻・乱数に触れない。
 """
 
@@ -23,6 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 
 
@@ -242,3 +258,155 @@ def decide_approval(
         raise WorkflowError(WorkflowErrorCode.INVALID_STATE, f"承認申請は {current} で、もう判断できない")
     ensure_not_self_approval(requested_by, decided_by)
     return ApprovalStatus.APPROVED if chosen is ApprovalDecision.APPROVE else ApprovalStatus.REJECTED
+
+
+# ---------------------------------------------------------------------------
+# RULE-CHG-003 変更要求の状態遷移
+# ---------------------------------------------------------------------------
+
+
+class ChangeRequestStatus(StrEnum):
+    """変更要求の状態（4.1 の ``change_requests.status``。5.10）。"""
+
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    APPLIED = "APPLIED"
+
+
+class ChangeRequestAction(StrEnum):
+    """変更要求の状態を動かす操作（5.10 の遷移の名前）。"""
+
+    SUBMIT = "SUBMIT"  # 提出
+    APPROVE = "APPROVE"  # 承認
+    REJECT = "REJECT"  # 却下
+    WITHDRAW = "WITHDRAW"  # 取り下げ
+    APPLY = "APPLY"  # 反映（再基準化）
+
+
+# 5.10 の変更要求の遷移の表（今の状態, 操作）→ 次の状態
+_CHANGE_REQUEST_TRANSITIONS: dict[tuple[ChangeRequestStatus, ChangeRequestAction], ChangeRequestStatus] = {
+    (ChangeRequestStatus.DRAFT, ChangeRequestAction.SUBMIT): ChangeRequestStatus.SUBMITTED,
+    (ChangeRequestStatus.SUBMITTED, ChangeRequestAction.APPROVE): ChangeRequestStatus.APPROVED,
+    (ChangeRequestStatus.SUBMITTED, ChangeRequestAction.REJECT): ChangeRequestStatus.REJECTED,
+    (ChangeRequestStatus.SUBMITTED, ChangeRequestAction.WITHDRAW): ChangeRequestStatus.DRAFT,
+    (ChangeRequestStatus.APPROVED, ChangeRequestAction.APPLY): ChangeRequestStatus.APPLIED,
+}
+
+
+@dataclass(frozen=True)
+class ChangeRequestTransition:
+    """変更要求の状態遷移の結果。
+
+    - ``creates_approval_request``：提出のとき真（サービス層が影響分析を保存し、承認申請を作る。5.10）
+    - ``rebaselines``：反映のとき真（サービス層が RULE-CHG-001 で計画へ当て、RULE-CHG-004 で新しい版を作る）
+    """
+
+    from_status: ChangeRequestStatus
+    action: ChangeRequestAction
+    to_status: ChangeRequestStatus
+    creates_approval_request: bool = False
+    rebaselines: bool = False
+
+
+# RULE-CHG-003 変更要求の状態遷移
+def transition_change_request(
+    status: ChangeRequestStatus | str,
+    action: ChangeRequestAction | str,
+    *,
+    requested_by: int | None = None,
+    decided_by: int | None = None,
+) -> ChangeRequestTransition:
+    """変更要求の状態を 5.10 の遷移に従って動かす（CHG-03・CHG-04）。
+
+    - ``SUBMIT``：DRAFT → SUBMITTED（承認申請を作る）
+    - ``APPROVE``・``REJECT``：SUBMITTED → APPROVED／REJECTED。``requested_by``（提出者）と ``decided_by``（判断する人）が要り、
+      同じ人なら ``SELF_APPROVAL_FORBIDDEN``（CHG-03「提出者は自分の変更要求を承認できない」）
+    - ``WITHDRAW``：SUBMITTED → DRAFT
+    - ``APPLY``：APPROVED → APPLIED だけ（反映は承認済みだけ）。再基準化を伴う
+    - 表に無い遷移（例：DRAFT の承認、SUBMITTED・REJECTED・APPLIED の反映、APPLIED・REJECTED からの全て）は ``INVALID_STATE``
+
+    状態を先に見て（``INVALID_STATE``）、次に本人の判定を行う。
+    """
+    current = ChangeRequestStatus(_as_member(ChangeRequestStatus, status, "変更要求の状態"))
+    act = ChangeRequestAction(_as_member(ChangeRequestAction, action, "変更要求の操作"))
+    target = _CHANGE_REQUEST_TRANSITIONS.get((current, act))
+    if target is None:
+        if act is ChangeRequestAction.APPLY:
+            message = f"反映できるのは承認済み（APPROVED）の変更要求だけ（今は {current}）"
+        else:
+            message = f"変更要求が {current} のときは {act} できない"
+        raise WorkflowError(WorkflowErrorCode.INVALID_STATE, message)
+    if act in (ChangeRequestAction.APPROVE, ChangeRequestAction.REJECT):
+        ensure_not_self_approval(requested_by, decided_by)
+    return ChangeRequestTransition(
+        from_status=current,
+        action=act,
+        to_status=target,
+        creates_approval_request=act is ChangeRequestAction.SUBMIT,
+        rebaselines=act is ChangeRequestAction.APPLY,
+    )
+
+
+def ensure_change_request_editable(status: ChangeRequestStatus | str) -> None:
+    """変更要求を直せるのは DRAFT のときだけ（6.2 の API-CHG-003）。それ以外は ``INVALID_STATE``。"""
+    current = ChangeRequestStatus(_as_member(ChangeRequestStatus, status, "変更要求の状態"))
+    if current is not ChangeRequestStatus.DRAFT:
+        raise WorkflowError(WorkflowErrorCode.INVALID_STATE, f"変更要求を直せるのは DRAFT のときだけ（今は {current}）")
+
+
+# ---------------------------------------------------------------------------
+# RULE-CHG-005 是正措置の状態と期限超過
+# ---------------------------------------------------------------------------
+
+
+class CorrectiveActionStatus(StrEnum):
+    """是正措置の状態（4.1 の ``corrective_actions.status``。5.10）。"""
+
+    NOT_STARTED = "NOT_STARTED"  # 未着手
+    IN_PROGRESS = "IN_PROGRESS"  # 対応中
+    DONE = "DONE"  # 完了
+
+
+# 5.10 の是正措置の遷移（今の状態 → 移れる状態）。同じ状態のまま（効果だけを直す）は遷移ではないので別に通す
+_CORRECTIVE_ACTION_TRANSITIONS: dict[CorrectiveActionStatus, frozenset[CorrectiveActionStatus]] = {
+    CorrectiveActionStatus.NOT_STARTED: frozenset({CorrectiveActionStatus.IN_PROGRESS}),
+    CorrectiveActionStatus.IN_PROGRESS: frozenset({CorrectiveActionStatus.DONE}),
+    CorrectiveActionStatus.DONE: frozenset({CorrectiveActionStatus.IN_PROGRESS}),
+}
+
+
+# RULE-CHG-005 是正措置の状態と期限超過
+def transition_corrective_action(
+    status: CorrectiveActionStatus | str, to_status: CorrectiveActionStatus | str
+) -> CorrectiveActionStatus:
+    """是正措置の状態を動かす（5.10・CHG-06）。
+
+    NOT_STARTED → IN_PROGRESS → DONE、DONE → IN_PROGRESS（戻す）だけを通す。同じ状態のままは通す（状態を変えずに効果を直す）。
+    それ以外（未着手から完了へ飛ぶ・未着手へ戻す・完了から未着手へ）は ``INVALID_STATE``。
+    """
+    current = CorrectiveActionStatus(_as_member(CorrectiveActionStatus, status, "是正措置の状態"))
+    target = CorrectiveActionStatus(_as_member(CorrectiveActionStatus, to_status, "是正措置の移る先の状態"))
+    if target is current or target in _CORRECTIVE_ACTION_TRANSITIONS[current]:
+        return target
+    raise WorkflowError(WorkflowErrorCode.INVALID_STATE, f"是正措置は {current} から {target} へ移れない")
+
+
+# RULE-CHG-005 是正措置の状態と期限超過
+def is_corrective_action_overdue(
+    due_date: date | None, status: CorrectiveActionStatus | str, *, today: date
+) -> bool:
+    """期限超過か（期限 ＜ 今日 かつ 未完了。CHG-06 の「期限超過を絞り込める」）。
+
+    期限ちょうど（期限 ＝ 今日）は超過ではない。期限の無い措置は超過にならない。完了（DONE）は期限を過ぎても超過ではない。
+    今日はサービス層が渡す（1.3）。
+    """
+    current = CorrectiveActionStatus(_as_member(CorrectiveActionStatus, status, "是正措置の状態"))
+    if not isinstance(today, date):
+        raise ValueError(f"今日（today）は日付で渡す: {today!r}")
+    if due_date is None:
+        return False
+    if not isinstance(due_date, date):
+        raise ValueError(f"期限（due_date）は日付で渡す: {due_date!r}")
+    return due_date < today and current is not CorrectiveActionStatus.DONE

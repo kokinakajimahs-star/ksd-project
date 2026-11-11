@@ -12,8 +12,8 @@
 
 **別の群の表を読む口・書く口**（``app.state.schedule_links``。A-14・A-17・A-18 と同じ形）：
 
-- ``ActivityAssignments``：担当・割当（``assignments``。DB-EFF-001）。表がまだ無い間は ``AssignmentsTableAbsent``
-  （割当は 1 つも無い。担当を置こうとしたら止める＝書いたふりをしない）。**db:EFF のスコープは表を読み書きする実装へ差し替える**
+- ``ActivityAssignments``：担当・割当（``assignments``。DB-EFF-001）。アプリには表を読み書きする ``AssignmentsStore`` を載せた
+  （db:EFF。A-27）。``AssignmentsTableAbsent``（割当は 1 つも無い。担当を置こうとしたら止める＝書いたふりをしない）は表の無かった間の口
 - ``latest_progress``：活動の最新の進捗（``progress_entries``。DB-PRG-002。4.2 の「最新の値」）と、その報告日。
   表がまだ無い間の既定は ``no_progress``（進捗の入力は無い）。db:PRG で表を作り、アプリには表を読む
   ``progress_entries_latest`` を載せた（A-22）
@@ -64,7 +64,8 @@ from app.domain.wbs_code import CodedElement, display_preorder
 from app.domain.wbs_rules import ActivityRef, AssignmentRef, WbsRuleError, ensure_hierarchy
 from app.errors import AppError
 from app.models.cmn import User
-from app.models.prg import ProgressEntry, StatusReport
+from app.models.eff import Assignment, TimeEntry
+from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshotItem, StatusReport
 from app.models.prj import WORKING_WEEKDAYS_DEFAULT, Calendar, CalendarHoliday, Project, ProjectMember
 from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import WbsElement
@@ -174,6 +175,35 @@ class AssignmentsTableAbsent:
 
     def remove_activity(self, session: Session, activity_id: int) -> None:
         return None
+
+
+class AssignmentsStore:
+    """割当の表（``assignments``。DB-EFF-001）を読み書きする ``ActivityAssignments``（db:EFF で差し替えた。A-27）。
+
+    担当の置き換えは、外れた担当の行を消し、新しい担当の行を割当工数なし（NULL）で足す。残る担当の割当工数は変えない。
+    """
+
+    def assignments(self, session: Session, project_id: int) -> Sequence[AssignmentRef]:
+        rows = session.execute(
+            select(Assignment.activity_id, Assignment.user_id, Assignment.planned_hours)
+            .join(Activity, Activity.id == Assignment.activity_id)
+            .where(Activity.project_id == project_id)
+            .order_by(Assignment.activity_id, Assignment.user_id)
+        ).all()
+        return [AssignmentRef(r.activity_id, r.user_id, r.planned_hours) for r in rows]
+
+    def replace_assignees(self, session: Session, activity_id: int, user_ids: frozenset[int]) -> None:
+        current = set(session.scalars(select(Assignment.user_id).where(Assignment.activity_id == activity_id)))
+        removed = current - user_ids
+        if removed:
+            session.execute(
+                delete(Assignment).where(Assignment.activity_id == activity_id, Assignment.user_id.in_(removed))
+            )
+        for user_id in sorted(user_ids - current):
+            session.add(Assignment(activity_id=activity_id, user_id=user_id))
+
+    def remove_activity(self, session: Session, activity_id: int) -> None:
+        session.execute(delete(Assignment).where(Assignment.activity_id == activity_id))
 
 
 @dataclass(frozen=True)
@@ -649,9 +679,14 @@ def remove_activity(
     """活動を消し（schedule.edit）、日程を計算し直す。
 
     依存の行と割当を消し、ベースラインの写しは活動の紐付けだけを空にして残す（SCH-18 の「削除された活動」。A-19）。
+    進捗の算定項目・入力も消し、スナップショットの写しは紐付けだけを空にして残す（A-26）。
+    実績工数（``time_entries``）のある活動は消さずに 409 ``INVALID_STATE``（実績を黙って消すと EFF-02 の集計が変わる。OQ-26 (2)・A-30）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
     activity = _activity_of(session, project_id, activity_id)
+    if session.scalar(select(TimeEntry.id).where(TimeEntry.activity_id == activity_id).limit(1)) is not None:
+        raise AppError(409, "INVALID_STATE", "実績工数のある活動は消せません",
+                       details=[{"activity_id": activity_id, "reason": "HAS_TIME_ENTRIES"}])
     session.execute(
         delete(ActivityDependency).where(
             or_(ActivityDependency.predecessor_id == activity_id, ActivityDependency.successor_id == activity_id)
@@ -659,6 +694,13 @@ def remove_activity(
     )
     session.execute(
         update(ScheduleBaselineItem).where(ScheduleBaselineItem.activity_id == activity_id).values(activity_id=None)
+    )
+    # 進捗：算定項目と各報告日の入力を消し、スナップショットの写しは紐付けだけ空にして残す
+    # （過去の線は写しだけから描く。BR-13。docs/decisions/ASSUMPTIONS.md A-22・A-26、OQ-23 (3)）
+    session.execute(delete(ProgressItem).where(ProgressItem.activity_id == activity_id))
+    session.execute(delete(ProgressEntry).where(ProgressEntry.activity_id == activity_id))
+    session.execute(
+        update(ProgressSnapshotItem).where(ProgressSnapshotItem.activity_id == activity_id).values(activity_id=None)
     )
     links.assignments.remove_activity(session, activity_id)
     session.delete(activity)

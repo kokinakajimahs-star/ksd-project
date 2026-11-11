@@ -13,9 +13,14 @@
 - ``ActivitiesReader``（``app.state.wbs_activities``）：活動（``activities``。DB-SCH-001）。表を読む ``ActivitiesTable``（db:SCH で差し替えた。A-19）。
   ``ActivitiesTableAbsent``（活動なし）は表の無い間の口
 - ``CrossGroupReaders``（``app.state.wbs_readers``）：割当（DB-EFF-001）・見積の記録（DB-EST-001）・実績工数（DB-EFF-002）・
-  変更要求（DB-CHG-001）・是正措置（DB-CHG-002）・EAC（RULE-EFF-002）。既定はどれも「表がまだ無い」（0 件・EAC なし）
+  変更要求（DB-CHG-001）・是正措置（DB-CHG-002）・EAC（RULE-EFF-002）。既定はどれも「表がまだ無い」（0 件・EAC なし）。
+  割当はスケジュールの ``AssignmentsStore.assignments``、実績工数は ``time_entries_table`` へ差し替えた（db:EFF。A-27）。
+  EAC は ``app.services.effort.eac_by_element`` へ差し替えた（api:EFF。A-30）。
+  変更要求は ``change_requests_table``、是正措置は ``corrective_actions_table`` へ差し替えた（db:CHG。A-31）。
+  見積の記録は ``estimate_records_table`` へ差し替えた（db:EST。A-32）
 - ``ChangeRequestApprovals``（``app.state.change_request_approvals``）：変更要求の承認申請への判断を変更要求へ反映する。
-  既定の ``ChangeRequestsTableAbsent`` は判断を拒む（変更要求の表が無いので、その申請はまだ作れない。fail fast）
+  ``ChangeRequestsTableAbsent`` は表の無い間の口（判断を拒む。fail fast）。表を作った db:CHG で ``ChangeRequestTransitionNotWired``
+  （申請の指す変更要求を読み、状態遷移の実装が無いので止める）へ差し替えた（A-31）。api:CHG が RULE-CHG-003 を通す実装へ差し替える
 
 **表を作るスコープは読む実装を書き、``app.state`` を差し替える。** 差し替え忘れは
 ``backend/tests/api/test_wbs.py`` の ``test_*_wired_once_*`` が落とす。
@@ -83,7 +88,10 @@ from app.domain.workflow import (
     transition_wbs,
 )
 from app.errors import AppError
+from app.models.chg import ChangeRequest, CorrectiveAction
 from app.models.cmn import User
+from app.models.eff import TimeEntry
+from app.models.est import EstimateRecord
 from app.models.prj import Project, ProjectMember, ScopeItem
 from app.models.sch import Activity
 from app.models.wbs import (
@@ -157,9 +165,35 @@ def no_estimate_records(session: Session, project_id: int) -> list[EstimateRecor
     return []
 
 
+def estimate_records_table(session: Session, project_id: int) -> list[EstimateRecordRef]:
+    """見積の記録の表（``estimate_records``。DB-EST-001）から、プロジェクトの全ての記録の対象を ID の順に読む（db:EST で差し替えた。A-32）。
+
+    同じ対象の古い記録（見積の履歴）も全て渡す（横断照会は見積の記録を全て返す。RULE-WBS-008）。
+    """
+    rows = session.execute(
+        select(EstimateRecord.id, EstimateRecord.target_type, EstimateRecord.target_id)
+        .where(EstimateRecord.project_id == project_id)
+        .order_by(EstimateRecord.id)
+    ).all()
+    return [
+        EstimateRecordRef(id=r.id, target_type=EstimateTarget(r.target_type), target_id=r.target_id) for r in rows
+    ]
+
+
 def no_time_entries(session: Session, project_id: int) -> list[TimeEntryRef]:
     """実績工数の表（DB-EFF-002）がまだ無い間の既定。実績は 1 つも無い。"""
     return []
+
+
+def time_entries_table(session: Session, project_id: int) -> list[TimeEntryRef]:
+    """実績工数の表（``time_entries``。DB-EFF-002）から、プロジェクトの活動の全ての実績を読む（db:EFF で差し替えた。A-27）。"""
+    rows = session.execute(
+        select(TimeEntry.id, TimeEntry.activity_id, TimeEntry.hours)
+        .join(Activity, Activity.id == TimeEntry.activity_id)
+        .where(Activity.project_id == project_id)
+        .order_by(TimeEntry.id)
+    ).all()
+    return [TimeEntryRef(id=r.id, activity_id=r.activity_id, hours=r.hours) for r in rows]
 
 
 def no_change_requests(session: Session, project_id: int) -> list[ChangeRequestRef]:
@@ -170,6 +204,29 @@ def no_change_requests(session: Session, project_id: int) -> list[ChangeRequestR
 def no_corrective_actions(session: Session, project_id: int) -> list[CorrectiveActionRef]:
     """是正措置の表（DB-CHG-002）がまだ無い間の既定。是正措置は 1 つも無い。"""
     return []
+
+
+def change_requests_table(session: Session, project_id: int) -> list[ChangeRequestRef]:
+    """変更要求の表（``change_requests``。DB-CHG-001）から、プロジェクトの全ての変更要求の対象の WBS ID を読む（db:CHG で差し替えた。A-31）。
+
+    対象の WBS ID は起票した時点の並びのまま渡す（旧 ID の解決は RULE-WBS-008 の担当）。状態では絞らない（照会は全ての変更要求を返す）。
+    """
+    rows = session.execute(
+        select(ChangeRequest.id, ChangeRequest.target_codes)
+        .where(ChangeRequest.project_id == project_id)
+        .order_by(ChangeRequest.id)
+    ).all()
+    return [ChangeRequestRef(id=r.id, target_codes=tuple(str(code) for code in (r.target_codes or ()))) for r in rows]
+
+
+def corrective_actions_table(session: Session, project_id: int) -> list[CorrectiveActionRef]:
+    """是正措置の表（``corrective_actions``。DB-CHG-002）から、プロジェクトの全ての是正措置の紐付け（要素・活動）を読む（db:CHG。A-31）。"""
+    rows = session.execute(
+        select(CorrectiveAction.id, CorrectiveAction.element_id, CorrectiveAction.activity_id)
+        .where(CorrectiveAction.project_id == project_id)
+        .order_by(CorrectiveAction.id)
+    ).all()
+    return [CorrectiveActionRef(id=r.id, element_id=r.element_id, activity_id=r.activity_id) for r in rows]
 
 
 def eac_not_available(session: Session, project_id: int) -> Mapping[int, Decimal] | None:
@@ -214,6 +271,35 @@ class ChangeRequestsTableAbsent:
         raise RuntimeError(
             f"承認申請 {approval.id} は変更要求のものだが、変更要求の表（DB-CHG-001）を扱う実装が載っていない"
             "（api:CHG のスコープが app.state.change_request_approvals を差し替える）"
+        )
+
+
+class ChangeRequestTransitionNotWired:
+    """変更要求の表（DB-CHG-001）はあるが、状態遷移（RULE-CHG-003）を変更要求へ通す実装（api:CHG）がまだ無い間の
+    ``ChangeRequestApprovals``（db:CHG で差し替えた。A-31。A-19 の ``SchedulingNotWired`` と同じ形）。
+
+    申請の指す変更要求を表から読み、無ければ申請と変更要求の食い違いとして、あれば状態を動かす実装が無いので止める（fail fast）。
+    どちらでも変更要求の状態は変えない（判断だけが残って変更要求が SUBMITTED のまま、という食い違いを作らない）。
+    変更要求の承認申請は提出（API-CHG-005）でしか作られないので、api:CHG が載るまでは来ないはず。差し替え忘れは
+    ``backend/tests/api/test_wbs.py::test_change_request_approvals_apply_transition_once_change_api_exists`` が落とす。
+    """
+
+    def decide(
+        self, session: Session, approval: ApprovalRequest, status: ApprovalStatus, actor: User, now: datetime
+    ) -> None:
+        change_request = session.scalar(
+            select(ChangeRequest).where(
+                ChangeRequest.id == approval.target_id, ChangeRequest.project_id == approval.project_id
+            )
+        )
+        if change_request is None:
+            raise RuntimeError(
+                f"承認申請 {approval.id} の指す変更要求 {approval.target_id} が、プロジェクト {approval.project_id} の"
+                "変更要求の表（DB-CHG-001）に無い（申請と変更要求の食い違い）"
+            )
+        raise RuntimeError(
+            f"承認申請 {approval.id} は変更要求 {change_request.id}（DB-CHG-001）のものだが、変更要求の状態遷移（RULE-CHG-003）を"
+            "通す実装が載っていない（api:CHG のスコープが app.state.change_request_approvals を差し替える）"
         )
 
 

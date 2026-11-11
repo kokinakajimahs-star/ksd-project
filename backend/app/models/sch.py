@@ -11,7 +11,7 @@
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）。工数は人時の小数 ``Numeric(10,2)``（2.4）
 
 ``schedule_baselines.change_request_id`` の ``change_requests.id``（DB-CHG-001）への外部キーは、
-``change_requests`` を作る移行（db:CHG）で張る（``scope_baselines.change_request_id`` と同じ。ASSUMPTIONS.md A-15・A-19）。
+``change_requests`` を作る移行（db:CHG の ``0007_chg``）で張った（``scope_baselines.change_request_id`` と同じ。ASSUMPTIONS.md A-15・A-19）。
 """
 
 from __future__ import annotations
@@ -149,8 +149,8 @@ class ScheduleBaseline(Base):
     version: Mapped[int] = mapped_column(Integer)
     name: Mapped[str] = mapped_column(String(200))
     reason: Mapped[str] = mapped_column(String(32))
-    # change_requests（DB-CHG-001）への外部キーは db:CHG の移行で張る（A-15・A-19）
-    change_request_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    # change_requests への外部キーは db:CHG の移行（0007_chg）で張った（A-15・A-19）
+    change_request_id: Mapped[int | None] = mapped_column(ForeignKey("change_requests.id"), index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 

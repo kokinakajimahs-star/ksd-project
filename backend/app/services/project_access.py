@@ -8,10 +8,9 @@
 
 - ``ProjectMembersTable``：``projects``・``project_members`` を読む実装（db:PRJ で差し替えた。docs/decisions/ASSUMPTIONS.md A-11）。
   割当の活動は ``AssignedActivities`` から読む
-- ``AssignmentsTableAbsent``：割当の表（``assignments``。DB-EFF-001）がまだ無い間の ``AssignedActivities``。割当は 1 つも無い。
-  これは今のスキーマでの事実であって、振る舞いの代用ではない。**db:EFF のスコープは ``assignments`` を読む実装を書き、
-  ``app.main.create_app`` で差し替える。** 差し替え忘れは
-  ``backend/tests/services/test_project_access.py::test_assignments_reader_is_wired_once_assignments_table_exists`` が落とす
+- ``AssignmentsTable``：割当の表（``assignments``。DB-EFF-001）を読む ``AssignedActivities``（db:EFF で差し替えた。A-27）
+- ``AssignmentsTableAbsent``：割当の表がまだ無かった間の ``AssignedActivities``（割当は 1 つも無い）。今はアプリに載せない。
+  載せ戻すと ``backend/tests/services/test_project_access.py::test_assignments_reader_is_wired_once_assignments_table_exists`` が落とす
 - ``ProjectTablesAbsent``：プロジェクトの表がまだ無かった間の実装（プロジェクトは 1 つも無い）。今はアプリに載せない
   （``backend/tests/api/test_cmn.py::test_project_access_is_wired_once_project_tables_exist`` が確かめる。A-10）
 """
@@ -24,7 +23,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import Membership
+from app.models.eff import Assignment
 from app.models.prj import Project, ProjectMember
+from app.models.sch import Activity
 
 
 class ProjectAccess(Protocol):
@@ -69,6 +70,21 @@ class AssignmentsTableAbsent:
 
     def activity_ids(self, session: Session, project_id: int, user_id: int) -> frozenset[int]:
         return frozenset()
+
+
+class AssignmentsTable:
+    """``assignments``（DB-EFF-001）を読む ``AssignedActivities``（db:EFF で差し替えた。A-27）。
+
+    そのプロジェクトの活動（``activities.project_id``）のうち、その利用者を担当に置いた活動の ID を返す。
+    """
+
+    def activity_ids(self, session: Session, project_id: int, user_id: int) -> frozenset[int]:
+        rows = session.scalars(
+            select(Assignment.activity_id)
+            .join(Activity, Activity.id == Assignment.activity_id)
+            .where(Activity.project_id == project_id, Assignment.user_id == user_id)
+        )
+        return frozenset(rows)
 
 
 def _roles_of(member: ProjectMember) -> frozenset[str]:

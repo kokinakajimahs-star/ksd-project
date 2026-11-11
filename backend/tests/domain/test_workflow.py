@@ -1,9 +1,12 @@
 """状態遷移（app.domain.workflow）の試験。
 
-設計書 4.1（projects.wbs_status・approval_requests・scope_baselines）・5.1・5.10、要求仕様書 WBS-13・16・20・21・22。
+設計書 4.1（projects.wbs_status・approval_requests・scope_baselines・change_requests・corrective_actions）・5.1・5.10、
+要求仕様書 WBS-13・16・20・21・22、CHG-03・04・06。
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 import pytest
 
@@ -11,6 +14,9 @@ from app.domain.workflow import (
     ApprovalDecision,
     ApprovalStatus,
     BaselinePlan,
+    ChangeRequestAction,
+    ChangeRequestStatus,
+    CorrectiveActionStatus,
     ScopeBaselineReason,
     WbsAction,
     WbsReadiness,
@@ -18,6 +24,10 @@ from app.domain.workflow import (
     WorkflowError,
     WorkflowErrorCode,
     decide_approval,
+    ensure_change_request_editable,
+    is_corrective_action_overdue,
+    transition_change_request,
+    transition_corrective_action,
     transition_wbs,
 )
 
@@ -169,3 +179,153 @@ def test_approval_request_decision(decision: ApprovalDecision, after: ApprovalSt
     with pytest.raises(WorkflowError) as excinfo:
         decide_approval("PENDING", decision.value, requested_by=5, decided_by=5)
     assert excinfo.value.code is WorkflowErrorCode.SELF_APPROVAL_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# RULE-CHG-003 変更要求の状態遷移
+# ---------------------------------------------------------------------------
+
+CS = ChangeRequestStatus
+CA = ChangeRequestAction
+# 5.10 の変更要求の遷移の表
+CHANGE_ALLOWED = {
+    (CS.DRAFT, CA.SUBMIT): CS.SUBMITTED,
+    (CS.SUBMITTED, CA.APPROVE): CS.APPROVED,
+    (CS.SUBMITTED, CA.REJECT): CS.REJECTED,
+    (CS.SUBMITTED, CA.WITHDRAW): CS.DRAFT,
+    (CS.APPROVED, CA.APPLY): CS.APPLIED,
+}
+PEOPLE = {"requested_by": 1, "decided_by": 2}
+
+
+@pytest.mark.parametrize(("status", "action"), list(CHANGE_ALLOWED))
+def test_change_request_transitions_in_design_5_10(status: ChangeRequestStatus, action: ChangeRequestAction) -> None:
+    """RULE-CHG-003：5.10 の変更要求の遷移の表のとおりに動く（CHG-03「提出→承認／却下の状態遷移に従い」）。"""
+    result = transition_change_request(status, action, **PEOPLE)
+    assert (result.from_status, result.action, result.to_status) == (status, action, CHANGE_ALLOWED[(status, action)])
+
+
+@pytest.mark.parametrize(
+    ("status", "action"), [(s, a) for s in CS for a in CA if (s, a) not in CHANGE_ALLOWED]
+)
+def test_other_change_request_transitions_are_invalid_state(
+    status: ChangeRequestStatus, action: ChangeRequestAction
+) -> None:
+    """RULE-CHG-003：表に無い遷移（DRAFT の承認、REJECTED・APPLIED からの全て、承認済みの再提出など）は INVALID_STATE。"""
+    with pytest.raises(WorkflowError) as excinfo:
+        transition_change_request(status, action, **PEOPLE)
+    assert excinfo.value.code is WorkflowErrorCode.INVALID_STATE
+
+
+@pytest.mark.parametrize("status", [CS.DRAFT, CS.SUBMITTED, CS.REJECTED, CS.APPLIED])
+def test_only_approved_change_request_can_be_applied(status: ChangeRequestStatus) -> None:
+    """RULE-CHG-003：反映は承認済み（APPROVED）だけ。それ以外の反映は INVALID_STATE。"""
+    with pytest.raises(WorkflowError) as excinfo:
+        transition_change_request(status, CA.APPLY)
+    assert excinfo.value.code is WorkflowErrorCode.INVALID_STATE
+    applied = transition_change_request(CS.APPROVED, CA.APPLY)
+    assert applied.rebaselines is True and applied.creates_approval_request is False
+
+
+@pytest.mark.parametrize("action", [CA.APPROVE, CA.REJECT])
+def test_submitter_cannot_decide_own_change_request(action: ChangeRequestAction) -> None:
+    """RULE-CHG-003：提出者は自分の変更要求を承認・却下できない（SELF_APPROVAL_FORBIDDEN。CHG-03）。"""
+    with pytest.raises(WorkflowError) as excinfo:
+        transition_change_request(CS.SUBMITTED, action, requested_by=5, decided_by=5)
+    assert excinfo.value.code is WorkflowErrorCode.SELF_APPROVAL_FORBIDDEN
+    with pytest.raises(ValueError):
+        transition_change_request(CS.SUBMITTED, action, requested_by=5)
+
+
+def test_state_is_checked_before_self_approval() -> None:
+    """RULE-CHG-003：状態を先に見る（承認済みを本人がもう一度承認しても INVALID_STATE）。"""
+    with pytest.raises(WorkflowError) as excinfo:
+        transition_change_request(CS.APPROVED, CA.APPROVE, requested_by=5, decided_by=5)
+    assert excinfo.value.code is WorkflowErrorCode.INVALID_STATE
+
+
+def test_submit_creates_approval_request_and_accepts_strings() -> None:
+    """RULE-CHG-003：提出は承認申請を作る。状態・操作は DB の文字列のままでも受け、一覧に無い値は ValueError。"""
+    result = transition_change_request("DRAFT", "SUBMIT")
+    assert result.to_status is CS.SUBMITTED and result.creates_approval_request is True
+    with pytest.raises(ValueError):
+        transition_change_request("CLOSED", "SUBMIT")
+    with pytest.raises(ValueError):
+        transition_change_request("DRAFT", "CANCEL")
+
+
+def test_change_request_is_editable_only_in_draft() -> None:
+    """RULE-CHG-003：変更要求を直せるのは DRAFT のときだけ（API-CHG-003）。"""
+    ensure_change_request_editable("DRAFT")
+    for status in (CS.SUBMITTED, CS.APPROVED, CS.REJECTED, CS.APPLIED):
+        with pytest.raises(WorkflowError) as excinfo:
+            ensure_change_request_editable(status)
+        assert excinfo.value.code is WorkflowErrorCode.INVALID_STATE
+
+
+# ---------------------------------------------------------------------------
+# RULE-CHG-005 是正措置の状態と期限超過
+# ---------------------------------------------------------------------------
+
+AS = CorrectiveActionStatus
+ACTION_ALLOWED = {
+    (AS.NOT_STARTED, AS.IN_PROGRESS),
+    (AS.IN_PROGRESS, AS.DONE),
+    (AS.DONE, AS.IN_PROGRESS),
+}
+
+
+@pytest.mark.parametrize(("current", "target"), sorted(ACTION_ALLOWED))
+def test_corrective_action_transitions_in_design_5_10(
+    current: CorrectiveActionStatus, target: CorrectiveActionStatus
+) -> None:
+    """RULE-CHG-005：NOT_STARTED → IN_PROGRESS → DONE と、DONE → IN_PROGRESS（戻す）が通る（5.10）。"""
+    assert transition_corrective_action(current, target) is target
+
+
+@pytest.mark.parametrize("status", list(AS))
+def test_corrective_action_same_status_is_allowed(status: CorrectiveActionStatus) -> None:
+    """RULE-CHG-005：同じ状態のまま（状態を変えずに効果だけを直す）は通す。"""
+    assert transition_corrective_action(status, status.value) is status
+
+
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [(a, b) for a in AS for b in AS if a is not b and (a, b) not in ACTION_ALLOWED],
+)
+def test_other_corrective_action_transitions_are_invalid_state(
+    current: CorrectiveActionStatus, target: CorrectiveActionStatus
+) -> None:
+    """RULE-CHG-005：未着手から完了へ飛ぶ・未着手へ戻すのは INVALID_STATE。"""
+    with pytest.raises(WorkflowError) as excinfo:
+        transition_corrective_action(current, target)
+    assert excinfo.value.code is WorkflowErrorCode.INVALID_STATE
+
+
+TODAY = date(2026, 12, 10)
+
+
+@pytest.mark.parametrize(
+    ("due", "status", "overdue"),
+    [
+        (date(2026, 12, 9), AS.NOT_STARTED, True),  # 期限＜今日 かつ 未完了
+        (date(2026, 12, 9), AS.IN_PROGRESS, True),
+        (date(2026, 12, 9), AS.DONE, False),  # 完了は超過ではない
+        (date(2026, 12, 10), AS.NOT_STARTED, False),  # 期限ちょうどは超過ではない（境界）
+        (date(2026, 12, 11), AS.IN_PROGRESS, False),
+        (None, AS.NOT_STARTED, False),  # 期限の無い措置は超過にならない
+    ],
+)
+def test_corrective_action_overdue(due: date | None, status: CorrectiveActionStatus, overdue: bool) -> None:
+    """RULE-CHG-005：期限超過＝期限＜今日 かつ 未完了（CHG-06）。今日は引数で受ける。"""
+    assert is_corrective_action_overdue(due, status, today=TODAY) is overdue
+
+
+def test_corrective_action_inputs_are_checked() -> None:
+    """RULE-CHG-005：一覧に無い状態・日付でない今日は推測せずに拒む。"""
+    with pytest.raises(ValueError):
+        transition_corrective_action("CANCELLED", AS.DONE)
+    with pytest.raises(ValueError):
+        is_corrective_action_overdue(date(2026, 12, 1), "OPEN", today=TODAY)
+    with pytest.raises(ValueError):
+        is_corrective_action_overdue(date(2026, 12, 1), AS.DONE, today="2026-12-10")  # type: ignore[arg-type]

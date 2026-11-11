@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.config import BACKEND_DIR
 from app.infra.db import Base, create_db_engine
+from app.models.chg import ChangeRequest
 from app.models.cmn import User
 from app.models.prj import Project
 from app.models.sch import (
@@ -364,7 +365,11 @@ def test_schedule_baselines_versions_increase_per_project(db_session: Session) -
     creator = _user(db_session, "pm")
     first = _baseline(db_session, project, creator, 1, created_at=AT)
     _baseline(db_session, project, creator, 2, reason="RE_APPROVAL")
-    _baseline(db_session, project, creator, 3, reason="CHANGE_REQUEST", change_request_id=7)
+    # 変更要求（DB-CHG-001）への外部キーを張った（db:CHG。A-31）ので、実在する変更要求を指す
+    change_request = ChangeRequest(project_id=project.id, number=1, title="変更", reason="要望", created_by=creator.id)
+    db_session.add(change_request)
+    db_session.flush()
+    _baseline(db_session, project, creator, 3, reason="CHANGE_REQUEST", change_request_id=change_request.id)
     _baseline(db_session, other, creator, 1)
     db_session.commit()
     db_session.expunge_all()

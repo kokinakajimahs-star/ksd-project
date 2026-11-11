@@ -22,11 +22,21 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import Settings, get_settings
 from app.errors import AppError
 from app.infra.db import create_db_engine, create_session_factory
-from app.services.project_access import ProjectMembersTable
+from app.services.effort import CorrectiveActionsTable, EffortLinks, eac_by_element
+from app.services.progress import ComputedEtcEffort, ProgressLinks
+from app.services.project_access import AssignmentsTable, ProjectMembersTable
 from app.services.projects import NumberingRulesTable
-from app.services.schedule import ScheduleCalculator, ScheduleLinks, progress_entries_latest
+from app.services.schedule import AssignmentsStore, ScheduleCalculator, ScheduleLinks, progress_entries_latest
 from app.services.users import ensure_initial_admin
-from app.services.wbs import ActivitiesTable, ChangeRequestsTableAbsent, CrossGroupReaders
+from app.services.wbs import (
+    ActivitiesTable,
+    ChangeRequestTransitionNotWired,
+    CrossGroupReaders,
+    change_requests_table,
+    corrective_actions_table,
+    estimate_records_table,
+    time_entries_table,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -95,7 +105,7 @@ def _unhandled_error_handler(_request: Request, _exc: Exception) -> JSONResponse
 
 def register_routers(api: APIRouter) -> None:
     """群ごとのルータを ``/api/v1`` の下に登録する。群のルータを足したらここに 1 行足す。"""
-    from app.api import auth, health, projects, schedule, users, wbs
+    from app.api import auth, effort, health, progress, projects, schedule, users, wbs
 
     api.include_router(health.router)
     api.include_router(auth.router)
@@ -103,6 +113,8 @@ def register_routers(api: APIRouter) -> None:
     api.include_router(projects.router)
     api.include_router(wbs.router)
     api.include_router(schedule.router)
+    api.include_router(progress.router)
+    api.include_router(effort.router)
 
 
 @asynccontextmanager
@@ -127,22 +139,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
     # プロジェクトの有無とメンバーを読む口（app.services.project_access。docs/decisions/ASSUMPTIONS.md A-10・A-11）。
-    # 割当の活動は assignments（DB-EFF-001）を作るスコープ（db:EFF）が読み手を差し替える
-    app.state.project_access = ProjectMembersTable()
+    # 割当の活動は assignments（DB-EFF-001）を読む（db:EFF で差し替えた。A-27）
+    app.state.project_access = ProjectMembersTable(assignments=AssignmentsTable())
     # 別の群の表に書く口（app.services.projects。A-14・A-15）。採番規則は表（DB-WBS-002）に書く。
     # 日程の再計算は、日程計算（RULE-SCH-001〜003）を保存まで通す実装（api:SCH で差し替えた。A-19・A-21）
     app.state.numbering_rules = NumberingRulesTable()
     app.state.schedule_recalculator = ScheduleCalculator()
     # WBS の判定・集計が読む活動（app.services.wbs。A-17）。活動の表（DB-SCH-001）を読む（db:SCH で差し替えた。A-19）
     app.state.wbs_activities = ActivitiesTable()
+    # 割当（DB-EFF-001）はスケジュールの API と同じ表を読み書きする口（db:EFF。A-27）
+    assignments = AssignmentsStore()
     # 責任分担表・横断照会が読む別の群の表（割当・見積の記録・実績・変更要求・是正措置・EAC。A-18）。既定は「表がまだ無い」。
-    # 表を作るスコープ（db:EFF・db:EST・db:CHG・api:EFF）が、その表を読む関数へ差し替える
-    app.state.wbs_readers = CrossGroupReaders()
-    # 変更要求の承認申請への判断（API-WBS-019）を変更要求へ反映する口。api:CHG のスコープが差し替える（A-18）
-    app.state.change_request_approvals = ChangeRequestsTableAbsent()
+    # 割当・実績は表を読む（db:EFF で差し替えた。A-27）。EAC は RULE-EFF-002 の集計を読む（api:EFF で差し替えた。A-30）。
+    # 変更要求・是正措置は表を読む（db:CHG で差し替えた。A-31）。見積の記録は表を読む（db:EST で差し替えた。A-32）
+    app.state.wbs_readers = CrossGroupReaders(assignments=assignments.assignments, time_entries=time_entries_table,
+                                              estimate_records=estimate_records_table,
+                                              change_requests=change_requests_table,
+                                              corrective_actions=corrective_actions_table, eac_hours=eac_by_element)
+    # 変更要求の承認申請への判断（API-WBS-019）を変更要求へ反映する口（A-18）。表はある（db:CHG）が、状態遷移（RULE-CHG-003）を
+    # 通す実装が無いので止める口（A-31）。api:CHG のスコープが差し替える
+    app.state.change_request_approvals = ChangeRequestTransitionNotWired()
     # スケジュールの API が読み書きする別の群の表（割当・最新の進捗。app.services.schedule。A-21）。
-    # 割当は「表がまだ無い」の既定のまま（db:EFF のスコープが差し替える）。最新の進捗は進捗の表を読む（db:PRG で差し替えた。A-22）
-    app.state.schedule_links = ScheduleLinks(latest_progress=progress_entries_latest)
+    # 割当は表を読み書きする（db:EFF で差し替えた。A-27）。最新の進捗は進捗の表を読む（db:PRG で差し替えた。A-22）
+    app.state.schedule_links = ScheduleLinks(assignments=assignments, latest_progress=progress_entries_latest)
+    # 進捗の API がスナップショットに写す実績工数・ETC の口（app.services.progress。A-26）。実績工数は表から読む
+    # （db:EFF で差し替えた。A-27）。ETC は RULE-EFF-001 で求める（rule:EFF で差し替えた。A-28）
+    app.state.progress_links = ProgressLinks(effort=ComputedEtcEffort())
+    # 工数の API が読む別の群の表（是正措置。app.services.effort。A-30）。是正措置の表を読む（db:CHG で差し替えた。A-31）
+    app.state.effort_links = EffortLinks(corrective_actions=CorrectiveActionsTable())
 
     app.add_exception_handler(AppError, _app_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
