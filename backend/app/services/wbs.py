@@ -93,7 +93,7 @@ from app.models.cmn import User
 from app.models.eff import TimeEntry, VarianceNote
 from app.models.est import EstimateRecord
 from app.models.prj import Project, ProjectMember, ScopeItem
-from app.models.sch import Activity, ScheduleBaselineItem
+from app.models.sch import Activity
 from app.models.wbs import (
     COMMENT_STATUS_INITIAL,
     REVIEW_STATUS_INITIAL,
@@ -758,22 +758,13 @@ def remove_element(
     """要素を配下ごと消す（wbs.edit）。他の要素の WBS ID・順番は変えない（RULE-WBS-002）。
 
     - 配下の辞書・スコープの紐付け・新旧対応を消し、指摘は ``element_id`` を空にして残す（A-15）
-    - スコープベースラインの版に入った要素を含むなら 422 ``ELEMENT_IN_BASELINE``（CR-002 の暫定。版の写しを変えない）
+    - ベースラインの版の写しは変えない（写しの列は外部キーを張らない写しの値。設計書 1.1 の 4.2。CR-002）
     - 配下の WP に活動があれば 422 ``ELEMENT_HAS_ACTIVITIES``（活動の削除は SCH の群の担当。OQ-18）
     - 是正措置・差異の理由が指す要素を含むなら 422 ``ELEMENT_REFERENCED``（変更要求の反映と同じ。外部キー違反の 500 にしない。A-47）
-    - スケジュールベースラインの写しは要素の紐付けだけを空にして残す（活動を消すときと同じ。DB-SCH-004 の注記・A-19）
     """
     context = _editing(session, access, actor, activities, project_id)
     _element_of(context, element_id)
     ids = list(subtree_ids([_coded(e) for e in context.elements], element_id))
-    baselined = sorted(set(session.scalars(
-        select(ScopeBaselineElement.element_id).where(ScopeBaselineElement.element_id.in_(ids))
-    )) | set(session.scalars(
-        select(ScopeBaselineElement.parent_element_id).where(ScopeBaselineElement.parent_element_id.in_(ids))
-    )))
-    if baselined:
-        raise AppError(422, "ELEMENT_IN_BASELINE", "スコープベースラインの版に入った要素は消せません（CR-002）",
-                       details=[{"element_ids": baselined}])
     with_activities = sorted({a.work_package_id for a in context.activities if a.work_package_id in set(ids)})
     if with_activities:
         raise AppError(422, "ELEMENT_HAS_ACTIVITIES", "活動のある WP は消せません（先に活動を消します）",
@@ -787,7 +778,6 @@ def remove_element(
     if referenced:
         raise AppError(422, "ELEMENT_REFERENCED", "是正措置・差異の理由が指す要素は消せません",
                        details=[{"element_ids": referenced}])
-    session.execute(update(ScheduleBaselineItem).where(ScheduleBaselineItem.element_id.in_(ids)).values(element_id=None))
     session.execute(update(WbsReviewComment).where(WbsReviewComment.element_id.in_(ids)).values(element_id=None))
     session.execute(delete(WbsScopeLink).where(WbsScopeLink.element_id.in_(ids)))
     session.execute(delete(WbsDictionaryEntry).where(WbsDictionaryEntry.element_id.in_(ids)))

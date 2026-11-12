@@ -484,20 +484,30 @@ def test_apply_requires_baselined_wbs(world: World) -> None:
     assert world.count(ScopeBaseline) == 1
 
 
-def test_apply_refuses_removing_baselined_element_and_writes_nothing(world: World) -> None:
-    """API-CHG-006 承認済みの変更を反映して再基準化する：版に入った要素の削除は 422 ELEMENT_IN_BASELINE（CR-002）、何も書かない。"""
+def test_apply_removes_baselined_element_and_keeps_old_versions(world: World) -> None:
+    """API-CHG-006 承認済みの変更を反映して再基準化する：版に入った要素も消せ、旧版の写しは変わらない（設計書 1.1 の 4.2。CR-002）。
+
+    新しい版には消した要素が無い。旧版の写しは消した要素の内部キーをそのまま持つ（WBS-22・BR-12）。
+    """
     world.baseline_wbs()
     first = world.approved()
-    world.apply(first["id"])  # 全ての要素がスコープの版に入る
+    applied_first = world.apply(first["id"])  # 全ての要素がスコープの版に入る
     removing = world.approved(target_codes=[world.wp2_code],
                               operations=[{"op": "remove_element", "code": world.wp2_code}])
-    elements_before = world.count(ScopeBaselineElement)
-    refused = world.apply(removing["id"], expect=422)
-    assert refused["error"]["code"] == "ELEMENT_IN_BASELINE"
+    applied = world.apply(removing["id"])
+    assert applied["change_request"]["status"] == "APPLIED"
+
     world.session.expire_all()
-    row = world.session.get(ChangeRequest, removing["id"])
-    assert row is not None and row.status == "APPROVED"
-    assert world.count(ScopeBaselineElement) == elements_before
+    assert world.session.get(WbsElement, world.wp2) is None
+    old_copy = world.session.scalars(select(ScopeBaselineElement.element_id).where(
+        ScopeBaselineElement.scope_baseline_id == applied_first["scope_baseline"]["id"]))
+    assert world.wp2 in set(old_copy)
+    new_copy = world.session.scalars(select(ScopeBaselineElement.element_id).where(
+        ScopeBaselineElement.scope_baseline_id == applied["scope_baseline"]["id"]))
+    assert world.wp2 not in set(new_copy)
+    old_items = world.session.scalars(select(ScheduleBaselineItem.element_id).where(
+        ScheduleBaselineItem.schedule_baseline_id == applied_first["schedule_baseline"]["id"]))
+    assert world.wp2 in set(old_items)
 
 
 def test_apply_removes_activity_and_updates_values(world: World) -> None:
@@ -524,7 +534,7 @@ def test_apply_removes_activity_and_updates_values(world: World) -> None:
 def test_direct_delete_refuses_rows_referenced_by_corrective_actions(world: World) -> None:
     """API-SCH-005・API-WBS-005 の直接の削除も、是正措置が指す活動・要素は 422（変更要求の反映と同じ。500 にしない）。
 
-    スケジュールベースラインの写しだけが指す要素は、写しの紐付けを空にして消せる（活動を消すときと同じ。A-19）。
+    スケジュールベースラインの写しが指す要素も消せ、写しは変わらない（設計書 1.1 の 4.2。CR-002）。
     """
     world.action(activity_id=world.b)
     refused = world.client.delete(world.url(f"/activities/{world.b}"), headers=world.h["planner"])
@@ -546,7 +556,7 @@ def test_direct_delete_refuses_rows_referenced_by_corrective_actions(world: Worl
     assert removed.status_code == 204, removed.text
     world.session.expire_all()
     kept = world.session.get(ScheduleBaselineItem, item.id)
-    assert kept is not None and kept.element_id is None
+    assert kept is not None and kept.element_id == wp3
 
 
 def test_create_corrective_action(world: World) -> None:

@@ -253,7 +253,7 @@ def delete_element(
 ) -> Response:
     """API-WBS-005 要素を配下ごと消す。
 
-    権限は wbs.edit。他の要素の ID は変えない。基準の版に入った要素は 422 ``ELEMENT_IN_BASELINE``（CR-002）。
+    権限は wbs.edit。他の要素の ID は変えない。基準の版の写しは変えない（設計書 1.1 の 4.2。CR-002）。
     """
     wbs_service.remove_element(session, access, user, activities, project_id, element_id)
     return Response(status_code=204)

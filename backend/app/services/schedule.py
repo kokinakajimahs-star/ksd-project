@@ -29,7 +29,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ViewLevel, project_view_level
@@ -66,7 +66,7 @@ from app.errors import AppError
 from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
-from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshotItem, StatusReport
+from app.models.prg import ProgressEntry, ProgressItem, StatusReport
 from app.models.prj import WORKING_WEEKDAYS_DEFAULT, Calendar, CalendarHoliday, Project, ProjectMember
 from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import WbsElement
@@ -679,8 +679,8 @@ def remove_activity(
 ) -> None:
     """活動を消し（schedule.edit）、日程を計算し直す。
 
-    依存の行と割当を消し、ベースラインの写しは活動の紐付けだけを空にして残す（SCH-18 の「削除された活動」。A-19）。
-    進捗の算定項目・入力も消し、スナップショットの写しは紐付けだけを空にして残す（A-26）。
+    依存の行と割当を消す。ベースライン・スナップショットの写しは変えない（写しの値。設計書 1.1 の 4.2。CR-002）。
+    今の計画に無い活動の ID が SCH-18 の「削除された活動」になる。進捗の算定項目・入力も消す（A-26）。
     実績工数（``time_entries``）のある活動は消さずに 409 ``INVALID_STATE``（実績を黙って消すと EFF-02 の集計が変わる。OQ-26 (2)・A-30）。
     是正措置が指す活動は 422 ``ACTIVITY_REFERENCED``（変更要求の反映と同じ。外部キー違反の 500 にしない。A-47）。
     """
@@ -696,16 +696,10 @@ def remove_activity(
             or_(ActivityDependency.predecessor_id == activity_id, ActivityDependency.successor_id == activity_id)
         )
     )
-    session.execute(
-        update(ScheduleBaselineItem).where(ScheduleBaselineItem.activity_id == activity_id).values(activity_id=None)
-    )
-    # 進捗：算定項目と各報告日の入力を消し、スナップショットの写しは紐付けだけ空にして残す
-    # （過去の線は写しだけから描く。BR-13。docs/decisions/ASSUMPTIONS.md A-22・A-26、OQ-23 (3)）
+    # 進捗：算定項目と各報告日の入力を消す。スナップショットの写しは変えない
+    # （過去の線は写しだけから描く。BR-13。設計書 1.1 の 4.2、docs/decisions/ASSUMPTIONS.md A-26、OQ-23 (3)）
     session.execute(delete(ProgressItem).where(ProgressItem.activity_id == activity_id))
     session.execute(delete(ProgressEntry).where(ProgressEntry.activity_id == activity_id))
-    session.execute(
-        update(ProgressSnapshotItem).where(ProgressSnapshotItem.activity_id == activity_id).values(activity_id=None)
-    )
     links.assignments.remove_activity(session, activity_id)
     session.delete(activity)
     calculate_and_store(session, project_id)

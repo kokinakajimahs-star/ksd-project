@@ -704,18 +704,31 @@ def test_scope_baseline_elements_keep_snapshot_when_element_changes(db_session: 
     assert (loaded.wbs_code, loaded.name, loaded.own_estimate_hours) == ("1.0", "要素 1.0", Decimal("5.00"))
 
 
-def test_scope_baseline_elements_block_deleting_baselined_element(db_session: Session) -> None:
-    """DB-WBS-010 scope_baseline_elements：版の写しが指す要素は DB が消させない（版を後から変えない。CR-002 が決まるまでの扱い）。"""
+def test_scope_baseline_elements_keep_values_after_element_is_deleted(db_session: Session) -> None:
+    """DB-WBS-010 scope_baseline_elements：写しの要素の列は外部キーを張らない写しの値（設計書 1.1 の 4.2。CR-002）。
+
+    版に入った要素を消しても写しは変わらない（WBS-22）。消した要素の内部キーは再利用しない（AUTOINCREMENT）。
+    """
     project = _project(db_session)
     creator = _user(db_session, "approver")
-    element = _element(db_session, project)
+    parent = _element(db_session, project)
+    element = _element(db_session, project, parent=parent, code="1.1")
     baseline = _baseline(db_session, project, creator)
     db_session.add(
-        ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element.id, wbs_code="1.0", kind="DELIVERABLE", name="x")
+        ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element.id, parent_element_id=parent.id,
+                             wbs_code="1.1", kind="DELIVERABLE", name="x")
     )
     db_session.commit()
+    removed_ids = (parent.id, element.id)
     db_session.delete(element)
-    _flush_fails(db_session)
+    db_session.flush()
+    db_session.delete(parent)
+    db_session.commit()
+
+    copy = db_session.scalar(sa.select(ScopeBaselineElement))
+    assert copy is not None and (copy.element_id, copy.parent_element_id) == (removed_ids[1], removed_ids[0])
+    again = _element(db_session, project, code="2.0", seq=2)
+    assert again.id > max(removed_ids)
 
 
 @pytest.mark.parametrize(
@@ -724,15 +737,17 @@ def test_scope_baseline_elements_block_deleting_baselined_element(db_session: Se
         {"kind": "PROJECT"},
         {"own_estimate_hours": Decimal("-1")},
         {"scope_baseline_id": 9999},
-        {"element_id": 9999},
-        {"parent_element_id": 9999},
+        {"element_id": None},
         {"wbs_code": None},
         {"name": None},
     ],
-    ids=["kind", "negative-hours", "no-baseline", "no-element", "no-parent", "no-code", "no-name"],
+    ids=["kind", "negative-hours", "no-baseline", "no-element", "no-code", "no-name"],
 )
 def test_scope_baseline_elements_rejections(db_session: Session, override: dict[str, object]) -> None:
-    """DB-WBS-010 scope_baseline_elements：4 値以外の区分、負の見積、無い版・要素・親、WBS ID・名称の無い写しは DB が拒む。"""
+    """DB-WBS-010 scope_baseline_elements：4 値以外の区分、負の見積、無い版、要素の ID・WBS ID・名称の無い写しは DB が拒む。
+
+    写した要素・親の ID は今は無い要素を指してよい（外部キーを張らない。設計書 1.1 の 4.2）。
+    """
     project = _project(db_session)
     creator = _user(db_session, "approver")
     element = _element(db_session, project)

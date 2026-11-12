@@ -83,6 +83,8 @@ class WbsElement(Base):
         CheckConstraint("sibling_seq >= 1", name="sibling_seq"),
         CheckConstraint("last_child_seq >= 0", name="last_child_seq"),
         CheckConstraint("own_estimate_hours IS NULL OR own_estimate_hours >= 0", name="own_estimate_hours"),
+        # 内部キーを再利用しない（設計書 1.1 の 4.2。写しの値が後から作った別の行を指さないため）
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -282,6 +284,7 @@ class ScopeBaselineElement(Base):
     """スコープベースラインの版に固定した要素の写し（要求 WBS-22：その時点の WBS と辞書を後から変更されない形で照会できる）。
 
     ``element_id``・``parent_element_id`` は写した時点の要素とその親の内部キー（木は版の中でこの 2 つでたどる）。
+    写しの値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2：基準の後に要素を消しても版は変わらない。CR-002）。
     WBS ID・区分・名称・自分の見積は写した時点の値、``dictionary`` は WBS 辞書の写し（辞書が無ければ空）。
     """
 
@@ -293,8 +296,8 @@ class ScopeBaselineElement(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scope_baseline_id: Mapped[int] = mapped_column(ForeignKey("scope_baselines.id"), index=True)
-    element_id: Mapped[int] = mapped_column(ForeignKey("wbs_elements.id"), index=True)
-    parent_element_id: Mapped[int | None] = mapped_column(ForeignKey("wbs_elements.id"), index=True)
+    element_id: Mapped[int] = mapped_column(Integer, index=True)
+    parent_element_id: Mapped[int | None] = mapped_column(Integer, index=True)
     wbs_code: Mapped[str] = mapped_column(String(100))
     kind: Mapped[str] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(200))

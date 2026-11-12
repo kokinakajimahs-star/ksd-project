@@ -515,12 +515,12 @@ def test_overlay_finalized_lines(world: World, client: TestClient) -> None:
         (0, a, 1.0, "BEHIND"), (1, c, 2.0, "BEHIND")]
     assert [v["point"]["position"] for v in lines[1]["vertices"]] == [3.0, 2.0]  # C は前の報告日の 50% を引き継いだ
 
-    # 写した活動を消しても過去の線は残り、消した活動の頂点は外れる（BR-13）
+    # 写した活動を消しても過去の線は残り、消した活動の頂点は外れる（BR-13）。写しは活動の ID を写しの値のまま持つ（設計書 1.1 の 4.2）
     assert client.delete(world.url(f"/activities/{c}"), headers=world.h["planner"]).status_code == 204
     lines = client.get(world.url("/lightning-lines"), params=[("report_ids", first)], headers=world.h["viewer"]).json()["lines"]
-    assert [v["activity_id"] for v in lines[0]["vertices"]] == [a] and lines[0]["missing_activity_ids"] == [None]
+    assert [v["activity_id"] for v in lines[0]["vertices"]] == [a] and lines[0]["missing_activity_ids"] == [c]
     past = world.line(first)
-    assert [(r["activity_id"], r["name"]) for r in past["rows"]] == [(a, "A"), (None, "C")]
+    assert [(r["activity_id"], r["name"]) for r in past["rows"]] == [(a, "A"), (c, "C")]
 
     def get(params: list[tuple[str, int]]) -> Any:
         return client.get(world.url("/lightning-lines"), params=params, headers=world.h["viewer"])

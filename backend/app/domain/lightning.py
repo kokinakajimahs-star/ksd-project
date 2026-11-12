@@ -171,7 +171,7 @@ class OverlaidLine:
     """重ねて描く 1 本の線（PRG-18）。``style_index`` は線の種類（報告日の古い順に 0, 1, …）。
 
     頂点は今のガントの行へ置き直したもの（今の行の順）。今のガントに無い活動（消した活動など）の頂点は外し、
-    その活動の ID（消して紐付けの無い写しは ``None``）を ``missing_activity_ids`` に返す。
+    その活動の ID（写しの値。設計書 1.0 の頃に紐付けを空にした写しは ``None``）を ``missing_activity_ids`` に返す。
     """
 
     style_index: int

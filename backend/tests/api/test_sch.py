@@ -442,8 +442,9 @@ def test_delete_activity_removes_dependencies_and_keeps_baseline_copy(
     assert a not in fake.rows
     db_session.expire_all()
     assert db_session.scalars(select(ActivityDependency).where(ActivityDependency.predecessor_id == a)).all() == []
+    # 写しは変えない（活動の ID も写しの値のまま。設計書 1.1 の 4.2。CR-002）
     copies = db_session.scalars(select(ScheduleBaselineItem).where(ScheduleBaselineItem.name == "A")).all()
-    assert [(i.activity_id, i.start_date) for i in copies] == [(None, date(2026, 12, 1))]
+    assert [(i.activity_id, i.start_date) for i in copies] == [(a, date(2026, 12, 1))]
     assert client.delete(world.url(f"/activities/{a}"), headers=world.h["planner"]).status_code == 404
 
 
@@ -630,7 +631,7 @@ def test_variance_against_baseline(world: World, client: TestClient, db_session:
         ("MATCHED", b, "B", 2, 2, None),
         ("MATCHED", m, "M", 2, 2, None),
         ("ADDED", d, "D", None, None, None),
-        ("DELETED", None, "C", None, None, None),
+        ("DELETED", c, "C", None, None, None),  # 写しは消した活動の ID を写しの値のまま持つ（設計書 1.1 の 4.2）
     ]
     assert client.get(world.url(f"/schedule-baselines/{MISSING}/variance"), headers=world.h["viewer"]).status_code == 404
     other = World(client, world.session, code="PRJ-T")

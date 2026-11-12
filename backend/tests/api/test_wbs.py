@@ -429,17 +429,25 @@ def test_delete_records_audit_logs_for_bulk_statements(world: World, db_session:
     assert (nulled.before["element_id"], nulled.after["element_id"]) == (child["id"], None)
 
 
-def test_delete_baselined_element_is_422(world: World, db_session: Session) -> None:
-    """API-WBS-005：スコープベースラインの版に入った要素は 422 ELEMENT_IN_BASELINE（CR-002 の暫定。版の写しを変えない）。"""
+def test_delete_baselined_element_keeps_baseline_copy(world: World, db_session: Session) -> None:
+    """API-WBS-005：スコープベースラインの版に入った要素も消せ、版の写しは変わらない（設計書 1.1 の 4.2・5.10。CR-002。WBS-22）。"""
     element = world.add("基準の要素")
     baseline = ScopeBaseline(project_id=world.pid, version=1, reason="INITIAL_APPROVAL", created_by=world.admin.id)
     db_session.add(baseline)
     db_session.flush()
-    db_session.add(ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"], wbs_code="1.0",
-                                        kind="DELIVERABLE", name="基準の要素"))
+    copy = ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"], wbs_code="1.0",
+                                kind="DELIVERABLE", name="基準の要素")
+    db_session.add(copy)
     db_session.commit()
+    copy_id = copy.id
     response = world.client.delete(world.url(f"/elements/{element['id']}"), headers=world.headers["planner"])
-    assert (response.status_code, response.json()["error"]["code"]) == (422, "ELEMENT_IN_BASELINE")
+    assert response.status_code == 204, response.text
+    db_session.expire_all()
+    assert db_session.get(WbsElement, element["id"]) is None
+    kept = db_session.get(ScopeBaselineElement, copy_id)
+    assert kept is not None and (kept.element_id, kept.wbs_code, kept.name) == (element["id"], "1.0", "基準の要素")
+    # 消した要素の内部キーは再利用しない（後から足した要素を写しが指さない）
+    assert world.add("後から足した要素")["id"] > element["id"]
 
 
 # ---------------------------------------------------------------------------

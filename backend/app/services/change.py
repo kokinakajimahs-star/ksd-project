@@ -52,7 +52,7 @@ from app.domain.workflow import (
 from app.errors import AppError
 from app.models.chg import AuditLog, ChangeRequest, CorrectiveAction
 from app.models.eff import Assignment, TimeEntry, VarianceNote
-from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshotItem, StatusReport
+from app.models.prg import ProgressEntry, ProgressItem, StatusReport
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import (
@@ -466,17 +466,10 @@ class AppliedView:
 
 
 def _refuse_removing_elements(session: Session, removed: Sequence[int]) -> None:
-    """基準の写し・是正措置・差異の理由が指す要素は消せない（外部キー。CR-002 の暫定。A-37）。"""
-    baselined = sorted(
-        set(session.scalars(select(ScopeBaselineElement.element_id).where(ScopeBaselineElement.element_id.in_(removed))))
-        | set(session.scalars(select(ScopeBaselineElement.parent_element_id)
-                              .where(ScopeBaselineElement.parent_element_id.in_(removed))))
-        | set(session.scalars(select(ScheduleBaselineItem.element_id).where(ScheduleBaselineItem.element_id.in_(removed))))
-    )
-    baselined = [i for i in baselined if i is not None]
-    if baselined:
-        raise AppError(422, "ELEMENT_IN_BASELINE", "ベースラインの版に入った要素は消せません（CR-002）",
-                       details=[{"element_ids": baselined}])
+    """是正措置・差異の理由が指す要素は消せない（外部キー。A-37）。
+
+    基準の写しは外部キーを張らない写しの値なので、版に入った要素も消せる（設計書 1.1 の 4.2。CR-002）。
+    """
     referenced = sorted(
         set(session.scalars(select(CorrectiveAction.element_id).where(CorrectiveAction.element_id.in_(removed))))
         | set(session.scalars(select(VarianceNote.element_id).where(VarianceNote.element_id.in_(removed))))
@@ -579,16 +572,12 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
                                        successor_id=real(successor)))
     session.flush()
 
-    # 活動の削除（API-SCH-005 と同じ後始末：割当・進捗を消し、写しは紐付けだけを空にして残す。A-19・A-26）
+    # 活動の削除（API-SCH-005 と同じ後始末：割当・進捗を消す。基準・スナップショットの写しは変えない。4.2・A-26）
     if removed_activities:
         session.execute(delete(ActivityDependency).where(or_(ActivityDependency.predecessor_id.in_(removed_activities),
                                                              ActivityDependency.successor_id.in_(removed_activities))))
-        session.execute(update(ScheduleBaselineItem).where(ScheduleBaselineItem.activity_id.in_(removed_activities))
-                        .values(activity_id=None))
         session.execute(delete(ProgressItem).where(ProgressItem.activity_id.in_(removed_activities)))
         session.execute(delete(ProgressEntry).where(ProgressEntry.activity_id.in_(removed_activities)))
-        session.execute(update(ProgressSnapshotItem).where(ProgressSnapshotItem.activity_id.in_(removed_activities))
-                        .values(activity_id=None))
         session.execute(delete(Assignment).where(Assignment.activity_id.in_(removed_activities)))
         for activity_id in removed_activities:
             session.delete(activity_rows[activity_id])
@@ -684,7 +673,7 @@ def apply_change_request(
     3. RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る。旧版は残す（BR-12）
     4. 計画は新しい版と一致するので、計画を書いて ``DRAFT`` に戻った WBS の状態を ``BASELINED`` に保つ
 
-    基準の写しが指す要素は消せない（422 ``ELEMENT_IN_BASELINE``。CR-002 の暫定）。どこかで止まれば何も書かない。
+    基準の写しは変えない（版に入った要素・活動も消せる。設計書 1.1 の 4.2。CR-002）。どこかで止まれば何も書かない。
     """
     authorize_project(session, access, actor, project_id, "change.apply")
     change_request = _change_request_of(session, project_id, change_request_id)
