@@ -20,6 +20,8 @@ from app.domain.effort import (
     ActivityEffortInput,
     ActivityPeriod,
     AssignmentShare,
+    BaselineItem,
+    BaselinePlacement,
     EffortElement,
     EffortError,
     EffortRollup,
@@ -148,8 +150,8 @@ def sample_elements() -> list[EffortElement]:
     """
     return [
         EffortElement(1, None, DEL, own_estimate_hours=D("99")),  # WP 以外の自分の見積は集計に使わない
-        EffortElement(11, 1, WP, own_estimate_hours=D("77"), baseline_hours=D("70")),  # 活動を持つ WP の自分の見積・基準は使わない
-        EffortElement(12, 1, WP, own_estimate_hours=D("10"), baseline_hours=D("8")),
+        EffortElement(11, 1, WP, own_estimate_hours=D("77")),  # 活動を持つ WP の自分の見積は使わない
+        EffortElement(12, 1, WP, own_estimate_hours=D("10")),
         EffortElement(2, None, MGT),
         EffortElement(21, 2, WP),
         EffortElement(3, None, CMP),
@@ -159,17 +161,26 @@ def sample_elements() -> list[EffortElement]:
 def sample_activities(c_entered: str = "9") -> list[ActivityEffortInput]:
     return [
         # A：進捗率 50 → ETC 20、EAC 40
-        ActivityEffortInput(A, 11, estimate_hours=D("40"), actual_hours=D("20"), percent_complete=D("50"), baseline_hours=D("40")),
+        ActivityEffortInput(A, 11, estimate_hours=D("40"), actual_hours=D("20"), percent_complete=D("50")),
         # B：未算定 → ETC max(16−4, 0)＝12、EAC 16
-        ActivityEffortInput(B, 11, estimate_hours=D("16"), actual_hours=D("4"), percent_complete=None, baseline_hours=D("10")),
+        ActivityEffortInput(B, 11, estimate_hours=D("16"), actual_hours=D("4"), percent_complete=None),
         # C：入力した残工数 → ETC 9、EAC 11。基準に無い
         ActivityEffortInput(C, 21, estimate_hours=D("8"), actual_hours=D("2"), percent_complete=D("10"),
                             entered_etc_hours=D(c_entered)),
     ]
 
 
+# 基準の版（save_baseline が作る形：全ての活動の項目と、全ての WP の WORK_PACKAGE の項目）。C・WP 21 は版の後に足した
+SAMPLE_BASELINE = [
+    BaselineItem("ACTIVITY", 11, A, D("40"), date(2026, 11, 28), date(2026, 12, 2)),
+    BaselineItem("ACTIVITY", 11, B, D("10")),  # 版の時点で日付が無い → 期間の軸では「日付なし」
+    BaselineItem("WORK_PACKAGE", 11, None, D("50"), date(2026, 11, 28), date(2026, 12, 2)),
+    BaselineItem("WORK_PACKAGE", 12, None, D("8")),
+]
+
+
 def sample_rollup() -> EffortRollup:
-    return rollup_effort(sample_elements(), sample_activities())
+    return rollup_effort(sample_elements(), sample_activities(), SAMPLE_BASELINE)
 
 
 def test_eac_is_actual_plus_etc_and_rolls_up() -> None:
@@ -184,8 +195,9 @@ def test_eac_is_actual_plus_etc_and_rolls_up() -> None:
     assert same(r.elements[1].values, values("66", "58", "24", "42", "66"))
     assert same(r.elements[21].values, values("8", None, "2", "9", "11"))
     assert same(r.elements[2].values, values("8", None, "2", "9", "11"))
-    assert same(r.elements[3].values, values("0", None, "0", "0", "0"))
+    assert same(r.elements[3].values, values("0", "0", "0", "0", "0"))  # 子の無い WP 以外の要素の基準は 0（「追加」ではない）
     assert same(r.project, values("74", "58", "26", "51", "77"))
+    assert (r.removed_baseline, r.wbs_removed_baseline) == (None, None)
     assert r.roots == (1, 2, 3)
     assert [r.elements[e].source for e in (11, 12, 1, 3)] == [
         RollupSource.ACTIVITIES, RollupSource.OWN_ESTIMATE, RollupSource.CHILDREN, RollupSource.CHILDREN]
@@ -203,7 +215,7 @@ def test_eac_is_actual_plus_etc_and_rolls_up() -> None:
 def test_baseline_is_kept_apart_from_forecast() -> None:
     """RULE-EFF-002：予測（EAC）を更新しても基準の値は変わらない（EFF-08）。計画・基準・予測を別の値で持つ。"""
     before = sample_rollup()
-    after = rollup_effort(sample_elements(), sample_activities(c_entered="3"))
+    after = rollup_effort(sample_elements(), sample_activities(c_entered="3"), SAMPLE_BASELINE)
     assert (after.activities[C].values.eac, after.project.eac) == (D("5"), D("71"))
     assert after.project.baseline == before.project.baseline == D("58")
     assert after.project.planned == before.project.planned == D("74")
@@ -211,10 +223,19 @@ def test_baseline_is_kept_apart_from_forecast() -> None:
 
 
 def test_rollup_without_activities_or_baseline() -> None:
-    """RULE-EFF-002：活動の無い WP の自分の見積が空なら 0。基準の値が 1 つも無ければプロジェクトの基準は None。"""
-    r = rollup_effort([EffortElement(1, None, DEL), EffortElement(11, 1, WP)])
+    """RULE-EFF-002：活動の無い WP の自分の見積が空なら 0。基準の版が無ければ、基準の値は全て None。"""
+    r = rollup_effort([EffortElement(1, None, DEL), EffortElement(11, 1, WP), EffortElement(3, None, CMP)])
     assert same(r.project, values("0", None, "0", "0", "0"))
+    assert [r.elements[e].values.baseline for e in (1, 11, 3)] == [None, None, None]
+    assert (r.baseline_placements, r.removed_baseline, r.wbs_removed_baseline) == ((), None, None)
     assert rollup_effort([]).project == EffortValues()
+
+
+def test_empty_baseline_version_makes_every_work_package_added() -> None:
+    """RULE-EFF-002：版はあるが項目が無い：WP と、その上位は追加された要素（None）。子の無い WP 以外は 0。版の合計は 0。"""
+    r = rollup_effort([EffortElement(1, None, DEL), EffortElement(11, 1, WP), EffortElement(3, None, CMP)], [], [])
+    assert [r.elements[e].values.baseline for e in (1, 11, 3)] == [None, None, D("0")]
+    assert r.project.baseline == D("0")
 
 
 @pytest.mark.parametrize(
@@ -224,14 +245,96 @@ def test_rollup_without_activities_or_baseline() -> None:
         ([EffortElement(1, 2, WP), EffortElement(2, 1, CMP)], []),  # 循環
         ([EffortElement(1, None, WP)], [ActivityEffortInput(A, 9, D("1"), D("0"))]),  # 無い WP
         ([EffortElement(1, None, WP)], [ActivityEffortInput(A, 1, D("1"), D("-1"))]),  # 負の実績
-        ([EffortElement(1, None, WP, own_estimate_hours=D("1"), baseline_hours=D("-1"))], []),  # 負の基準
-        ([EffortElement(1, None, WP)], [ActivityEffortInput(A, 1, D("1"), D("0"), baseline_hours=D("-2"))]),
     ],
 )
 def test_rollup_rejects_invalid_tree_and_values(elements: list[EffortElement], activities: list[ActivityEffortInput]) -> None:
     """RULE-EFF-002：木の誤り（RULE-EST-001 と同じ検査）と負の値は EffortError。"""
     with pytest.raises(EffortError):
         rollup_effort(elements, activities)
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [BaselineItem("TASK", 1)],  # 項目の種類の誤り
+        [BaselineItem("ACTIVITY", 1, A, D("-1"))],  # 負の見積
+        [BaselineItem("WORK_PACKAGE", 1, None, 1.5)],  # float は受けない
+        [BaselineItem("ACTIVITY", 1, A, D("1")), BaselineItem("ACTIVITY", 1, A, D("2"))],  # 同じ活動の項目が 2 つ
+        [BaselineItem("WORK_PACKAGE", 1, None, D("1")), BaselineItem("WORK_PACKAGE", 1, None, D("1"))],  # 同じ WP の項目が 2 つ
+        [BaselineItem("WORK_PACKAGE", 1, A, D("1"))],  # 活動を指す WORK_PACKAGE の項目
+    ],
+)
+def test_rollup_rejects_invalid_baseline_items(items: list[BaselineItem]) -> None:
+    """RULE-EFF-002：版の項目の誤りは推測せずに EffortError。"""
+    with pytest.raises(EffortError):
+        rollup_effort([EffortElement(1, None, WP)], [ActivityEffortInput(A, 1, D("1"), D("0"))], items)
+
+
+# 版の後に変えた計画（5.8 の基準の値の数え方。設計書 1.1・CR-007）
+#   版：WP 11（A 40・B 10。項目 50）、WP 13（活動なし。項目 6）、WP 14（E 20。項目 20）、WP 12（活動なし。項目 8）。版の合計 84
+#   今：B と WP 13・14 を消し、E を WP 11 へ移した。WP 12 に活動 F、管理領域 2 の下に WP 21（活動 C）と子の無い 22 を足した
+E, F = 105, 106
+CHANGED_ELEMENTS = [
+    EffortElement(1, None, DEL),
+    EffortElement(11, 1, WP),
+    EffortElement(12, 1, WP, own_estimate_hours=D("8")),
+    EffortElement(2, None, MGT),
+    EffortElement(21, 2, WP),
+    EffortElement(22, 2, CMP),
+    EffortElement(3, None, CMP),
+]
+CHANGED_ACTIVITIES = [
+    ActivityEffortInput(A, 11, D("44"), D("0")),
+    ActivityEffortInput(E, 11, D("20"), D("0")),
+    ActivityEffortInput(F, 12, D("5"), D("0")),
+    ActivityEffortInput(C, 21, D("3"), D("0")),
+]
+CHANGED_BASELINE = [
+    BaselineItem("WORK_PACKAGE", 11, None, D("50"), date(2026, 12, 1), date(2026, 12, 4)),
+    BaselineItem("ACTIVITY", 11, A, D("40"), date(2026, 12, 1), date(2026, 12, 2)),
+    BaselineItem("ACTIVITY", 11, B, D("10"), date(2026, 12, 3), date(2026, 12, 4)),
+    BaselineItem("WORK_PACKAGE", 13, None, D("6")),
+    BaselineItem("WORK_PACKAGE", 14, None, D("20"), date(2026, 12, 7), date(2026, 12, 8)),
+    BaselineItem("ACTIVITY", 14, E, D("20"), date(2026, 12, 7), date(2026, 12, 8)),
+    BaselineItem("WORK_PACKAGE", 12, None, D("8")),
+]
+
+
+def test_baseline_counts_follow_the_version() -> None:
+    """RULE-EFF-002：基準の値の数え方（5.8）。
+
+    - WP は版の WORK_PACKAGE の項目（WP 11 は 50。今の活動の基準の和 A 40＋E 20＝60 ではない）
+    - 追加された要素（BR-11）：版に項目の無い活動（F・C）、版に項目の無い WP（21）、配下の WP が全て追加された上位（2）は None。
+      子の無い WP 以外の要素（22・3）は 0
+    - プロジェクトは版の合計 84（最上位の合計 58 と、WBS の軸の桶「基準にあって今は無い」＝消した WP 13・14 の 26）
+    """
+    r = rollup_effort(CHANGED_ELEMENTS, CHANGED_ACTIVITIES, CHANGED_BASELINE)
+    assert [r.activities[x].values.baseline for x in (A, E, F, C)] == [D("40"), D("20"), None, None]
+    assert {e: r.elements[e].values.baseline for e in (11, 12, 1, 21, 22, 2, 3)} == {
+        11: D("50"), 12: D("8"), 1: D("58"), 21: None, 22: D("0"), 2: None, 3: D("0")}
+    assert (r.wbs_removed_baseline, r.removed_baseline, r.project.baseline) == (D("26"), D("16"), D("84"))
+    # 担当者・組織・期間の軸に置く基準：今もある活動の項目（E は今の置き場 WP 11）と、版に活動の項目を持たない今もある WP 12
+    assert r.baseline_placements == (
+        BaselinePlacement(A, 11, D("40"), date(2026, 12, 1), date(2026, 12, 2)),
+        BaselinePlacement(E, 11, D("20"), date(2026, 12, 7), date(2026, 12, 8)),
+        BaselinePlacement(None, 12, D("8"), None, None),
+    )
+    # 差異の判定：追加された要素は ADDED。子の無い 22・3 は基準 0・EAC 0 で閾値内（一覧に出さない）
+    extracted = extract_variances(((e, r.elements[e].values) for e in (11, 12, 1, 21, 22, 2, 3)),
+                                  rate_threshold=D("0.10"), hours_threshold=D("8"))
+    statuses = {e: v.status for e, v in extracted}
+    assert statuses[21] is statuses[2] is VarianceStatus.ADDED
+    assert statuses[11] is VarianceStatus.EXCEEDED  # EAC 64（A 44＋E 20）−基準 50
+    assert 22 not in statuses and 3 not in statuses
+
+
+def test_work_package_value_falls_back_to_activity_items() -> None:
+    """RULE-EFF-002：版に WORK_PACKAGE の項目が無く活動の項目がある WP は、その活動の項目の和。1.1 より前に消した活動の写し
+    （activity_id が空）は「基準にあって今は無い」。"""
+    items = [BaselineItem("ACTIVITY", 11, A, D("4")), BaselineItem("ACTIVITY", 11, None, D("3"))]
+    r = rollup_effort([EffortElement(11, None, WP)], [ActivityEffortInput(A, 11, D("4"), D("0"))], items)
+    assert (r.elements[11].values.baseline, r.removed_baseline, r.wbs_removed_baseline) == (D("7"), D("3"), None)
+    assert r.project.baseline == D("7")
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +357,8 @@ TIME_ENTRIES = [
 ]
 ORGANIZATIONS = {U1: "開発部", U2: "開発部", U3: None}
 SCHEDULES = [
-    ActivityPeriod(A, date(2026, 12, 1), date(2026, 12, 10), baseline_start=date(2026, 11, 28), baseline_finish=date(2026, 12, 2)),
-    ActivityPeriod(B, date(2026, 11, 26), date(2026, 12, 5)),  # 基準の日付が無い → 基準は「日付なし」
+    ActivityPeriod(A, date(2026, 12, 1), date(2026, 12, 10)),  # 基準は版の項目の 11/28〜12/02
+    ActivityPeriod(B, date(2026, 11, 26), date(2026, 12, 5)),  # 版の項目に日付が無い → 基準は「日付なし」
 ]  # C は日付なし（日程を計算していない）
 
 
@@ -273,6 +376,33 @@ def test_every_axis_sums_to_project_total() -> None:
         assert same(total_of(axes.assignee), axes.total)
         assert same(total_of(axes.organization), axes.total)
         assert same(total_of(axes.period), axes.total)
+        assert (axes.removed, axes.wbs_removed) == (None, None)  # 版にあって今は無いものが無い
+
+
+def test_removed_baseline_bucket_keeps_every_axis_at_the_version_total() -> None:
+    """RULE-EFF-003：版にあって今は無い活動・WP の基準は、どの軸でも桶「基準にあって今は無い」に置き、
+    どの軸でも基準の合計が版の合計 84 に一致する（5.8・EFF-09）。
+
+    - WBS の軸：今もある WP は版の WP の値、消した WP 13・14 の 26 が桶
+    - 担当者・組織・期間の軸：A 40・E 20 は今の割当の比、WP 12 の項目 8 は「未割当」・「日付なし」、消した B 10 と WP 13 の 6 が桶
+      （WP 14 の値は E の項目が持つ）
+    """
+    rollup = rollup_effort(CHANGED_ELEMENTS, CHANGED_ACTIVITIES, CHANGED_BASELINE)
+    shares = [AssignmentShare(A, U1), AssignmentShare(E, U1, D("10")), AssignmentShare(E, U2, D("10"))]
+    for unit in PeriodUnit:
+        axes = aggregate_effort(rollup, assignments=shares, organizations={U1: "開発部"}, calendar=ALL_DAYS, period_unit=unit)
+        assert axes.total.baseline == D("84")
+        assert axes.wbs_removed == EffortValues(baseline=D("26")) and axes.removed == EffortValues(baseline=D("16"))
+        assert same(total_of({r: axes.wbs[r] for r in axes.wbs_roots}).plus(axes.wbs_removed), axes.total)
+        for axis in (axes.assignee, axes.organization, axes.period):
+            assert same(total_of(axis).plus(axes.removed), axes.total)
+    axes = aggregate_effort(rollup, assignments=shares, organizations={U1: "開発部"}, calendar=ALL_DAYS)
+    assert {u: v.baseline for u, v in axes.assignee.items()} == {U1: D("50"), U2: D("10"), None: D("8")}
+    assert {k.kind: v.baseline for k, v in axes.organization.items()} == {
+        OrganizationBucketKind.ORGANIZATION: D("50"), OrganizationBucketKind.NO_ORGANIZATION: D("10"),
+        OrganizationBucketKind.UNASSIGNED: D("8")}
+    dec = PeriodKey(PeriodBucketKind.PERIOD, date(2026, 12, 1))
+    assert (axes.period[dec].baseline, axes.period[UNSCHEDULED].baseline) == (D("60"), D("8"))
 
 
 def test_assignee_axis_splits_by_assigned_hours() -> None:
@@ -303,11 +433,12 @@ def test_organization_axis_groups_assignees() -> None:
 
 
 def test_month_axis_spreads_plan_over_working_days() -> None:
-    """RULE-EFF-003：期間の軸。計画・基準は稼働日に均等に配り、実績は作業日、ETC は「残り」、EAC は実績＋「残り」（5.8 の表）。
+    """RULE-EFF-003：期間の軸。計画は今の日付、基準は版の項目の日付の稼働日に均等に配り、実績は作業日、ETC は「残り」、
+    EAC は実績＋「残り」（5.8 の表）。
 
-    A：計画 12/01〜12/10（10 日）→ 12 月に 40。基準 11/28〜12/02（11 月 3 日・12 月 2 日）→ 24・16。
-    B：計画 11/26〜12/05（11 月 5 日・12 月 5 日）→ 8・8。基準の日付が無い → 「日付なし」に 10。
-    C と活動の無い WP 12：日付なし（計画 8＋10、基準 8）。
+    A：計画 12/01〜12/10（10 日）→ 12 月に 40。基準は版の項目 11/28〜12/02（11 月 3 日・12 月 2 日）→ 24・16。
+    B：計画 11/26〜12/05（11 月 5 日・12 月 5 日）→ 8・8。版の項目に日付が無い → 「日付なし」に 10。
+    C と活動の無い WP 12：日付なし（計画 8＋10、基準は WP 12 の項目 8）。
     """
     axes = sample_axes()
     nov, dec = PeriodKey(PeriodBucketKind.PERIOD, date(2026, 11, 1)), PeriodKey(PeriodBucketKind.PERIOD, date(2026, 12, 1))
@@ -417,12 +548,12 @@ def test_extract_variances_keeps_input_order() -> None:
     # 閾値を緩めると 1.1（20%・20 人時）は抽出されない
     looser = extract_variances(targets, rate_threshold=D("0.25"), hours_threshold=D("8"))
     assert [k for k, _ in looser] == ["2.1", "2.2"]
-    # RULE-EFF-002 の要素の値から抽出する：21・2（C は基準の後に足した）と、子の無い 3 は基準に無いので「追加」
+    # RULE-EFF-002 の要素の値から抽出する：21・2（C は基準の後に足した）は「追加」。子の無い 3 は基準 0・EAC 0 で閾値内
+    # （設計書 1.1・CR-007：子の無い WP 以外の要素の基準は 0 とし、「追加」から外す）
     rollup = sample_rollup()
     from_rollup = extract_variances(((e, rollup.elements[e].values) for e in (1, 11, 12, 2, 21, 3)),
                                     rate_threshold=RATE, hours_threshold=HOURS)
-    assert [(k, r.status) for k, r in from_rollup] == [
-        (2, VarianceStatus.ADDED), (21, VarianceStatus.ADDED), (3, VarianceStatus.ADDED)]
+    assert [(k, r.status) for k, r in from_rollup] == [(2, VarianceStatus.ADDED), (21, VarianceStatus.ADDED)]
 
 
 @pytest.mark.parametrize(("rate", "hours"), [(D("-0.1"), D("8")), (D("0.1"), D("-1")), (0.1, D("8")), (D("0.1"), D("NaN"))])
@@ -499,13 +630,16 @@ def test_negative_and_invalid_hours_are_rejected(hours: object, code: TimeEntryP
     assert result.changes == ()
 
 
-def test_days_before_finalized_report_are_locked() -> None:
-    """RULE-EFF-005：確定した報告日（最も新しいもの）より前の日の値は変えない。報告日ちょうど以降は変えられる。"""
+def test_days_through_finalized_report_are_locked() -> None:
+    """RULE-EFF-005：確定した報告日（最も新しいもの）以前の日の値は変えない（報告日の当日も。設計書 1.1・CR-005）。翌日から変えられる。"""
     finalized = [date(2026, 12, 1), date(2026, 12, 5)]
     locked = check_time_entries([change(A, 4, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
                                 finalized_report_dates=finalized)
     assert codes(locked) == [(TimeEntryProblemCode.LOCKED_DATE, A, 4)]
-    assert check_time_entries([change(A, 5, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
+    on_report_date = check_time_entries([change(A, 5, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
+                                        finalized_report_dates=finalized)
+    assert codes(on_report_date) == [(TimeEntryProblemCode.LOCKED_DATE, A, 5)]
+    assert check_time_entries([change(A, 6, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
                               finalized_report_dates=finalized).ok
     # 今の値と同じ値（行が無いマスは 0）を送り直すのは「変える」に当たらない
     unchanged = check_time_entries([change(A, 3, D("3.00")), change(B, 2, D("0"))], existing=EXISTING,

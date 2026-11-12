@@ -1,14 +1,15 @@
 """遅延活動の抽出と影響（設計書 5.1 の RULE-PRG-006、5.7。要求仕様書 7.9 BR-09、PRG-19・PRG-03）。
 
 1. 抽出：ずれで判定した活動（RULE-PRG-004）のうち ``δ ≤ −delay_extract_days`` のものを、ずれの小さい順（遅れの大きい順）に並べる
-2. 見込みの終了：完了見込み日（PRG-03）があれば ``index(完了見込み日) + 1``、無ければ ``L + ceil(d × (1 − 進捗率))``
+2. 見込みの終了：完了見込み日（PRG-03）があれば BR-04 で稼働日へ寄せてから ``index(完了見込み日) + 1``、
+   無ければ ``L + ceil(d × (1 − 進捗率))``（進捗率は丸める前の値。設計書 1.1・CR-009）
 3. 個別の影響：その活動の EF を ``max(EF, 見込みの終了)`` に固定して前進計算（RULE-SCH-002）をやり直し、変わった後続の活動・
    マイルストーン（ずれの稼働日）・プロジェクトの終了のずれを返す。あわせて、その活動がクリティカルか（RULE-SCH-003）と、
    推移的な後続の一覧を返す
 4. 全体の影響：抽出した全ての活動の見込みを同時に当てた前進計算の結果（マイルストーンとプロジェクトの終了のずれ）も返す
 
-- 完了見込み日が非稼働日のときは、終了日の寄せ（BR-04。前の稼働日）をしてから終業の位置にする（稼働日なら
-  ``index(完了見込み日) + 1`` と同じ。docs/decisions/ASSUMPTIONS.md A-23）
+- 完了見込み日が非稼働日のときは、終了日の寄せ（BR-04。前の稼働日）をしてから終業の位置にする（設計書 1.1 の 5.7 の 2。
+  1.0 の間は A-23 の判断だった）
 - 見込みは EF の下限として当てる：``EF' = max(ES' + d, 見込みの終了)``。個別の影響では先行が動かないので ``ES' + d`` は計画の
   EF で、5.7 の 3 の ``max(EF, 見込みの終了)`` に一致する。全体の影響で、抽出した活動どうしが先行・後続の関係にあるとき、
   後続は先行の遅れも受ける（先行の見込みより前には始められない。A-23）
@@ -25,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Final
 
 from app.domain.calendar import WorkCalendar, WorkdayAxis
@@ -50,20 +52,22 @@ class DelayError(ValueError):
 class DelayInput:
     """活動の報告日の判定（RULE-PRG-004 の結果）と進捗の入力（4.1 の ``progress_entries``）のうち、ここで要る値。
 
-    ``percent_complete``：RULE-PRG-001 の進捗率（0〜100。``None`` は未算定）。``forecast_finish``：完了見込み日（PRG-03）。
+    ``percent_complete``：RULE-PRG-001 の進捗率（0〜100。``None`` は未算定）。丸める前の値（``Fraction``）も受ける（5.6・CR-009）。
+    ``forecast_finish``：完了見込み日（PRG-03）。
     """
 
     activity_id: int
     deviation: Decimal
     judgement: Judgement
-    percent_complete: Decimal | None
+    percent_complete: Decimal | Fraction | None
     forecast_finish: date | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "deviation", _as_decimal(self.deviation, f"活動 {self.activity_id} のずれ"))
         object.__setattr__(self, "judgement", Judgement(self.judgement))
         if self.percent_complete is not None:
-            p = _as_decimal(self.percent_complete, f"活動 {self.activity_id} の進捗率")
+            p = (self.percent_complete if isinstance(self.percent_complete, Fraction)
+                 else _as_decimal(self.percent_complete, f"活動 {self.activity_id} の進捗率"))
             if p < 0 or p > HUNDRED:
                 raise DelayError(f"活動 {self.activity_id}：進捗率は 0〜100: {p}")
             object.__setattr__(self, "percent_complete", p)
@@ -255,7 +259,7 @@ def analyze_delays(
         if item.percent_complete is None:
             raise DelayError(f"活動 {item.activity_id}：進捗率が未算定で、見込みの終了を求められない")
         duration = forward.early[item.activity_id].duration_days
-        remaining = Decimal(duration) * (1 - item.percent_complete / HUNDRED)
+        remaining = duration * (1 - Fraction(item.percent_complete) / 100)  # 分数のまま（丸めの誤差で ceil が 1 日ずれない）
         return line + math.ceil(remaining)
 
     forecasts: dict[int, int] = {}

@@ -10,7 +10,6 @@ import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHand
 import ImportExportPage, { describeImportResult } from "./ImportExportPage";
 import { formatFromFilename } from "./labels";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
@@ -57,7 +56,7 @@ function routes(overrides: Record<string, RouteHandler> = {}): Record<string, Ro
 
 function renderAt(path = "/projects/3/import-export") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/import-export" element={<ImportExportPage />} />
       </Routes>

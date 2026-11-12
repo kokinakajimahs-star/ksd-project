@@ -43,7 +43,9 @@ COLUMNS_4_1 = {
         "id", "project_id", "parent_id", "kind", "name", "wbs_code", "sibling_seq", "last_child_seq", "sort_order",
         "own_estimate_hours", "responsible_user_id", "responsible_team", "needs_renumber",
     },
-    "wbs_numbering_rules": {"id", "project_id", "separator", "min_digits", "prefix", "pad_first_level"},
+    "wbs_numbering_rules": {
+        "id", "project_id", "separator", "min_digits", "prefix", "pad_first_level", "top_last_child_seq",
+    },
     "wbs_code_history": {"id", "project_id", "element_id", "old_code", "new_code", "renumbered_at", "renumbered_by"},
     "wbs_dictionary_entries": {"id", "element_id", "deliverable", "work_scope", "completion_criteria", "assumptions"},
     "wbs_scope_links": {"id", "element_id", "scope_item_id"},
@@ -262,6 +264,8 @@ def test_numbering_rules_defaults(db_session: Session) -> None:
     loaded = db_session.get(WbsNumberingRule, rule.id)
     assert loaded is not None
     assert (loaded.separator, loaded.min_digits, loaded.prefix, loaded.pad_first_level) == (".", 1, "", True)
+    # 第 1 階層で今まで使った最大の順番（設計書 1.1 の 4.1）は 0 から
+    assert loaded.top_last_child_seq == 0
 
 
 def test_numbering_rules_server_defaults_apply_to_raw_insert(db_session: Session) -> None:
@@ -269,9 +273,9 @@ def test_numbering_rules_server_defaults_apply_to_raw_insert(db_session: Session
     project = _project(db_session)
     db_session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
     row = db_session.execute(
-        sa.text("SELECT separator, min_digits, prefix, pad_first_level FROM wbs_numbering_rules")
+        sa.text("SELECT separator, min_digits, prefix, pad_first_level, top_last_child_seq FROM wbs_numbering_rules")
     ).one()
-    assert (row[0], row[1], row[2], bool(row[3])) == (".", 1, "", True)
+    assert (row[0], row[1], row[2], bool(row[3]), row[4]) == (".", 1, "", True, 0)
 
 
 def test_numbering_rules_one_per_project(db_session: Session) -> None:
@@ -290,6 +294,13 @@ def test_numbering_rules_min_digits_at_least_one(db_session: Session) -> None:
     """DB-WBS-002 wbs_numbering_rules：桁数は 1 以上。0 は DB が拒む。"""
     project = _project(db_session)
     db_session.add(WbsNumberingRule(project_id=project.id, min_digits=0))
+    _flush_fails(db_session)
+
+
+def test_numbering_rules_top_last_child_seq_not_negative(db_session: Session) -> None:
+    """DB-WBS-002 wbs_numbering_rules：第 1 階層の数え（top_last_child_seq）は 0 以上。負の値は DB が拒む。"""
+    project = _project(db_session)
+    db_session.add(WbsNumberingRule(project_id=project.id, top_last_child_seq=-1))
     _flush_fails(db_session)
 
 
@@ -693,18 +704,31 @@ def test_scope_baseline_elements_keep_snapshot_when_element_changes(db_session: 
     assert (loaded.wbs_code, loaded.name, loaded.own_estimate_hours) == ("1.0", "要素 1.0", Decimal("5.00"))
 
 
-def test_scope_baseline_elements_block_deleting_baselined_element(db_session: Session) -> None:
-    """DB-WBS-010 scope_baseline_elements：版の写しが指す要素は DB が消させない（版を後から変えない。CR-002 が決まるまでの扱い）。"""
+def test_scope_baseline_elements_keep_values_after_element_is_deleted(db_session: Session) -> None:
+    """DB-WBS-010 scope_baseline_elements：写しの要素の列は外部キーを張らない写しの値（設計書 1.1 の 4.2。CR-002）。
+
+    版に入った要素を消しても写しは変わらない（WBS-22）。消した要素の内部キーは再利用しない（AUTOINCREMENT）。
+    """
     project = _project(db_session)
     creator = _user(db_session, "approver")
-    element = _element(db_session, project)
+    parent = _element(db_session, project)
+    element = _element(db_session, project, parent=parent, code="1.1")
     baseline = _baseline(db_session, project, creator)
     db_session.add(
-        ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element.id, wbs_code="1.0", kind="DELIVERABLE", name="x")
+        ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element.id, parent_element_id=parent.id,
+                             wbs_code="1.1", kind="DELIVERABLE", name="x")
     )
     db_session.commit()
+    removed_ids = (parent.id, element.id)
     db_session.delete(element)
-    _flush_fails(db_session)
+    db_session.flush()
+    db_session.delete(parent)
+    db_session.commit()
+
+    copy = db_session.scalar(sa.select(ScopeBaselineElement))
+    assert copy is not None and (copy.element_id, copy.parent_element_id) == (removed_ids[1], removed_ids[0])
+    again = _element(db_session, project, code="2.0", seq=2)
+    assert again.id > max(removed_ids)
 
 
 @pytest.mark.parametrize(
@@ -713,15 +737,17 @@ def test_scope_baseline_elements_block_deleting_baselined_element(db_session: Se
         {"kind": "PROJECT"},
         {"own_estimate_hours": Decimal("-1")},
         {"scope_baseline_id": 9999},
-        {"element_id": 9999},
-        {"parent_element_id": 9999},
+        {"element_id": None},
         {"wbs_code": None},
         {"name": None},
     ],
-    ids=["kind", "negative-hours", "no-baseline", "no-element", "no-parent", "no-code", "no-name"],
+    ids=["kind", "negative-hours", "no-baseline", "no-element", "no-code", "no-name"],
 )
 def test_scope_baseline_elements_rejections(db_session: Session, override: dict[str, object]) -> None:
-    """DB-WBS-010 scope_baseline_elements：4 値以外の区分、負の見積、無い版・要素・親、WBS ID・名称の無い写しは DB が拒む。"""
+    """DB-WBS-010 scope_baseline_elements：4 値以外の区分、負の見積、無い版、要素の ID・WBS ID・名称の無い写しは DB が拒む。
+
+    写した要素・親の ID は今は無い要素を指してよい（外部キーを張らない。設計書 1.1 の 4.2）。
+    """
     project = _project(db_session)
     creator = _user(db_session, "approver")
     element = _element(db_session, project)
@@ -772,3 +798,46 @@ def test_migration_creates_wbs_tables_matching_models(tmp_path: Path) -> None:
     finally:
         engine.dispose()
     _upgrade(url)
+
+
+def test_migration_fills_top_last_child_seq_from_existing_first_level(tmp_path: Path) -> None:
+    """0009（CR-003）：既にある採番規則の top_last_child_seq を、第 1 階層の要素の順番の最大で埋める。戻すと列が消える。"""
+    url = f"sqlite:///{tmp_path / 'top_seq.db'}"
+    _upgrade(url, "0008_est")
+    engine = create_db_engine(url)
+    try:
+        with Session(engine) as session:
+            filled = _project(session, "P-001")
+            empty = _project(session, "P-002")
+            for project in (filled, empty):
+                session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
+            insert = sa.text(
+                "INSERT INTO wbs_elements (project_id, parent_id, kind, name, wbs_code, sibling_seq, sort_order) "
+                "VALUES (:p, :parent, 'DELIVERABLE', 'x', :code, :seq, :seq)"
+            )
+            session.execute(insert, {"p": filled.id, "parent": None, "code": "1.0", "seq": 1})
+            session.execute(insert, {"p": filled.id, "parent": None, "code": "3.0", "seq": 3})
+            parent_id = session.scalar(sa.text("SELECT id FROM wbs_elements WHERE wbs_code = '1.0'"))
+            # 第 2 階層の順番は数えない
+            session.execute(insert, {"p": filled.id, "parent": parent_id, "code": "1.5", "seq": 5})
+            session.commit()
+            ids = (filled.id, empty.id)
+    finally:
+        engine.dispose()
+
+    _upgrade(url)
+    engine = create_db_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = dict(connection.execute(sa.text("SELECT project_id, top_last_child_seq FROM wbs_numbering_rules")).all())
+        assert rows == {ids[0]: 3, ids[1]: 0}
+    finally:
+        engine.dispose()
+
+    _downgrade(url, "0008_est")
+    engine = create_db_engine(url)
+    try:
+        columns = {c["name"] for c in sa.inspect(engine).get_columns("wbs_numbering_rules")}
+        assert "top_last_child_seq" not in columns
+    finally:
+        engine.dispose()

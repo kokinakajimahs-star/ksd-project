@@ -10,7 +10,6 @@ import { makeMe, makeMember, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
 import ChangeRequestsPage, { canAnalyze } from "./ChangeRequestsPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -52,7 +51,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/change-requests") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/change-requests" element={<ChangeRequestsPage />} />
       </Routes>
@@ -300,6 +299,67 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
     expect(within(detail).queryByRole("button", { name: "提出する" })).toBeNull();
     expect(within(detail).queryByRole("button", { name: "反映する（再基準化）" })).toBeNull();
     expect(within(detail).getByRole("region", { name: "提出のときの影響分析" })).toHaveTextContent("-1 稼働日");
+  });
+
+  it("change.create を持つ人は提出済みを取り下げ、下書きに戻して一覧を読み直す（API-CHG-011。CHG-03）", async () => {
+    const withdrawn: ChangeRequest = { ...SUBMITTED, status: "DRAFT", submitted_at: null, approval_request_id: null };
+    let current: ChangeRequest = SUBMITTED;
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/change-requests`]: () => jsonResponse(200, page([DRAFT, current, APPROVED])),
+        [`POST ${BASE}/change-requests/72/withdraw`]: () => {
+          current = withdrawn;
+          return jsonResponse(200, withdrawn);
+        },
+      }),
+    );
+    renderAt();
+
+    await openRequest(2);
+    // 下書き・承認済みには取り下げを出さない
+    expect(screen.queryByRole("button", { name: "直す" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "提出を取り下げる" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "変更要求 #2 の提出を取り下げた（下書きに戻した。承認申請は取り消した）",
+    );
+    expect(sent(calls, "POST", `${BASE}/change-requests/72/withdraw`)).toHaveLength(1);
+    expect(sent(calls, "POST", `${BASE}/change-requests/72/withdraw`)[0]!.body).toBeUndefined();
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/change-requests`)).toHaveLength(2));
+    const row = within(screen.getByRole("table", { name: "変更要求" })).getAllByRole("row")[2]!;
+    expect(row).toHaveTextContent("下書き");
+    // 下書きに戻ったので、直す・提出するを出し、取り下げは出さない。提出のときの影響分析は残る
+    expect(screen.getByRole("button", { name: "直す" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提出する" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提出を取り下げる" })).toBeNull();
+    expect(screen.getByRole("region", { name: "提出のときの影響分析" })).toHaveTextContent("-1 稼働日");
+
+    await openRequest(1);
+    expect(screen.queryByRole("button", { name: "提出を取り下げる" })).toBeNull();
+    await openRequest(3);
+    expect(screen.queryByRole("button", { name: "提出を取り下げる" })).toBeNull();
+  });
+
+  it("change.create の無い人には取り下げを出さない（7.2）", async () => {
+    mockApi(routes(meWith(["project.view", "change.approve"])));
+    renderAt();
+
+    await openRequest(2);
+    expect(screen.getByRole("link", { name: "承認待ち一覧" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提出を取り下げる" })).toBeNull();
+  });
+
+  it("取り下げられない（409。先に判断された など）ときはサーバの文言を出す", async () => {
+    mockApi(
+      routes(meWith(PLANNER), {
+        [`POST ${BASE}/change-requests/72/withdraw`]: () => errorResponse(409, "INVALID_STATE", "提出済みではない"),
+      }),
+    );
+    renderAt();
+
+    await openRequest(2);
+    fireEvent.click(screen.getByRole("button", { name: "提出を取り下げる" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("提出済みではない");
   });
 
   it("change.apply を持つ人は承認済みを反映でき、新しい版を知らせる（API-CHG-006。CHG-04）", async () => {

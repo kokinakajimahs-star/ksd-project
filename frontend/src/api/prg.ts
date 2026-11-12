@@ -1,5 +1,5 @@
-// 進捗の API の型と呼び出し（設計書 6.2 の API-PRG-001〜009）。
-// ガント（UI-SCH-002）が 002・006・008 を、進捗入力（UI-PRG-001）が 001〜007 を、遅延分析（UI-PRG-002）が 009 を使う。
+// 進捗の API の型と呼び出し（設計書 6.2 の API-PRG-001〜010）。
+// ガント（UI-SCH-002）が 002・006・008 を、進捗入力（UI-PRG-001）が 001〜007・010 を、遅延分析（UI-PRG-002）が 009 を使う。
 // 形はサーバの schemas（backend/app/schemas/progress.py）に合わせる
 import { apiFetch } from "./client";
 import type { PageQuery } from "./cmn";
@@ -180,7 +180,7 @@ export function putProgress(
 }
 
 // ---------------------------------------------------------------------------
-// 算定項目・算定方式（API-PRG-004・005）
+// 算定項目・算定方式（API-PRG-004・005・010）
 // ---------------------------------------------------------------------------
 
 /** 進捗の算定項目の種類（4.1 の progress_items.item_type） */
@@ -211,6 +211,11 @@ export interface ProgressItems {
   progress_method: ProgressMethod;
   percent_complete: number | null;
   items: ProgressItem[];
+}
+
+/** 活動の今の算定項目・効いている算定方式・今の進捗率を読む（API-PRG-010。応答は置き換えと同じ形） */
+export function getProgressItems(projectId: number, activityId: number): Promise<ProgressItems> {
+  return apiFetch<ProgressItems>(`/projects/${projectId}/activities/${activityId}/progress-items`);
 }
 
 /** 活動の算定項目を置き換える。載せなかった既存の項目は消える */

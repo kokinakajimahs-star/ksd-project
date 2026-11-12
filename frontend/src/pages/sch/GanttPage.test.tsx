@@ -19,9 +19,8 @@ import {
   makeStatusReport,
   point,
 } from "../../test/schFixtures";
-import GanttPage, { latestReport } from "./GanttPage";
+import GanttPage, { latestReport, withReport } from "./GanttPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -158,7 +157,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/gantt") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/gantt" element={<GanttPage />} />
       </Routes>
@@ -273,6 +272,9 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
       "NOT_COMPUTED",
     ]);
     expect(vertices.map((c) => c.getAttribute("fill"))).toEqual(["#d32f2f", "#1976d2", "#388e3c", "#388e3c", "#9e9e9e"]);
+    // 完了・未着手（予定内）は同じ緑に印（形）を重ねて区別する（設計書 1.1 の 7.3）
+    const marks = Array.from(layer(container, "lightning").querySelectorAll("path[data-mark]"));
+    expect(marks.map((m) => m.getAttribute("data-mark"))).toEqual(["hole", "check"]);
     // P＝5.25（12/06 の 1/4）・P＝12.6（12/13 の 6 割）
     expect(Number(vertices[0]!.getAttribute("cx"))).toBeCloseTo(LABEL_WIDTH + 5.25 * w);
     expect(Number(vertices[1]!.getAttribute("cx"))).toBeCloseTo(LABEL_WIDTH + 12.6 * w);
@@ -444,5 +446,211 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
   it("既定で開く報告日は最も新しい報告日", () => {
     expect(latestReport(REPORTS)?.id).toBe(41);
     expect(latestReport([])).toBeNull();
+  });
+
+  it("作った報告日は一覧の報告日の古い順の位置に入る（同じ ID は置き換える）", () => {
+    const created = makeStatusReport({ id: 42, report_date: "2026-12-07" });
+    expect(withReport(REPORTS, created).map((r) => r.id)).toEqual([40, 42, 41]);
+    expect(withReport([], created)).toEqual([created]);
+    expect(withReport([created], { ...created, entry_count: 3 })).toEqual([{ ...created, entry_count: 3 }]);
+  });
+});
+
+describe("UI-SCH-002 ガントから報告日を作る（7.2。API-PRG-001）", () => {
+  const NO_REPORTS = { items: [], total: 0, limit: 1000, offset: 0 };
+  const CREATED = makeStatusReport({ id: 42, report_date: "2026-12-17" });
+
+  beforeEach(() => {
+    setAuthToken("t-pm");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setAuthToken(null);
+  });
+
+  it("status_report.manage を持つ人は報告日が 1 件も無くても作れ、作った報告日を選んで進捗入力へのリンクを出す", async () => {
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "status_report.manage"]), {
+        [`GET ${BASE}/status-reports`]: () => jsonResponse(200, NO_REPORTS),
+        [`POST ${BASE}/status-reports`]: () => jsonResponse(201, CREATED),
+        [`GET ${BASE}/status-reports/42/lightning-line`]: () =>
+          jsonResponse(200, makeLightningLine([], { report: CREATED, report_line: point("2026-12-17", 1, 17) })),
+      }),
+    );
+    renderAt();
+    await screen.findByRole("img", { name: "ガントチャート" });
+    const form = await screen.findByRole("form", { name: "報告日を作る" });
+    expect(screen.queryByRole("link", { name: "進捗入力" })).toBeNull();
+
+    fireEvent.change(within(form).getByLabelText("新しい報告日"), { target: { value: "2026-12-17" } });
+    fireEvent.click(within(form).getByRole("button", { name: "報告日を作る" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("報告日 2026-12-17 を作った");
+    expect(sent(calls, "POST", `${BASE}/status-reports`)[0]!.body).toEqual({ report_date: "2026-12-17" });
+    const select = screen.getByLabelText("報告日");
+    expect(select).toHaveValue("42");
+    expect(within(select).getByRole("option", { name: "2026-12-17" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "進捗入力" })).toHaveAttribute("href", "/projects/3/status-reports/42");
+    // 選んだ報告日の線を読む（一覧は読み直さない）
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/status-reports/42/lightning-line`)).toHaveLength(1));
+    expect(sent(calls, "GET", `${BASE}/status-reports`)).toHaveLength(1);
+  });
+
+  it("同じ日付の報告日は 409、形の違う日付は 400 のサーバの文言を出し、報告日を選び直さない", async () => {
+    let status = 409;
+    mockApi(
+      routes(meWith(["project.view", "status_report.manage"]), {
+        [`POST ${BASE}/status-reports`]: () =>
+          status === 409
+            ? errorResponse(409, "DUPLICATE_STATUS_REPORT", "同じ日付の報告日が既にあります")
+            : errorResponse(400, "VALIDATION_ERROR", "報告日の形が正しくありません"),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+    const form = screen.getByRole("form", { name: "報告日を作る" });
+
+    fireEvent.change(within(form).getByLabelText("新しい報告日"), { target: { value: "2026-12-10" } });
+    fireEvent.click(within(form).getByRole("button", { name: "報告日を作る" }));
+    expect(await within(form).findByRole("alert")).toHaveTextContent("同じ日付の報告日が既にあります");
+
+    status = 400;
+    fireEvent.click(within(form).getByRole("button", { name: "報告日を作る" }));
+    await waitFor(() => expect(within(form).getByRole("alert")).toHaveTextContent("報告日の形が正しくありません"));
+    expect(screen.getByLabelText("報告日")).toHaveValue("41");
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("status_report.manage が無ければ報告日を作る部品を出さない", async () => {
+    mockApi(routes(meWith(["project.view", "schedule.edit", "progress.enter_all"])));
+    const { container } = renderAt();
+    await chart(container);
+    expect(screen.getByRole("button", { name: "日程を計算し直す" })).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "報告日を作る" })).toBeNull();
+  });
+});
+
+describe("UI-SCH-002 非稼働日を表示範囲で受け取る（7.3・API-SCH-010 の range_start・range_end）", () => {
+  /** 範囲を渡されたら、その範囲の非稼働日を返す（応答の range_start・range_end はバーの範囲のまま） */
+  function ganttFor(nonWorking: Record<string, string[]>): RouteHandler {
+    return (call) => {
+      const query = new URL(call.url, "http://localhost").searchParams;
+      const key = `${query.get("range_start") ?? ""}..${query.get("range_end") ?? ""}`;
+      return jsonResponse(200, { ...GANTT, non_working_days: nonWorking[key] ?? GANTT.non_working_days });
+    };
+  }
+
+  function bandDates(container: HTMLElement): string[] {
+    return Array.from(layer(container, "non-working").querySelectorAll("rect")).map((r) => r.getAttribute("data-date")!);
+  }
+
+  beforeEach(() => {
+    setAuthToken("t-pm");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setAuthToken(null);
+  });
+
+  it("報告日線・頂点で描く範囲がバーより広がれば、描く範囲を渡して読み直し、広がった部分の非稼働日を描く。読み直しは 1 回", async () => {
+    // バーの範囲は 12/01〜12/21。報告日 12/24 の線と、頂点 12/28 で描く範囲は 12/01〜12/28 になる
+    const late = makeStatusReport({ id: 43, report_date: "2026-12-24" });
+    const { calls } = mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/gantt`]: ganttFor({
+          "2026-12-01..2026-12-28": ["2026-12-05", "2026-12-06", "2026-12-26", "2026-12-27"],
+        }),
+        [`GET ${BASE}/status-reports`]: () => jsonResponse(200, { items: [late], total: 1, limit: 1000, offset: 0 }),
+        [`GET ${BASE}/status-reports/43/lightning-line`]: () =>
+          jsonResponse(
+            200,
+            makeLightningLine(
+              [
+                makeLightningRow({ point: point("2026-12-28", 0.5, 27.5), judgement: "AHEAD", counted_as: "AHEAD" }),
+                // ガントの行に無い活動の頂点は描かないので、範囲も広げない
+                makeLightningRow({ row_index: 9, activity_id: 99, point: point("2027-01-20", 0, 50) }),
+              ],
+              { report: late, report_line: point("2026-12-24", 1, 24) },
+            ),
+          ),
+      }),
+    );
+    const { container } = renderAt();
+    await screen.findByRole("img", { name: "ガントチャート" });
+
+    await waitFor(() => expect(bandDates(container)).toEqual(["2026-12-05", "2026-12-06", "2026-12-26", "2026-12-27"]));
+    const requests = sent(calls, "GET", `${BASE}/gantt`);
+    expect(requests.map((c) => c.url)).toEqual([
+      `${BASE}/gantt`,
+      `${BASE}/gantt?range_start=2026-12-01&range_end=2026-12-28`,
+    ]);
+    // 描く範囲（12/01〜12/28）で描く
+    expect(screen.getByRole("img", { name: "ガントチャート" })).toHaveAttribute(
+      "width",
+      String(LABEL_WIDTH + 28 * DAY_WIDTH.day),
+    );
+  });
+
+  it("描く範囲がバーの範囲に収まれば読み直さない（範囲を渡さない）", async () => {
+    const { calls } = mockApi(routes(meWith(["project.view"])));
+    const { container } = renderAt();
+    await chart(container);
+
+    // 確定済みの過去の線（12/03）も範囲の中
+    fireEvent.click(within(screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).getByLabelText("2026-12-03"));
+    await waitFor(() => expect(layer(container, "past-lines").children).toHaveLength(1));
+
+    expect(sent(calls, "GET", `${BASE}/gantt`).map((c) => c.url)).toEqual([`${BASE}/gantt`]);
+    expect(bandDates(container)).toEqual(["2026-12-05", "2026-12-06"]);
+  });
+
+  it("過去の線を選び直して範囲が広がれば読み直す。外しても読み直さず、基準の版を選び直すと同じ範囲で読む", async () => {
+    // 報告日 12/03 の線で、頂点 11/25（バーの範囲 12/01 より前）まで遅れている
+    const early = makeOverlaidLine({
+      vertices: [
+        {
+          row_index: 0,
+          activity_id: 21,
+          point: point("2026-11-25", 0.5, -5.5),
+          deviation: -8.5,
+          judgement: "BEHIND",
+          display_date: "2026-11-25",
+        },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/gantt`]: ganttFor({
+          "2026-11-25..2026-12-21": ["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06"],
+        }),
+        [`GET ${BASE}/lightning-lines`]: () =>
+          jsonResponse(200, { project_start: "2026-12-01", lines: [early], restricted: false }),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+    expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(1);
+
+    const fieldset = screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" });
+    fireEvent.click(within(fieldset).getByLabelText("2026-12-03"));
+    await waitFor(() => expect(bandDates(container)).toEqual(["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06"]));
+    expect(sent(calls, "GET", `${BASE}/gantt`).map((c) => c.url)).toEqual([
+      `${BASE}/gantt`,
+      `${BASE}/gantt?range_start=2026-11-25&range_end=2026-12-21`,
+    ]);
+
+    // 外すと描く範囲は狭まるが、受け取った範囲に収まるので読み直さない
+    fireEvent.click(within(fieldset).getByLabelText("2026-12-03"));
+    await waitFor(() => expect(layer(container, "past-lines").children).toHaveLength(0));
+    expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(2);
+
+    // 基準の版を選び直すと、最後に要求した表示範囲のまま読み直す
+    fireEvent.change(screen.getByLabelText("比べる基準"), { target: { value: "61" } });
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(3));
+    expect(sent(calls, "GET", `${BASE}/gantt`)[2]!.url).toBe(
+      `${BASE}/gantt?baseline_id=61&range_start=2026-11-25&range_end=2026-12-21`,
+    );
   });
 });

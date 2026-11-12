@@ -13,7 +13,6 @@ import { parseEstimateValue } from "./EstimateForm";
 import { buildTree } from "./WbsPage";
 import WbsPage from "./WbsPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -56,7 +55,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/wbs") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/wbs" element={<WbsPage />} />
       </Routes>
@@ -319,7 +318,7 @@ describe("UI-WBS-001 WBS（ツリー図・アウトライン）", () => {
   it("プロジェクトの ID が数でなければ見つからないことを示す", () => {
     const { calls } = mockApi({});
     render(
-      <MemoryRouter initialEntries={["/projects/x/wbs"]} future={FUTURE}>
+      <MemoryRouter initialEntries={["/projects/x/wbs"]}>
         <Routes>
           <Route path="/projects/:projectId/wbs" element={<WbsPage />} />
         </Routes>

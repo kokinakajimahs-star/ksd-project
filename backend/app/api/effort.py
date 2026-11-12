@@ -42,6 +42,8 @@ from app.services.project_access import ProjectAccess
 
 router = APIRouter(tags=["effort"])
 
+BASELINE_REMOVED = "BASELINE_REMOVED"  # 集計の桶「基準にあって今は無い」（5.8。設計書 1.1・CR-007）
+
 
 def get_effort_links(request: Request) -> EffortLinks:
     """アプリに載せた別の群の表（是正措置）の口（``app.services.effort``）。"""
@@ -144,7 +146,7 @@ def put_time_entries(
     """API-EFF-003 自分の実績工数をまとめて書く（日×活動）。
 
     権限は effort.enter_own（自分の割当の活動）。マスごとにその日・その活動の値で置き換える（0 は行を消す）。RULE-EFF-005 で全ての
-    マスを検査し、1 件でも問題があれば何も書かない：値の誤り・重複 400、自分の割当でない 403、確定した報告日より前の日 409
+    マスを検査し、1 件でも問題があれば何も書かない：値の誤り・重複 400、自分の割当でない 403、確定した報告日以前の日 409
     ``INVALID_STATE``、1 日の合計 24 時間超 422 ``DAY_TOTAL_EXCEEDED``（EFF-02）。
     """
     cells = [TimeEntryCell(activity_id=c.activity_id, work_date=c.work_date, hours=_decimal(c.hours), note=c.note)
@@ -181,6 +183,9 @@ def list_time_entries(
 def _summary_rows(view: SummaryView) -> list[SummaryRowOut]:
     axes = view.axes
     plan = view.basis.plan
+    # 版にあって今は無い活動・WP の基準は、どの軸でも最後の桶「基準にあって今は無い」（5.8。WBS の軸ではプロジェクトの直下）
+    removed = axes.wbs_removed if view.axis == "wbs" else axes.removed
+    tail = [] if removed is None else [SummaryRowOut(bucket_kind=BASELINE_REMOVED, values=_values(removed))]
     if view.axis == "wbs":
         elements = plan.element_by_id
         return [
@@ -188,21 +193,21 @@ def _summary_rows(view: SummaryView) -> list[SummaryRowOut]:
                           wbs_code=elements[i].wbs_code, name=elements[i].name, kind=elements[i].kind,
                           values=_values(axes.wbs[i]))
             for i in view.basis.preorder
-        ]
+        ] + tail
     if view.axis == "member":
         keys = sorted(axes.assignee, key=lambda u: (u is None, u or 0))
         return [
             SummaryRowOut(bucket_kind="UNASSIGNED" if u is None else "MEMBER", user_id=u,
                           name=None if u is None else view.display_names.get(u, ""), values=_values(axes.assignee[u]))
             for u in keys
-        ]
+        ] + tail
     if view.axis == "organization":
         org_keys: list[OrganizationKey] = sorted(axes.organization, key=lambda k: (k.kind.value, k.name or ""))
         return [SummaryRowOut(bucket_kind=k.kind.value, name=k.name, values=_values(axes.organization[k]))
-                for k in org_keys]
+                for k in org_keys] + tail
     period_keys: list[PeriodKey] = list(axes.period)
     return [SummaryRowOut(bucket_kind=k.kind.value, period_start=k.start, values=_values(axes.period[k]))
-            for k in period_keys]
+            for k in period_keys] + tail
 
 
 @router.get("/projects/{project_id}/effort/summary", response_model=EffortSummaryOut)

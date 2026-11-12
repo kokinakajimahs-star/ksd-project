@@ -8,7 +8,6 @@ import { makeMember } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
 import AuditLogsPage, { auditChanges, toAuditQuery } from "./AuditLogsPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 const UPDATE = makeAuditLog();
@@ -43,7 +42,7 @@ function routes(overrides: Record<string, RouteHandler> = {}): Record<string, Ro
 
 function renderAt(path = "/projects/3/audit-logs") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/audit-logs" element={<AuditLogsPage />} />
       </Routes>

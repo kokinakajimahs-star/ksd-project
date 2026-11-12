@@ -143,7 +143,7 @@ class PlanModel:
     """計画のモデル（要素・活動・依存。``dependencies`` は（先行, 後続）の組）。
 
     - ``numbering_rule``：採番規則（4.1 の ``wbs_numbering_rules``）
-    - ``top_last_child_seq``：最上位で今まで使った最大の順番（docs/open-questions.md OQ-16。置き場はサービス層が決める）。
+    - ``top_last_child_seq``：最上位で今まで使った最大の順番（4.1 の ``wbs_numbering_rules.top_last_child_seq``。CR-003）。
       最上位に要素を足す操作があるのに ``None`` なら止める
     - ``code_history``：WBS ID の新旧対応（旧 ID の解決に使う。4.1 の ``wbs_code_history``）
     """

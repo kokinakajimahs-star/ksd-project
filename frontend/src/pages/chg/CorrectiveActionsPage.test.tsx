@@ -12,7 +12,6 @@ import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHand
 import { activityList, makeActivity, makeStatusReport } from "../../test/schFixtures";
 import CorrectiveActionsPage from "./CorrectiveActionsPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -90,7 +89,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/corrective-actions") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/corrective-actions" element={<CorrectiveActionsPage />} />
       </Routes>

@@ -1,10 +1,11 @@
 # trace.toml — PMT（WBS・工数・進捗管理システム）/ 層間写像の契約
 #
 # 要求層: docs/pmt-requirements.md の 5 章（R1 の 64 件）
-# 設計層: docs/pmt-design.md の 4.1・5.1・6.2・7.1（187 件）。抽出式は spec-ids.toml が正（from_spec_ids）
+# 設計層: docs/pmt-design.md の 4.1・5.1・6.2・7.1（193 件。設計書 1.1）。抽出式は spec-ids.toml が正（from_spec_ids）
 # 写像  : docs/pmt-design.md の 11 章（要求→設計 対応表）
 #
 # 2026-11-10 に手で数えた値: 要求 64 / 設計 187（db 35・rule 40・api 90・ui 22）/ GAP 0 / ORPHAN 0
+# 2026-11-12 の設計書 1.1（CR-004）: 設計 193（api 96）
 # ksdx trace verify の出力がこの数と一致しなければ、正規表現か文書のどちらかが誤っている。
 #
 # 測るもの  : 宣言の欠落（下流の無い要求 / 上流の無い設計要素 / 分母の減少）

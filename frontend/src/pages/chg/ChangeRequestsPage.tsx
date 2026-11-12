@@ -1,6 +1,7 @@
 // UI-CHG-001 変更要求（作成・影響分析・提出・反映）（設計書 7.1 のルート /projects/:projectId/change-requests。
 // CHG-01〜04）。一覧（API-CHG-002。状態で絞る）・起票と手直し（API-CHG-001・003。DRAFT だけ）・影響分析の試算
-// （API-CHG-004。本計画は変えない）・提出（API-CHG-005。承認申請を作る）・反映と再基準化（API-CHG-006。承認済みだけ）。
+// （API-CHG-004。本計画は変えない）・提出（API-CHG-005。承認申請を作る）・取り下げ（API-CHG-011。提出済みを下書きに戻し、
+// 承認申請を消す）・反映と再基準化（API-CHG-006。承認済みだけ）。
 // 承認・却下は承認待ち一覧（UI-CMN-003）で行う。操作のボタンは権限と状態（5.10）で出し分ける（7.2）
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -12,6 +13,7 @@ import {
   listChangeRequests,
   submitChangeRequest,
   updateChangeRequest,
+  withdrawChangeRequest,
   type ChangeRequest,
   type ChangeRequestInput,
   type ChangeRequestList,
@@ -158,6 +160,15 @@ export default function ChangeRequestsPage() {
       setSelected(submitted);
       setImpact(null);
       setNotice(`変更要求 #${submitted.number} を提出した。承認待ち一覧で承認者が判断する`);
+      reload();
+    });
+
+  const handleWithdraw = () =>
+    run(async (target) => {
+      const withdrawn = await withdrawChangeRequest(projectId, target.id);
+      setSelected(withdrawn);
+      setImpact(null);
+      setNotice(`変更要求 #${withdrawn.number} の提出を取り下げた（下書きに戻した。承認申請は取り消した）`);
       reload();
     });
 
@@ -316,6 +327,11 @@ export default function ChangeRequestsPage() {
                   提出する
                 </button>
               </>
+            )}
+            {selected.status === "SUBMITTED" && canCreate && (
+              <button type="button" disabled={busy} onClick={() => void handleWithdraw()}>
+                提出を取り下げる
+              </button>
             )}
             {canAnalyze(selected.status) && (
               <button type="button" disabled={busy} onClick={() => void handleAnalyze()}>

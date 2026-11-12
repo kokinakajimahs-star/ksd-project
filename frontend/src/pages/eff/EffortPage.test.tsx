@@ -20,7 +20,6 @@ import { makeScheduleBaseline, makeStatusReport } from "../../test/schFixtures";
 import { bucketLabel, depthOf, rateText } from "./labels";
 import EffortPage, { baselineText, reportBasisText } from "./EffortPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]) {
@@ -99,7 +98,7 @@ function routes(overrides: Record<string, RouteHandler> = {}): Record<string, Ro
 
 function renderAt(path = "/projects/3/effort") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/effort" element={<EffortPage />} />
       </Routes>
@@ -166,6 +165,38 @@ describe("UI-EFF-002 工数の集計と差異", () => {
     expect(screen.getByText(/最新の報告日 2026-12-10（入力中）の進捗率と、全ての実績/)).toHaveTextContent(
       "基準：第 1 版（初版）",
     );
+  });
+
+  it("版にあって今は無い活動・WP の基準は、プロジェクトの直下の行「基準にあって今は無い」に出す（5.8・CR-007）", async () => {
+    const wp = makeValues({ planned: 40, baseline: 30, actual: 10, etc: 30, eac: 40 });
+    mockApi(
+      routes({
+        [`GET ${BASE}/effort/summary`]: () =>
+          jsonResponse(
+            200,
+            makeSummary({
+              total: makeValues({ planned: 40, baseline: 45, actual: 10, etc: 30, eac: 40 }),
+              rows: [
+                makeSummaryRow({ element_id: 1, wbs_code: "1", name: "基幹更改", kind: "DELIVERABLE", values: wp }),
+                makeSummaryRow({ element_id: 10, parent_id: 1, wbs_code: "1.1", name: "要件定義", kind: "WORK_PACKAGE", values: wp }),
+                makeSummaryRow({ bucket_kind: "BASELINE_REMOVED", values: makeValues({ baseline: 15 }) }),
+              ],
+            }),
+          ),
+      }),
+    );
+    renderAt();
+
+    const table = await screen.findByRole("table", { name: "工数の集計（WBS）" });
+    const rows = bodyRows(table);
+    expect(rows.map((r) => within(r).getAllByRole("cell").map((c) => c.textContent))).toEqual([
+      ["1", "基幹更改", "40", "30", "10", "30", "40", "+10"],
+      ["1.1", "要件定義", "40", "30", "10", "30", "40", "+10"],
+      ["—", "基準にあって今は無い", "0", "15", "0", "0", "0", "-15"],
+    ]);
+    // 桶はプロジェクトの直下（字下げしない）。基準の合計は版の合計（30＋15）
+    expect(within(rows[2]!).getAllByRole("cell")[1]).toHaveStyle({ paddingLeft: "0em" });
+    expect([...footRow(table).children].map((c) => c.textContent)).toEqual(["合計", "40", "45", "10", "30", "40", "-5"]);
   });
 
   it("軸を変えると集計を読み直す。どの軸でも合計の行は同じ値（EFF-09）", async () => {
@@ -400,7 +431,7 @@ describe("UI-EFF-002 工数の集計と差異", () => {
 });
 
 describe("UI-EFF-002 の表示の計算", () => {
-  it("軸ごとの桶の呼び名（未割当・所属なし・期間・残り・日付なし）", () => {
+  it("軸ごとの桶の呼び名（未割当・所属なし・期間・残り・日付なし・基準にあって今は無い）", () => {
     const row = (overrides: Parameters<typeof makeSummaryRow>[0]) => makeSummaryRow(overrides);
     expect(bucketLabel("member", row({ bucket_kind: "MEMBER", user_id: 7, name: "実行 花子" }))).toBe("実行 花子");
     expect(bucketLabel("member", row({ bucket_kind: "UNASSIGNED" }))).toBe("未割当");
@@ -410,6 +441,8 @@ describe("UI-EFF-002 の表示の計算", () => {
     expect(bucketLabel("month", row({ bucket_kind: "PERIOD", period_start: "2026-12-01" }))).toBe("2026-12");
     expect(bucketLabel("week", row({ bucket_kind: "REMAINING" }))).toBe("残り（報告日より後の ETC）");
     expect(bucketLabel("month", row({ bucket_kind: "UNSCHEDULED" }))).toBe("日付なし（日程の無い計画・基準）");
+    expect(bucketLabel("member", row({ bucket_kind: "BASELINE_REMOVED" }))).toBe("基準にあって今は無い");
+    expect(bucketLabel("wbs", row({ bucket_kind: "BASELINE_REMOVED" }))).toBe("基準にあって今は無い");
   });
 
   it("差異率は割合を百分率で出す。閾値は符号を付けない", () => {

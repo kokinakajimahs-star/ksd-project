@@ -306,17 +306,22 @@ def get_critical_path(
 def get_gantt(
     project_id: int,
     baseline_id: int | None = Query(None),
+    range_start: date | None = Query(None),
+    range_end: date | None = Query(None),
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
     links: ScheduleLinks = Depends(get_schedule_links),
 ) -> GanttOut:
-    """API-SCH-010 ガントの描画データ（`baseline_id` 任意）。
+    """API-SCH-010 ガントの描画データ（`baseline_id`・`range_start`・`range_end` 任意）。
 
     権限は project.view。RULE-SCH-005 の行・バー（予定・実績・基準）・依存線・ラベル・非稼働日。``baseline_id`` を省けば最新の版
     （版が無ければ基準のバーは無い）。無い版・他のプロジェクトの版は 404。
+    非稼働日は表示範囲 ``range_start``〜``range_end`` の分を返し、省いた端はバーの範囲の端（設計書 1.1・CR-008）。
+    応答の ``range_start``・``range_end`` はバーの範囲のまま。範囲の始まりが終わりより後・長すぎる範囲は 400。
     """
-    view = schedule_service.gantt(session, access, user, links, project_id, baseline_id)
+    view = schedule_service.gantt(session, access, user, links, project_id, baseline_id,
+                                  range_start=range_start, range_end=range_end)
     return gantt_out(view.chart, project_start=view.project_start, report_date=view.report_date,
                      baseline=view.baseline, restricted=view.restricted)
 

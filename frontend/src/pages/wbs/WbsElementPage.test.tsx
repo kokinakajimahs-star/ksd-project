@@ -10,7 +10,6 @@ import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHand
 import { estimateHistory, makeDictionary, makeEstimateRecord, makeTrace } from "../../test/wbsFixtures";
 import WbsElementPage, { missingCompletion } from "./WbsElementPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -42,13 +41,14 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
     [`GET ${BASE}/estimates/ELEMENT/101/history`]: () => jsonResponse(200, estimateHistory([makeEstimateRecord()])),
     [`GET ${BASE}/wbs-codes/1.1/trace`]: () => jsonResponse(200, makeTrace()),
     [`GET ${BASE}/scope-items`]: () => jsonResponse(200, SCOPE_ITEMS),
+    [`GET ${BASE}/wbs/elements/101/scope-links`]: () => jsonResponse(200, { element_id: 101, scope_item_ids: [] }),
     ...overrides,
   };
 }
 
 function renderAt(path = "/projects/3/wbs/101") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/wbs/:elementId" element={<WbsElementPage />} />
       </Routes>
@@ -181,6 +181,50 @@ describe("UI-WBS-002 WBS辞書・横断照会", () => {
     ]);
   });
 
+  it("紐付けの編集は今の紐付け（API-WBS-026）から始め、足した項目と今の項目を合わせて置き換える（PRJ-02・WBS-16）", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/wbs/elements/101/scope-links`]: () => jsonResponse(200, { element_id: 101, scope_item_ids: [32] }),
+        [`PUT ${BASE}/wbs/elements/101/scope-links`]: (call) =>
+          jsonResponse(200, { element_id: 101, ...(call.body as { scope_item_ids: number[] }) }),
+      }),
+    );
+    renderAt();
+    const form = await screen.findByRole("form", { name: "スコープ項目を紐付ける" });
+    expect(within(form).getByLabelText("対象外：会計連携")).toBeChecked();
+    expect(within(form).getByLabelText("対象内：受注業務")).not.toBeChecked();
+    expect(screen.getByText(/今の紐付けを選んだ状態から始め/)).toBeInTheDocument();
+
+    fireEvent.click(within(form).getByLabelText("対象内：受注業務"));
+    fireEvent.click(within(form).getByRole("button", { name: "紐付けを保存する" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("2 件に置き換えた");
+    expect(sent(calls, "PUT", `${BASE}/wbs/elements/101/scope-links`).map((c) => c.body)).toEqual([
+      { scope_item_ids: [31, 32] },
+    ]);
+    expect(sent(calls, "GET", `${BASE}/wbs/elements/101/scope-links`)).toHaveLength(1);
+  });
+
+  it("今の紐付けが読めなければ、紐付けの編集を出さずに理由を出す（空から置き換えない）", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/wbs/elements/101/scope-links`]: () => errorResponse(404, "NOT_FOUND", "WBS要素が見つかりません"),
+      }),
+    );
+    renderAt();
+    const section = (await screen.findByRole("heading", { name: "スコープ項目との紐付け" })).closest("section")!;
+    expect(await within(section).findByRole("alert")).toHaveTextContent("WBS要素が見つかりません");
+    expect(screen.queryByRole("form", { name: "スコープ項目を紐付ける" })).toBeNull();
+    expect(sent(calls, "PUT", `${BASE}/wbs/elements/101/scope-links`)).toHaveLength(0);
+  });
+
+  it("project.view だけの人には今の紐付けを読みに行かない（編集の部品が無い）", async () => {
+    const { calls } = mockApi(routes(meWith(["project.view"])));
+    renderAt();
+    await screen.findByLabelText("WBS辞書");
+    await waitFor(() => expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(1));
+    expect(sent(calls, "GET", `${BASE}/wbs/elements/101/scope-links`)).toHaveLength(0);
+  });
+
   it("横断照会から別の要素へ移ると、前の要素の紐付けの選択を持ち越さない（別の要素の紐付けを置き換えない）", async () => {
     const child = { id: 102, parent_id: 101, kind: "WORK_PACKAGE" as const, name: "聞き取り", wbs_code: "1.1.1" };
     const { calls } = mockApi(
@@ -193,6 +237,7 @@ describe("UI-WBS-002 WBS辞書・横断照会", () => {
           jsonResponse(200, estimateHistory([], { target_id: 102 })),
         [`GET ${BASE}/wbs-codes/1.1.1/trace`]: () =>
           jsonResponse(200, makeTrace({ query: "1.1.1", element_id: 102, elements: [child] })),
+        [`GET ${BASE}/wbs/elements/102/scope-links`]: () => jsonResponse(200, { element_id: 102, scope_item_ids: [] }),
         [`PUT ${BASE}/wbs/elements/101/scope-links`]: () => jsonResponse(200, { element_id: 101, scope_item_ids: [31] }),
         [`PUT ${BASE}/wbs/elements/102/scope-links`]: () => jsonResponse(200, { element_id: 102, scope_item_ids: [] }),
       }),

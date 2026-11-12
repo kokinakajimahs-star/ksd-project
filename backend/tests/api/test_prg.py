@@ -388,6 +388,28 @@ def test_lightning_line_matches_basis_example(world: World) -> None:
     assert first["point"]["calendar"] == {"date": "2026-12-06", "fraction": 0.25}
 
 
+def test_lightning_point_uses_unrounded_percent(world: World, client: TestClient) -> None:
+    """API-PRG-006・007：P は丸める前の進捗率から求める（設計書 1.1 の 5.6・CR-009）。表示・写しの進捗率は小数 2 桁。
+
+    3 項目中 2 完了（200/3 %）・d＝3、報告日 12/01（L＝1）：P＝2 ちょうど・表示の日付 12/02・ずれ 1。66.67% から求めると 2.0001・12/03。
+    """
+    world.all_days_working()
+    a = world.add("検証", requested_start="2026-12-01", duration_days=3)
+    report = world.report("2026-12-01")["id"]
+    world.progress(report, a, actual_start="2026-12-01")
+    assert client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                      headers=world.h["pm"]).status_code == 200
+    items = [{"item_type": "CHECK", "title": t, "done": t != "C"} for t in ("A", "B", "C")]
+    assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": items},
+                      headers=world.h["pm"]).status_code == 200
+    (row,) = world.line(report)["rows"]
+    assert (row["point"]["position"], row["display_date"], row["deviation"], row["percent_complete"]) == (
+        2.0, "2026-12-02", 1.0, 66.67)
+    world.finalize(report)
+    (frozen,) = world.line(report)["rows"]
+    assert (frozen["point"]["position"], frozen["display_date"], frozen["percent_complete"]) == (2.0, "2026-12-02", 66.67)
+
+
 def test_lightning_line_skips_weekends(world: World, client: TestClient) -> None:
     """土日を非稼働にした場合（PRG-10）：12-01（火）〜 5 稼働日、報告日 12-05（土）は金曜の終業（L＝4）。"""
     a = world.add("A", duration_days=5)
@@ -401,6 +423,42 @@ def test_lightning_line_skips_weekends(world: World, client: TestClient) -> None
     assert client.get(world.url(f"/status-reports/{MISSING}/lightning-line"), headers=world.h["viewer"]).status_code == 404
     assert client.get(world.url(f"/status-reports/{report}/lightning-line"),
                       headers=world.h["outsider"]).status_code == 403
+
+
+def test_get_progress_items_reads_current_items(app: FastAPI, world: World, client: TestClient) -> None:
+    """API-PRG-010 進捗の算定項目を読む（設計書 1.1・CR-004）：今の項目・算定方式・進捗率を API-PRG-004 の応答と同じ形で返す。
+
+    権限は project.view。無い活動・他のプロジェクトの活動は 404、委託先には自分の割当の活動だけ（他は 404）。
+    """
+    a = world.add("A", duration_days=4)
+    b = world.add("B", duration_days=4)
+    world.report("2026-12-03")
+    url = world.url(f"/activities/{a}/progress-items")
+    empty = client.get(url, headers=world.h["viewer"])
+    assert empty.status_code == 200, empty.text
+    assert (empty.json()["activity_id"], empty.json()["items"]) == (a, [])
+
+    assert client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                      headers=world.h["pm"]).status_code == 200
+    items = [{"item_type": "CHECK", "title": "単体試験", "done": True}, {"item_type": "CHECK", "title": "結合試験"}]
+    put = client.put(url, json={"items": items}, headers=world.h["pm"])
+    assert put.status_code == 200, put.text
+    got = client.get(url, headers=world.h["viewer"])
+    assert got.status_code == 200, got.text
+    assert got.json() == put.json()  # 置き換えの応答と同じもの（項目・方式・進捗率）
+    assert (got.json()["progress_method"], got.json()["percent_complete"]) == ("CHECK_ITEM_RATIO", 50.0)
+
+    assert client.get(world.url(f"/activities/{MISSING}/progress-items"), headers=world.h["viewer"]).status_code == 404
+    other = World(client, world.session, code="PRJ-Q")
+    foreign = client.get(other.url(f"/activities/{a}/progress-items"), headers=other.h["viewer"])
+    assert foreign.status_code == 404
+    assert client.get(url, headers=world.h["outsider"]).status_code == 403
+    assert client.get(url).status_code == 401
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b}}))
+    assert client.get(url, headers=world.h["contractor"]).status_code == 404
+    own = client.get(world.url(f"/activities/{b}/progress-items"), headers=world.h["contractor"])
+    assert own.status_code == 200 and own.json()["activity_id"] == b
 
 
 def test_contractor_sees_only_assigned_rows(app: FastAPI, world: World) -> None:
@@ -493,12 +551,12 @@ def test_overlay_finalized_lines(world: World, client: TestClient) -> None:
         (0, a, 1.0, "BEHIND"), (1, c, 2.0, "BEHIND")]
     assert [v["point"]["position"] for v in lines[1]["vertices"]] == [3.0, 2.0]  # C は前の報告日の 50% を引き継いだ
 
-    # 写した活動を消しても過去の線は残り、消した活動の頂点は外れる（BR-13）
+    # 写した活動を消しても過去の線は残り、消した活動の頂点は外れる（BR-13）。写しは活動の ID を写しの値のまま持つ（設計書 1.1 の 4.2）
     assert client.delete(world.url(f"/activities/{c}"), headers=world.h["planner"]).status_code == 204
     lines = client.get(world.url("/lightning-lines"), params=[("report_ids", first)], headers=world.h["viewer"]).json()["lines"]
-    assert [v["activity_id"] for v in lines[0]["vertices"]] == [a] and lines[0]["missing_activity_ids"] == [None]
+    assert [v["activity_id"] for v in lines[0]["vertices"]] == [a] and lines[0]["missing_activity_ids"] == [c]
     past = world.line(first)
-    assert [(r["activity_id"], r["name"]) for r in past["rows"]] == [(a, "A"), (None, "C")]
+    assert [(r["activity_id"], r["name"]) for r in past["rows"]] == [(a, "A"), (c, "C")]
 
     def get(params: list[tuple[str, int]]) -> Any:
         return client.get(world.url("/lightning-lines"), params=params, headers=world.h["viewer"])

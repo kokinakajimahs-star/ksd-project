@@ -1,7 +1,7 @@
 # kloop 設定（指示書 §8.3）— PMT（WBS・工数・進捗管理システム）
 #
 # 正: docs/pmt-design.md（設計）・docs/pmt-requirements.md（要求）
-# 分母: spec-ids.toml（設計ID 187 件）・trace.toml（要求 64 件 → 設計）
+# 分母: spec-ids.toml（設計ID 193 件）・trace.toml（要求 64 件 → 設計）
 # 回し方（設計書 13.4）:
 #   1. kloop run scaffold                                   … 構成づくり（設計IDは実装しない）
 #   2. kloop graph run graphs/implement.toml                … スコープ（種別×群）ごとの実装ループ → 独立レビュー

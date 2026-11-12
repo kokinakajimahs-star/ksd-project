@@ -29,7 +29,7 @@ from app.models.eff import Assignment, TimeEntry
 from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency
-from app.models.wbs import WbsDictionaryEntry, WbsElement
+from app.models.wbs import WbsDictionaryEntry, WbsElement, WbsNumberingRule
 from app.services.clock import get_now
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
@@ -337,6 +337,28 @@ def test_import_wbs_creates_updates_and_moves(world: World, db_session: Session)
     assert (again["created"], again["updated"]) == (0, 0)
 
 
+def test_import_wbs_does_not_reuse_first_level_numbers(world: World, db_session: Session) -> None:
+    """API-INT-002：第 1 階層への追加・移動も数え（top_last_child_seq）を進め、消した番号を再利用しない（設計書 1.1 の 5.2。CR-003）。"""
+    removed = world.element("消す成果物", None, "DELIVERABLE")
+    assert world.elements()["消す成果物"].wbs_code == "3.0"
+    deleted = world.client.delete(world.url(f"/wbs/elements/{removed}"), headers=world.h["planner"])
+    assert deleted.status_code == 204, deleted.text
+
+    grid = [
+        list(WBS_COLUMNS),
+        ["NEW", "", "DELIVERABLE", "新しい成果物", "", "", "", "", "", ""],
+        ["1.2", "", "WORK_PACKAGE", "WP2", "", "", "", "", "", ""],
+    ]
+    body = world.load("wbs", csv_of(grid))
+    assert body["written"] is True
+    assert [c["key"] for c in body["changes"] if c["action"] == "CREATE"] == ["4.0"]
+    elements = world.elements()
+    assert (elements["新しい成果物"].sibling_seq, elements["WP2"].sibling_seq, elements["WP2"].parent_id) == (4, 5, None)
+    db_session.expire_all()
+    rule = db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == world.pid))
+    assert rule is not None and rule.top_last_child_seq == 5
+
+
 def test_import_wbs_resolves_old_code(world: World) -> None:
     """API-INT-002：旧 ID で書かれた行は今の要素へ解決して更新する（RULE-WBS-002。追加にしない）。"""
     move = world.client.post(world.url(f"/wbs/elements/{world.wp2}/move"), json={"parent_id": world.m},
@@ -413,6 +435,49 @@ def test_import_permission_is_data_import(world: World) -> None:
     missing = world.client.post("/api/v1/projects/9999/import", params={"target": "wbs"}, content=content,
                                 headers={**world.h["planner"], "Content-Type": "text/csv"})
     assert missing.status_code == 404
+
+
+def test_import_requires_write_permission_of_target(world: World, db_session: Session) -> None:
+    """API-INT-002：data.import に加えて対象の書く権限（wbs は wbs.edit、activities は schedule.edit、見積の列を変えるなら
+    estimate.edit も。time-entries は data.import だけ）。設計書 1.1・CR-006：data.import だけのロールで迂回させない。"""
+    world.grant("EXECUTOR", "data.import")
+    wbs = world.grid("wbs")
+    wbs[2][3] = "WP1（改）"
+    for dry_run in (True, False):
+        body = world.load("wbs", csv_of(wbs), who="executor", dry_run=dry_run, expect=403)
+        assert body["error"]["code"] == "FORBIDDEN"
+    activities = world.grid("activities")
+    activities[1][2] = "A（改）"
+    world.load("activities", csv_of(activities), who="executor", expect=403)
+    assert world.activity(world.a).name == "A" and world.elements()["WP1"].name == "WP1"
+
+    # schedule.edit があれば見積以外の列は書ける。見積の列を変える行があれば estimate.edit も要る（dry_run でも）
+    world.grant("EXECUTOR", "schedule.edit")
+    assert world.load("activities", csv_of(activities), who="executor")["written"] is True
+    assert world.activity(world.a).name == "A（改）"
+    estimate = world.grid("activities")
+    estimate[1][6] = "12"
+    for dry_run in (True, False):
+        world.load("activities", csv_of(estimate), who="executor", dry_run=dry_run, expect=403)
+    added = world.grid("activities") + [["", "1.1", "D", "", "2", "0", "4", "", ""]]
+    world.load("activities", csv_of(added), who="executor", expect=403)
+    assert world.activity(world.a).estimate_hours is None
+    world.grant("EXECUTOR", "estimate.edit")
+    assert world.load("activities", csv_of(estimate), who="executor")["written"] is True
+    assert world.activity(world.a).estimate_hours == Decimal("12")
+
+    # wbs は wbs.edit があれば書ける
+    world.grant("EXECUTOR", "wbs.edit")
+    assert world.load("wbs", csv_of(wbs), who="executor")["written"] is True
+
+    # time-entries は data.import だけで書ける（他人の行を書く権限が 9.1 に無い）
+    db_session.add(TimeEntry(user_id=world.users["contractor"].id, activity_id=world.c, work_date=date(2026, 12, 2),
+                             hours=Decimal("2.5"), note="調査"))
+    db_session.commit()
+    entries = world.grid("time-entries")
+    entries[1][4] = "調査（追記）"
+    world.grant("VIEWER", "data.import")
+    assert world.load("time-entries", csv_of(entries), who="viewer")["written"] is True
 
 
 def test_import_unreadable_files_report_file_unreadable(world: World) -> None:

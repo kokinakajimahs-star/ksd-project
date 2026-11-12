@@ -1,4 +1,4 @@
-// WBS の API（設計書 6.2 の API-WBS-001〜023）。
+// WBS の API（設計書 6.2 の API-WBS-001〜026）。
 // 形はサーバの schemas（backend/app/schemas/wbs.py）に合わせる
 import { apiDownload, apiFetch, type DownloadedFile } from "./client";
 import type { Page, PageQuery } from "./cmn";
@@ -162,7 +162,8 @@ export interface ReviewComment {
   updated_at: string;
 }
 
-export interface Review {
+/** レビューの一覧の 1 行（API-WBS-025。指摘は 1 件ずつ読む） */
+export interface ReviewSummary {
   id: number;
   project_id: number;
   /** OPEN・CLOSED */
@@ -171,6 +172,14 @@ export interface Review {
   requested_at: string;
   reviewer_ids: number[];
   closed_at: string | null;
+}
+
+/** 新しい順 */
+export interface ReviewList extends Page<ReviewSummary> {
+  project_id: number;
+}
+
+export interface Review extends ReviewSummary {
   comments: ReviewComment[];
 }
 
@@ -370,6 +379,12 @@ export function getValidation(projectId: number): Promise<Validation> {
   return apiFetch<Validation>(`/projects/${projectId}/wbs/validation`);
 }
 
+/** 要素とスコープ項目の今の紐付けを読む（API-WBS-026。項目の ID の昇順） */
+export function getScopeLinks(projectId: number, elementId: number): Promise<ScopeLinks> {
+  return apiFetch<ScopeLinks>(`/projects/${projectId}/wbs/elements/${elementId}/scope-links`);
+}
+
+/** 紐付けを選んだ項目で置き換える（載せなかった項目の紐付けは消える） */
 export function replaceScopeLinks(projectId: number, elementId: number, scopeItemIds: number[]): Promise<ScopeLinks> {
   return apiFetch<ScopeLinks>(`/projects/${projectId}/wbs/elements/${elementId}/scope-links`, {
     method: "PUT",
@@ -381,8 +396,20 @@ export function startReview(projectId: number, reviewerIds: number[]): Promise<R
   return apiFetch<Review>(`/projects/${projectId}/wbs/reviews`, { method: "POST", body: { reviewer_ids: reviewerIds } });
 }
 
+/** レビューの一覧（API-WBS-025。新しい順） */
+export function listReviews(projectId: number, query: PageQuery = {}): Promise<ReviewList> {
+  return apiFetch<ReviewList>(`/projects/${projectId}/wbs/reviews`, {
+    query: { limit: query.limit, offset: query.offset },
+  });
+}
+
 export function getReview(projectId: number, reviewId: number): Promise<Review> {
   return apiFetch<Review>(`/projects/${projectId}/wbs/reviews/${reviewId}`);
+}
+
+/** レビューを閉じる（API-WBS-024。WBS は作成中に戻り、指摘は残る）。応答は閉じたレビュー */
+export function closeReview(projectId: number, reviewId: number): Promise<Review> {
+  return apiFetch<Review>(`/projects/${projectId}/wbs/reviews/${reviewId}/close`, { method: "POST" });
 }
 
 export function addReviewComment(projectId: number, reviewId: number, input: CommentCreateInput): Promise<ReviewComment> {

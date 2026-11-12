@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from fractions import Fraction
 from typing import Final
 
 from app.domain.calendar import WorkCalendar
@@ -31,6 +32,7 @@ from app.domain.lightning import (
     RecordedPoint,
     build_lightning_line,
 )
+from app.domain.progress import round_percent
 
 # 計画の基準（4.1 の progress_snapshots.plan_basis。R1 は最新計画だけ。OQ-03）
 PLAN_BASIS_LATEST: Final = "LATEST"
@@ -65,8 +67,9 @@ class SnapshotError(ValueError):
 class SnapshotActivity:
     """確定の時点の活動の値（4.1 の ``activities`` の最新計画・WP の WBS ID・報告日の進捗・実績工数・ETC）。
 
-    ``percent_complete`` は RULE-PRG-001 の進捗率（``None`` は未算定）。``etc_hours`` は RULE-EFF-001 の ETC
-    （サービス層が求めて渡す。無ければ ``None``）。
+    ``percent_complete`` は RULE-PRG-001 の丸める前の進捗率（``Fraction`` か ``Decimal``。``None`` は未算定）。
+    ポイント・ずれ・判定はこの値から求め、写しの ``percent_complete`` には 4.1 の精度（小数 2 桁）へ丸めた値を置く
+    （設計書 1.1 の 5.6・CR-009）。``etc_hours`` は RULE-EFF-001 の ETC（サービス層が求めて渡す。無ければ ``None``）。
     """
 
     activity_id: int
@@ -77,7 +80,7 @@ class SnapshotActivity:
     duration_days: int
     is_milestone: bool
     is_critical: bool
-    percent_complete: Decimal | None
+    percent_complete: Decimal | Fraction | None
     actual_start: date | None = None
     actual_finish: date | None = None
     actual_hours: Decimal | None = None
@@ -217,7 +220,7 @@ def finalize_status_report(
             duration_days=a.duration_days,
             is_milestone=a.is_milestone,
             is_critical=a.is_critical,
-            percent_complete=a.percent_complete,
+            percent_complete=round_percent(a.percent_complete),
             actual_start=a.actual_start,
             actual_finish=a.actual_finish,
             actual_hours=a.actual_hours,

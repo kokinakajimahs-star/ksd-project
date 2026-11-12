@@ -40,7 +40,7 @@ function listCalls(calls: RecordedCall[]) {
 
 function renderPage() {
   return render(
-    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <MemoryRouter>
       <ApprovalsPage />
     </MemoryRouter>,
   );
@@ -155,6 +155,27 @@ describe("UI-CMN-003 承認待ち一覧", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("自分の申請は判断できません");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     await waitFor(() => expect(listCalls(calls)).toHaveLength(2));
+  });
+
+  it("取り下げで消えた申請（404。API-CHG-011）の判断は、サーバの文言を出して一覧を読み直す", async () => {
+    let pending = [CR_APPROVAL];
+    const { calls } = mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, APPROVER_ME),
+      "GET /api/v1/approval-requests": () => jsonResponse(200, pendingPage(pending)),
+      "POST /api/v1/approval-requests/11/decision": () => {
+        // 判断の前に申請者が取り下げ、承認申請の行が消えている
+        pending = [];
+        return errorResponse(404, "NOT_FOUND", "承認申請が見つかりません");
+      },
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "承認" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("承認申請が見つかりません");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(await screen.findByText("承認待ちはありません")).toBeInTheDocument();
+    expect(listCalls(calls)).toHaveLength(2);
   });
 
   it("承認待ちが無ければそう伝える", async () => {

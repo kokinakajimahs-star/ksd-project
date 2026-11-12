@@ -235,7 +235,13 @@ export default function ElementEditor({
       {canEstimate && (
         <>
           <p>自分の見積：{hoursText(element.own_estimate_hours)}</p>
-          <EstimateForm projectId={projectId} elementId={element.id} label={label} onSaved={handleEstimateSaved} />
+          <EstimateForm
+            projectId={projectId}
+            targetType="ELEMENT"
+            targetId={element.id}
+            label={label}
+            onSaved={handleEstimateSaved}
+          />
         </>
       )}
     </section>

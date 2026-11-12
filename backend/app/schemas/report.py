@@ -126,6 +126,16 @@ class ShareLinkOut(BaseModel):
     created_at: datetime
 
 
+class ShareLinkList(BaseModel):
+    """共有リンクの一覧（API-RPT-005。トークンは返さない。失効・期限切れのリンクも含む。設計書 1.1・CR-004）。"""
+
+    project_id: int
+    items: list[ShareLinkOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class ShareLinkCreated(ShareLinkOut):
     """作った共有リンク。``token`` は**この応答でだけ**返す（DB には SHA-256 のハッシュだけを保存する。4.2）。"""
 

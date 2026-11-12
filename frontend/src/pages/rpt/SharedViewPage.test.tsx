@@ -8,12 +8,11 @@ import { makeMeetingReport, makeSharedView } from "../../test/rptFixtures";
 import { makeGantt, makeGanttRow } from "../../test/schFixtures";
 import SharedViewPage, { shareFailureReason } from "./SharedViewPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const SHARED_URL = "/api/v1/shared/tok-abc_123";
 
 function renderAt(path = "/shared/tok-abc_123") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/shared/:token" element={<SharedViewPage />} />
       </Routes>

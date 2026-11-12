@@ -21,13 +21,21 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ShareLinkRecord, ShareLinkStatus, ViewLevel, hash_token, project_view_level, verify_share_link
 from app.domain.effort import EffortValues
 from app.domain.gantt import GanttChart
-from app.domain.report import CorrectiveActionDue, MeetingReport, ProgressNote, ReportError, build_meeting_report
+from app.domain.progress import round_percent
+from app.domain.report import (
+    REPORT_WINDOW,
+    CorrectiveActionDue,
+    MeetingReport,
+    ProgressNote,
+    ReportError,
+    build_meeting_report,
+)
 from app.domain.scheduling import ScheduleActivity, ScheduleCycleError
 from app.domain.snapshot import Snapshot, SnapshotActivity, SnapshotItem, StatusReportStatus
 from app.errors import AppError
@@ -39,7 +47,7 @@ from app.models.prj import Project
 from app.models.sch import Activity, ScheduleBaseline
 from app.services.auth import authorize_project, principal_of
 from app.services.effort import load_basis
-from app.services.progress import entries_of_report, project_settings, report_percents
+from app.services.progress import entries_of_report, project_settings, report_exact_percents
 from app.services.project_access import ProjectAccess
 from app.services.schedule import (
     ActivityProgress,
@@ -197,7 +205,8 @@ def _build(
     else:
         source = SOURCE_CALCULATED
         _require_schedule(ordered)
-        percents = report_percents(session, project, ordered, entries)
+        exact = report_exact_percents(session, project, ordered, entries)  # P は丸める前の値から（5.6）
+        percents = {k: round_percent(v) for k, v in exact.items()}
         elements = plan.element_by_id
         for a in ordered:
             entry = entries.get(a.id)
@@ -206,7 +215,7 @@ def _build(
                     activity_id=a.id, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
                     start_date=a.start_date, finish_date=a.finish_date,  # type: ignore[arg-type]
                     duration_days=a.duration_days, is_milestone=a.is_milestone, is_critical=a.is_critical,
-                    percent_complete=percents[a.id],
+                    percent_complete=exact[a.id],
                     actual_start=entry.actual_start if entry is not None else None,
                     actual_finish=entry.actual_finish if entry is not None else None,
                 )
@@ -217,9 +226,11 @@ def _build(
                 actual_finish=entry.actual_finish if entry is not None else None,
             )
 
+    # 非稼働日は会議レポートの表示範囲（報告日の前後 4 週。7.4）の分を受け取る（設計書 1.1・CR-008）
     chart, baseline = plan_gantt(
         session, links, plan, visible=visible,
         progress=LatestProgress(report_date=report.report_date, activities=gantt_progress),
+        range_start=report.report_date - REPORT_WINDOW, range_end=report.report_date + REPORT_WINDOW,
     )
     restricted = visible is not None
     try:
@@ -302,6 +313,23 @@ def create_share_link(
     session.add(link)
     session.commit()
     return CreatedShareLink(link=link, token=token)
+
+
+def list_share_links(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int,
+) -> tuple[list[ShareLink], int]:
+    """共有リンクの一覧（share.manage。RPT-03。API-RPT-005。設計書 1.1・CR-004）。
+
+    新しい順（ID の降順）。失効させたリンク・期限の過ぎたリンクも含める（状態は ``revoked_at``・``expires_at`` で分かる）。
+    トークンは DB に無い（ハッシュだけ）ので返せない。
+    """
+    authorize_project(session, access, actor, project_id, SHARE_MANAGE)
+    total = session.scalar(select(func.count()).select_from(ShareLink).where(ShareLink.project_id == project_id))
+    links = list(session.scalars(
+        select(ShareLink).where(ShareLink.project_id == project_id)
+        .order_by(ShareLink.id.desc()).limit(limit).offset(offset)
+    ))
+    return links, int(total or 0)
 
 
 def revoke_share_link(

@@ -5,16 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setAuthToken } from "../../api/client";
 import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi } from "../../test/mockApi";
+import type { ShareLink } from "../../api/rpt";
 import {
   makeMeetingReport,
   makeReportKpi,
   makeReportMilestone,
+  makeShareLink,
   makeShareLinkCreated,
+  shareLinkList,
 } from "../../test/rptFixtures";
-import { localDateTimeToIso } from "./labels";
+import { formatDateTime } from "../../lib/format";
+import { localDateTimeToIso, shareLinkState } from "./labels";
 import MeetingReportPage from "./MeetingReportPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 const REPORT_URL = `${BASE}/status-reports/41/meeting-report`;
 
@@ -28,7 +31,7 @@ function meWith(permissions: string[]) {
 
 function renderAt(path = "/projects/3/status-reports/41/meeting") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/status-reports/:reportId/meeting" element={<MeetingReportPage />} />
       </Routes>
@@ -242,7 +245,7 @@ describe("UI-RPT-001 定例会議レポート", () => {
   });
 });
 
-describe("UI-RPT-001 共有リンク（API-RPT-002・003。RPT-03）", () => {
+describe("UI-RPT-001 共有リンク（API-RPT-002・003・005。RPT-03）", () => {
   beforeEach(() => {
     setAuthToken("t-pm");
   });
@@ -265,11 +268,21 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003。RPT-03）", () => {
 
   it("範囲と有効期限で共有リンクを作り、作ったときだけ URL を見せる。確認の段を経て失効させる", async () => {
     const created = makeShareLinkCreated({ scope: "GANTT" });
+    // サーバの状態：作る・失効させるたびに一覧（API-RPT-005）も変わる
+    let links: ShareLink[] = [];
     const { calls } = mockApi({
       "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
       [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
-      [`POST ${BASE}/share-links`]: () => jsonResponse(201, created),
-      [`DELETE ${BASE}/share-links/71`]: () => jsonResponse(204, null),
+      [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList(links)),
+      [`POST ${BASE}/share-links`]: () => {
+        const { token: _token, ...link } = created;
+        links = [link];
+        return jsonResponse(201, created);
+      },
+      [`DELETE ${BASE}/share-links/71`]: () => {
+        links = links.map((l) => ({ ...l, revoked_at: "2026-12-10T02:00:00Z" }));
+        return jsonResponse(204, null);
+      },
     });
     renderAt();
 
@@ -304,6 +317,7 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003。RPT-03）", () => {
     const { calls } = mockApi({
       "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
       [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+      [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList([])),
       [`POST ${BASE}/share-links`]: () => errorResponse(400, "VALIDATION_ERROR", "入力に誤りがあります"),
     });
     renderAt();
@@ -317,6 +331,103 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003。RPT-03）", () => {
     fireEvent.submit(form);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("入力に誤りがあります"));
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("共有リンクの一覧を範囲・期限・状態（有効・失効・期限切れ）・作った日時で出し、トークンは出さない（API-RPT-005）", async () => {
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    const items = [
+      makeShareLink({ id: 73, scope: "GANTT", expires_at: future, created_at: "2026-11-12T01:00:00Z" }),
+      makeShareLink({ id: 72, expires_at: future, revoked_at: "2026-11-11T02:00:00Z" }),
+      makeShareLink({ id: 71, expires_at: "2026-01-01T00:00:00Z", created_at: "2025-12-01T00:00:00Z" }),
+    ];
+    // 一覧の応答にトークンが紛れても画面に出さない（サーバは返さない。4.2）
+    const leaked = items.map((l) => ({ ...l, token: `tok-${l.id}` }));
+    const { calls } = mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
+      [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+      [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList(leaked)),
+    });
+    const { container } = renderAt();
+
+    const table = await screen.findByRole("table", { name: "共有リンクの一覧" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("ガントチャート（最新の進捗）");
+    expect(rows[0]).toHaveTextContent("有効");
+    expect(rows[0]).toHaveTextContent(formatDateTime("2026-11-12T01:00:00Z"));
+    expect(rows[0]).toHaveTextContent(formatDateTime(future));
+    expect(within(rows[0]!).getByRole("button", { name: "失効させる…" })).toBeInTheDocument();
+    expect(rows[1]).toHaveTextContent(`失効（${formatDateTime("2026-11-11T02:00:00Z")}）`);
+    expect(within(rows[1]!).queryByRole("button")).toBeNull();
+    expect(rows[2]).toHaveTextContent("期限切れ");
+    expect(rows[2]).toHaveTextContent("定例会議レポート（最新の報告日）");
+    expect(within(rows[2]!).queryByRole("button")).toBeNull();
+
+    expect(container.textContent).not.toContain("tok-");
+    expect(screen.queryByLabelText(/共有リンクの URL/)).toBeNull();
+    expect(screen.queryByRole("table", { name: "この画面で作った共有リンク" })).toBeNull();
+    expect(calls.find((c) => c.path === `${BASE}/share-links`)?.url).toBe(`${BASE}/share-links?limit=100&offset=0`);
+  });
+
+  it("一覧の有効なリンクを確認の段を経て失効させ、一覧を読み直す（API-RPT-003）", async () => {
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    let links = [makeShareLink({ id: 73, expires_at: future })];
+    const { calls } = mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
+      [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+      [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList(links)),
+      [`DELETE ${BASE}/share-links/73`]: () => {
+        links = links.map((l) => ({ ...l, revoked_at: "2026-11-12T06:00:00Z" }));
+        return jsonResponse(204, null);
+      },
+    });
+    renderAt();
+
+    const table = await screen.findByRole("table", { name: "共有リンクの一覧" });
+    fireEvent.click(within(table).getByRole("button", { name: "失効させる…" }));
+    fireEvent.click(within(table).getByRole("button", { name: "やめる" }));
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+
+    fireEvent.click(within(table).getByRole("button", { name: "失効させる…" }));
+    expect(within(table).getByRole("group", { name: "失効の確認" })).toHaveTextContent("戻せません");
+    fireEvent.click(within(table).getByRole("button", { name: "失効させる" }));
+
+    await waitFor(() => expect(within(table).getAllByRole("row")[1]).toHaveTextContent("失効（"));
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([`${BASE}/share-links/73`]);
+    expect(calls.filter((c) => c.method === "GET" && c.path === `${BASE}/share-links`)).toHaveLength(2);
+    expect(within(table).queryByRole("button")).toBeNull();
+  });
+
+  it("共有リンクが無ければその旨を出す", async () => {
+    mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
+      [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+      [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList([])),
+    });
+    renderAt();
+
+    expect(await screen.findByText("共有リンクはまだありません")).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "共有リンクの一覧" })).toBeNull();
+  });
+});
+
+describe("shareLinkState（共有リンクの一覧の状態）", () => {
+  const now = Date.parse("2026-12-10T00:00:00Z");
+
+  it("失効を有効期限より先に見て、有効期限の時刻ちょうどからは期限切れ", () => {
+    expect(shareLinkState({ expires_at: "2026-12-10T00:00:01Z", revoked_at: null }, now)).toBe("ACTIVE");
+    expect(shareLinkState({ expires_at: "2026-12-10T00:00:00Z", revoked_at: null }, now)).toBe("EXPIRED");
+    expect(shareLinkState({ expires_at: "2026-12-01T00:00:00Z", revoked_at: "2026-11-30T00:00:00Z" }, now)).toBe(
+      "REVOKED",
+    );
+    expect(shareLinkState({ expires_at: "2026-12-31T00:00:00Z", revoked_at: "2026-12-09T00:00:00Z" }, now)).toBe(
+      "REVOKED",
+    );
+  });
+
+  it("時差の無いサーバの時刻は UTC とみなす", () => {
+    expect(shareLinkState({ expires_at: "2026-12-10T00:00:00", revoked_at: null }, now)).toBe("EXPIRED");
+    expect(shareLinkState({ expires_at: "2026-12-10T00:00:01", revoked_at: null }, now)).toBe("ACTIVE");
   });
 });
 

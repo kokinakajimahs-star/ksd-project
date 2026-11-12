@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -16,6 +17,8 @@ from app.domain.progress import (
     ProgressItemType,
     ProgressMethod,
     compute_percent_complete,
+    exact_percent_complete,
+    round_percent,
     validate_progress_input,
 )
 from app.models.prg import PROGRESS_ITEM_TYPES
@@ -206,3 +209,21 @@ def test_unknown_method_rejected() -> None:
     """RULE-PRG-001：方式は 7 つだけ。未定義の方式は推測せずに拒む。"""
     with pytest.raises(ProgressError):
         compute_percent_complete("EARNED_VALUE")
+
+
+def test_exact_percent_keeps_unrounded_ratio_and_stored_value_is_rounded() -> None:
+    """RULE-PRG-001：丸める前の進捗率（5.6）は割り切れない割合をそのまま持ち、保存する値は 4.1 の小数 2 桁へ四捨五入する（設計書 1.1・CR-009）。"""
+    two_of_three = items(ProgressItemType.CHECK, True, True, False)
+    assert exact_percent_complete("CHECK_ITEM_RATIO", items=two_of_three) == Fraction(200, 3)
+    assert compute_percent_complete("CHECK_ITEM_RATIO", items=two_of_three) == Decimal("66.67")
+    assert exact_percent_complete("DIRECT", entered_percent=Decimal("12.5")) == Fraction(25, 2)
+    assert exact_percent_complete("CHECK_ITEM_RATIO", items=[]) is None
+    assert exact_percent_complete("ZERO_HUNDRED", actual_start=START, actual_finish=FINISH) == 100
+    # 四捨五入は分数のまま行う（境目ちょうどは切り上げ。近似で境目をまたがない）
+    assert round_percent(Fraction(1, 200)) == Decimal("0.01")
+    assert round_percent(Fraction(1, 201)) == Decimal("0.00")
+    assert round_percent(Fraction(100, 3)) == Decimal("33.33")
+    assert round_percent(Decimal("12.345")) == Decimal("12.35")
+    assert round_percent(None) is None
+    with pytest.raises(ProgressError):
+        round_percent(Fraction(-1, 3))

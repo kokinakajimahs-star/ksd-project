@@ -7,10 +7,17 @@ import type { Me } from "../../api/cmn";
 import { makeMe, makeMember, makePendingApproval, makeUser } from "../../test/fixtures";
 import { memberPage } from "../../test/chgFixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
-import { makeComment, makeReview, makeScopeBaselineSummary, makeTree, makeValidation } from "../../test/wbsFixtures";
+import {
+  makeComment,
+  makeReview,
+  makeReviewSummary,
+  makeScopeBaselineSummary,
+  makeTree,
+  makeValidation,
+  reviewList,
+} from "../../test/wbsFixtures";
 import WbsReviewPage, { describeApprovalError, toleranceText } from "./WbsReviewPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[], id = 5): Me {
@@ -42,6 +49,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
     [`GET ${BASE}/wbs`]: () => jsonResponse(200, makeTree()),
     [`GET ${BASE}/wbs/validation`]: () => jsonResponse(200, makeValidation()),
     [`GET ${BASE}/scope-baselines`]: () => jsonResponse(200, { project_id: 3, items: [], total: 0, limit: 50, offset: 0 }),
+    [`GET ${BASE}/wbs/reviews`]: () => jsonResponse(200, reviewList([makeReviewSummary()])),
     [`GET ${BASE}/wbs/reviews/50`]: () => jsonResponse(200, makeReview()),
     ...overrides,
   };
@@ -54,7 +62,7 @@ function LocationProbe() {
 
 function renderAt(path = "/projects/3/wbs-review") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route
           path="/projects/:projectId/wbs-review"
@@ -166,7 +174,7 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
     expect(within(screen.getByRole("table", { name: "指摘" })).getAllByRole("row")[2]).toHaveTextContent("WBS 全体");
   });
 
-  it("wbs.edit を持つ人は指摘の状態と対応を更新でき、閉じたレビューでは書けない（API-WBS-017）", async () => {
+  it("wbs.edit を持つ人は指摘の状態と対応を更新でき、閉じたレビューでも更新できる（指摘は書けない）（API-WBS-017・5.10）", async () => {
     let closed = false;
     const { calls } = mockApi(
       routes(meWith(PLANNER), {
@@ -188,8 +196,112 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
     expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`).map((c) => c.body)).toEqual([
       { status: "RESOLVED", resolution: "移行を足した" },
     ]);
-    expect(screen.queryByLabelText("指摘 #501 の状態")).toBeNull();
     expect(screen.queryByRole("form", { name: "指摘を書く" })).toBeNull();
+
+    // 閉じても指摘は残り、申請の前提の未対応の指摘に数えるので、閉じたレビューの指摘も更新できる
+    fireEvent.change(screen.getByLabelText("指摘 #501 の状態"), { target: { value: "REJECTED" } });
+    fireEvent.click(screen.getByRole("button", { name: "指摘 #501 を更新する" }));
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`)).toHaveLength(2));
+    expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`)[1]!.body).toMatchObject({ status: "REJECTED" });
+  });
+
+  it("レビューの一覧を新しい順に出し、選んだレビューを URL で開く（API-WBS-025・015・WBS-20）", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/wbs/reviews`]: () =>
+          jsonResponse(
+            200,
+            reviewList([
+              makeReviewSummary({ id: 51, reviewer_ids: [4, 9] }),
+              makeReviewSummary({ status: "CLOSED", closed_at: "2026-11-10T03:00:00Z" }),
+            ]),
+          ),
+        [`GET ${BASE}/wbs/reviews/50`]: () =>
+          jsonResponse(200, makeReview({ status: "CLOSED", closed_at: "2026-11-10T03:00:00Z" })),
+      }),
+    );
+    renderAt();
+    const list = await screen.findByRole("table", { name: "レビューの一覧" });
+    const rows = within(list).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("#51");
+    expect(rows[0]).toHaveTextContent("実施中");
+    expect(rows[0]).toHaveTextContent("—");
+    expect(await within(rows[0]!).findByText(/査読 花子、#9/)).toBeInTheDocument();
+    expect(rows[1]).toHaveTextContent("#50");
+    expect(rows[1]).toHaveTextContent("終了");
+    expect(rows[1]).toHaveTextContent("計画 太郎");
+    expect(screen.getByText(/開いているレビューはありません/)).toBeInTheDocument();
+    expect(sent(calls, "GET", `${BASE}/wbs/reviews`)[0]!.url).toBe(`${BASE}/wbs/reviews?limit=50&offset=0`);
+    // 番号を打って開く部品は一覧に置き換えた
+    expect(screen.queryByRole("form", { name: "レビューを番号で開く" })).toBeNull();
+
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: "レビュー #50 を開く" }));
+    expect(await screen.findByText("レビュー #50（終了）")).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent("/projects/3/wbs-review?review=50");
+    expect(sent(calls, "GET", `${BASE}/wbs/reviews/50`)).toHaveLength(1);
+    // 終わったレビューは wbs.edit を持っていても閉じられない
+    expect(screen.queryByRole("button", { name: "レビューを閉じる" })).toBeNull();
+  });
+
+  it("wbs.edit を持つ人は実施中のレビューを閉じ、WBS の状態と一覧を読み直す（API-WBS-024・WBS-20）", async () => {
+    let closed = false;
+    const closedReview = makeReview({ status: "CLOSED", closed_at: "2026-11-12T05:00:00Z" });
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/wbs`]: () => jsonResponse(200, makeTree(undefined, { wbs_status: closed ? "DRAFT" : "IN_REVIEW" })),
+        [`GET ${BASE}/wbs/reviews`]: () =>
+          jsonResponse(
+            200,
+            reviewList([closed ? makeReviewSummary({ status: "CLOSED", closed_at: "2026-11-12T05:00:00Z" }) : makeReviewSummary()]),
+          ),
+        [`GET ${BASE}/wbs/reviews/50`]: () => jsonResponse(200, closed ? closedReview : makeReview()),
+        [`POST ${BASE}/wbs/reviews/50/close`]: () => {
+          closed = true;
+          return jsonResponse(200, closedReview);
+        },
+      }),
+    );
+    renderAt("/projects/3/wbs-review?review=50");
+    expect(await screen.findByText("WBS の状態：レビュー中")).toBeInTheDocument();
+    const close = await screen.findByRole("button", { name: "レビューを閉じる" });
+    fireEvent.click(close);
+
+    expect(await screen.findByText("レビュー #50（終了）")).toBeInTheDocument();
+    expect(sent(calls, "POST", `${BASE}/wbs/reviews/50/close`)).toHaveLength(1);
+    expect(sent(calls, "POST", `${BASE}/wbs/reviews/50/close`)[0]!.body).toBeUndefined();
+    expect(await screen.findByText("WBS の状態：作成中")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(screen.getByRole("table", { name: "レビューの一覧" })).getAllByRole("row")[1]).toHaveTextContent("終了"),
+    );
+    expect(sent(calls, "GET", `${BASE}/wbs/reviews`).length).toBeGreaterThanOrEqual(2);
+    // 指摘は残り、閉じた後は新しい指摘を書けない。残った指摘の状態は閉じた後も更新できる（申請の前提に数えるため。5.10）
+    expect(within(screen.getByRole("table", { name: "指摘" })).getAllByRole("row")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "レビューを閉じる" })).toBeNull();
+    expect(screen.queryByRole("form", { name: "指摘を書く" })).toBeNull();
+    expect(screen.getByLabelText("指摘 #501 の状態")).toBeInTheDocument();
+  });
+
+  it("wbs.edit の無い人には、実施中のレビューでも閉じるボタンを出さない（7.2）", async () => {
+    mockApi(routes(meWith(REVIEWER, 4)));
+    renderAt("/projects/3/wbs-review?review=50");
+    expect(await screen.findByText("レビュー #50（実施中）")).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: "指摘を書く" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "レビューを閉じる" })).toBeNull();
+  });
+
+  it("閉じられない（409）ときはサーバの文言を出す", async () => {
+    mockApi(
+      routes(meWith(PLANNER), {
+        [`POST ${BASE}/wbs/reviews/50/close`]: () => errorResponse(409, "INVALID_STATE", "WBS がレビュー中ではありません"),
+      }),
+    );
+    renderAt("/projects/3/wbs-review?review=50");
+    fireEvent.click(await screen.findByRole("button", { name: "レビューを閉じる" }));
+    expect(await within(screen.getByRole("region", { name: "レビュー" })).findByRole("alert")).toHaveTextContent(
+      "WBS がレビュー中ではありません",
+    );
+    expect(screen.getByText("レビュー #50（実施中）")).toBeInTheDocument();
   });
 
   it("承認の申請：前提を満たさなければ前提ごとの件数を出し、満たせば申請する（API-WBS-018・WBS-21・13）", async () => {

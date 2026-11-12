@@ -82,6 +82,8 @@ class Activity(Base):
         CheckConstraint(
             f"progress_method IS NULL OR {in_list('progress_method', PROGRESS_METHODS)}", name="progress_method"
         ),
+        # 内部キーを再利用しない（設計書 1.1 の 4.2。写しの値が後から作った別の行を指さないため）
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -162,7 +164,8 @@ class ScheduleBaselineItem(Base):
     - ``item_type`` が ACTIVITY なら活動の写し、WORK_PACKAGE なら WP の写し（活動の無い WP の見積など。EFF-08 の基準の値）
     - ``activity_id`` は写した活動（WP の項目では空）。``element_id`` は項目の WP（WP の項目は自分、活動の項目は活動の置き場の WP）
     - ``wbs_code``・``name`` 以降は写した時点の値。後から活動・WP を変えても変わらない（BR-12）
-    - ``activity_id``・``element_id`` は、写した活動・WP を後から消すときにサービス層が空にする（写しは残す。SCH-18 の「削除された活動」。A-19）
+    - ``activity_id``・``element_id`` は写した時点の値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2。CR-002）。
+      写した活動・WP を後から消しても変えない（今の計画に無い ID が SCH-18 の「削除された活動」）
     """
 
     __tablename__ = "schedule_baseline_items"
@@ -176,8 +179,8 @@ class ScheduleBaselineItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     schedule_baseline_id: Mapped[int] = mapped_column(ForeignKey("schedule_baselines.id"), index=True)
     item_type: Mapped[str] = mapped_column(String(16))
-    activity_id: Mapped[int | None] = mapped_column(ForeignKey("activities.id"), index=True)
-    element_id: Mapped[int | None] = mapped_column(ForeignKey("wbs_elements.id"), index=True)
+    activity_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    element_id: Mapped[int | None] = mapped_column(Integer, index=True)
     wbs_code: Mapped[str] = mapped_column(String(100))
     name: Mapped[str] = mapped_column(String(200))
     start_date: Mapped[date | None] = mapped_column(Date)
