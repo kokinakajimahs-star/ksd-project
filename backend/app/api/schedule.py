@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
-from app.domain.gantt import AxisPoint, GanttBar
+from app.domain.gantt import AxisPoint, GanttBar, GanttChart
 from app.models.sch import ActivityDependency, ScheduleBaseline
 from app.schemas.schedule import (
     ActivityBulkUpdate,
@@ -317,11 +317,17 @@ def get_gantt(
     （版が無ければ基準のバーは無い）。無い版・他のプロジェクトの版は 404。
     """
     view = schedule_service.gantt(session, access, user, links, project_id, baseline_id)
-    chart = view.chart
+    return gantt_out(view.chart, project_start=view.project_start, report_date=view.report_date,
+                     baseline=view.baseline, restricted=view.restricted)
+
+
+def gantt_out(chart: GanttChart, *, project_start: date, report_date: date | None, baseline: ScheduleBaseline | None,
+              restricted: bool) -> GanttOut:
+    """ガントの描画データ（RULE-SCH-005 の結果）を応答の形にする。会議レポート・共有ビュー（app.api.report）も使う。"""
     return GanttOut(
-        project_start=view.project_start,
-        report_date=view.report_date,
-        baseline=None if view.baseline is None else _baseline_ref(view.baseline),
+        project_start=project_start,
+        report_date=report_date,
+        baseline=None if baseline is None else _baseline_ref(baseline),
         range_start=chart.range_start,
         range_end=chart.range_end,
         non_working_days=list(chart.non_working_days),
@@ -339,7 +345,7 @@ def get_gantt(
                          to_row=link.to_row, start=_point(link.start), end=_point(link.end))
             for link in chart.links
         ],
-        restricted=view.restricted,
+        restricted=restricted,
     )
 
 

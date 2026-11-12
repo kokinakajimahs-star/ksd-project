@@ -964,3 +964,327 @@
   上段の行を範囲で絞るなら `MeetingReport` に絞った行を足す（線の頂点は全行に要る）
 - **限界:** ドメインの関数だけで、API（API-RPT-001）・サービス・画面（UI-RPT-001）からはまだ呼んでいない（api:RPT・ui:RPT の範囲）。
   確定済みのレポートでも、ガント・依存の網・フロート・見積・EAC・是正措置の状態は今の値（写しに無い。OQ-32 (3)）。権限（project.view）は RULE-AUTH-001 の担当
+
+## A-36: スケジュールの画面（ui:SCH）の UI-SCH-001・002・003 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/sch/`（UI-SCH-001 の部品は `activities/`）、ガントの描画は 7.3 どおり `frontend/src/components/gantt/`。
+    API の型と呼び出しは `frontend/src/api/sch.ts`（API-SCH-001〜013）と、画面が読む分だけの `prg.ts`（API-PRG-002・006・008）・`eff.ts`（API-EFF-001）・
+    `wbs.ts`（API-WBS-001）。形は `backend/app/schemas/schedule.py`・`progress.py`・`effort.py`・`wbs.py` を読んで合わせた
+  - `apiFetch` の問い合わせに配列を許し、同じ名前を繰り返す（`report_ids=40&report_ids=41`。API-PRG-008 の `list[int]` の Query の形）
+  - **ガントの座標は画面で稼働日を数え直さない**。x はサーバの暦日上の座標（日付＋その日の中の割合。7.3）から求める。報告日線もサーバの `report_line` だけで描き、
+    報告日を選んでいない（イナズマ線を読んでいない）ときは報告日線を描かない
+  - 1 日あたりの横幅（7.3 の表示の単位）：日 24px・週 6px・月 2px。行の高さ 28px。見えている行と前後 5 行だけを描く（NFR-02）。依存の矢印は見えている範囲にかかるものだけ、
+    イナズマ線の折れ線は全ての行の頂点で 1 本（頂点の円は見えている行だけ）。折れ線は報告日線の上端から始め、行の順に頂点を結び、下端で終える
+  - 頂点の色は判定の上で数える値（5.6：完了・未着手（予定内）は予定どおり＝緑）。過去の線（⑧）は報告日の古い順の `style_index` で破線の種類を変え、種類が尽きたら繰り返す
+  - 判定の一覧（PRG-13 の一覧化・絞り込み）は UI-SCH-002 の下に置き、6 つの判定のどれかで絞る。未算定の行には「進捗の入力が要る」と出す（5.6 の「一覧で入力を促す」）
+  - 既定で開く報告日は報告日の最も新しいもの。過去の線に選べるのは確定済み（FINALIZED）の報告日だけ（PRG-18）。比べる基準の既定はサーバの既定（`baseline_id` を省く＝最新の版）
+  - スナップショットのイナズマ線（API-PRG-006 の SNAPSHOT）の行は、活動 ID で今のガントの行へ置く（消した活動の行は描かない）。過去の線（API-PRG-008）はサーバの `row_index` のまま
+  - タスクリストの一括編集（SCH-02）は**変えた行の変えた項目だけ**を API-SCH-004 へ 1 回で送る（全件の検査はサーバ。422 の details を全て出し、入力は残す）。
+    画面で止めるのは送れない形（期間が整数でない・先行が活動 ID でない・名称が空）だけ。先行は活動 ID を `;` で区切って入れる（6.3 の CSV の活動 ID と同じ表し方）。
+    1 頁は 200 件（API-SCH-004 の上限 1000 件以内）
+  - 担当は一括編集（API-SCH-004 の `assignee_user_ids`）でも、担当と割当工数の部品（API-EFF-001。EFF-01 の割当工数・見積との差）でも変えられる。
+    部品の合計・差は保存前は画面で求めた目安、保存後はサーバの値を出す
+  - 活動を足す（API-SCH-002）：開始日・終了日・期間のうち入れたものだけを送り、残りはサーバが求める（SCH-03）。マイルストーンの印を付けると期間 0・`is_milestone` を送る（SCH-09）
+  - 変える部品は schedule.edit（タスクリスト・再計算）、baseline.manage（版の保存）を `GET /api/v1/me` で見て出す（7.2）。WP の木とメンバーの一覧は変える人だけが読む
+  - 版の保存の理由の呼び名（MANUAL＝保存・RE_APPROVAL＝再承認・CHANGE_REQUEST＝変更要求の反映）は設計書に無いので決めた。差異の区別は MATCHED＝両方にある・ADDED＝追加された・DELETED＝削除された
+- **理由:** 設計書 6.2（API-SCH-001〜013・API-PRG-002・006・008・API-EFF-001・API-WBS-001）・7.1・7.2・7.3・5.4・5.6、要求仕様書 SCH-01〜04・06・09〜13・16〜18、PRG-08・12・13・18、EFF-01・NFR-02
+- **影響範囲:** `frontend/src/pages/sch/`・`frontend/src/components/gantt/`・`frontend/src/api/{sch,prg,eff,wbs}.ts`・`frontend/src/api/client.ts`（配列の問い合わせ）・
+  `frontend/src/App.tsx`・`frontend/src/test/schFixtures.ts`
+- **覆す場合:** 横幅は `components/gantt/scale.ts` の `DAY_WIDTH`、余分に描く行は `visibleRows` の `overscan`、色は `judgementColor`、破線は `PAST_LINE_DASHES`、
+  1 頁の件数は `pages/sch/limits.ts` の `ACTIVITIES_PAGE_SIZE`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバと繋いでは確かめていない。NFR-02 の「2,000 件で 3 秒以内」は計っていない（試験は描く行が限られることだけを見る）。
+  見た目（CSS）は付けていない。行の見出しは横に送ると隠れる（縦に送っても目盛りは上に残す）。依存の選択肢は今の頁の活動だけ。
+  担当と割当工数を保存すると一覧を読み直すので、保存していない一括編集の入力は消える。UI-PRG-001（進捗入力）への行き先は ui:PRG の画面ができるまで「ページが見つかりません」になる
+
+## A-37: 変更管理（CHG）の API（api:CHG）の API-CHG-001〜010 で決めたこと
+
+- **選択:**
+  - 置き場は 2.1 どおり：ルートは `backend/app/api/change.py`、ユースケースは `backend/app/services/change.py`、入出力は `backend/app/schemas/change.py`。
+    試験は `backend/tests/api/test_chg.py`
+  - 起票・修正（API-CHG-001・003）：対象の WBS ID（複数可）は今の ID か旧 ID で解決できること（無ければ 422 `REFERENCE_NOT_FOUND`）。
+    変更内容は**起票・修正の時点で**今の計画へ当てて検査する（RULE-CHG-001。形の誤りは 400 `VALIDATION_ERROR`、参照・業務ルールの違反は 422 で
+    `ChangeErrorCode` のコードをそのまま返す。`details` に操作の位置 `index`）。本計画には書かない。番号はプロジェクトの中の最大＋1
+  - 影響分析（API-CHG-004）：保存した変更内容を今の計画の写しへ当てる（RULE-CHG-002）。本計画にも変更要求の `impact` にも書かない。
+    反映済み・却下の変更要求は 409 `INVALID_STATE`（OQ-33 (3)）
+  - 提出（API-CHG-005）：RULE-CHG-003 の SUBMIT。影響分析を `impact` に保存し、`submitted_at` を入れ、承認申請（`target_type = CHANGE_REQUEST`、
+    申請者＝提出した人）を作る。応答の `approval_request_id` は最新の申請
+  - 承認・却下は API-WBS-019 の判断を `ChangeRequestStateMachine`（`app.state.change_request_approvals`。A-31 の `ChangeRequestTransitionNotWired`
+    から差し替えた）が RULE-CHG-003 で変更要求へ通す。提出者の判断は 403 `SELF_APPROVAL_FORBIDDEN`（9.2 の注記。WBS と同じ対応）。
+    申請の指す変更要求が無いのは申請と変更要求の食い違いなので `RuntimeError` で止める（fail fast。A-31 と同じ）
+  - 反映（API-CHG-006）：RULE-CHG-003 の APPLY → RULE-CHG-001 で今の計画へ当て直す（承認の後に計画が変わっていれば 400・422）→ 本計画へ書く
+    （仮の ID の要素・活動を作り、変わった値を写し、依存の組の差を消す・足す。活動・要素の削除の後始末は API-SCH-005・API-WBS-005 と同じ）→
+    日程を計算し直す（`calculate_and_store`）→ RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST、名前は「変更要求 #番号 件名」）を作る。
+    WBS の状態は新しいスコープの版ができたので BASELINED にする。WBS の承認待ち（PENDING_APPROVAL）の間は 409（OQ-33 (5)）。
+    基準の写しが指す要素の削除は 422 `ELEMENT_IN_BASELINE`（CR-002 の暫定）、是正措置・差異の理由が指す要素は 422 `ELEMENT_REFERENCED`、
+    是正措置が指す活動は 422 `ACTIVITY_REFERENCED`、実績工数のある活動は 409（A-30 と同じ）。どこかで止まれば何も書かない（OQ-33 (6)）
+  - 是正措置（API-CHG-007〜009）：要素か活動の少なくとも一方に紐付ける（WBS ID で絞るため）。紐付け・担当はこのプロジェクトのもの（違えば 400）。
+    一覧の WBS ID はその要素と配下、その WP の活動に紐付いた措置。期限超過の「今日」は `now`（UTC）の日付（OQ-33 (1)）。
+    更新できるのは状態（RULE-CHG-005）・効果・担当・期限（OQ-33 (4)）
+  - 委託先だけで読む利用者（9.2 の注記）：変更要求は対象の WBS ID が自分の割当の活動の WBS の経路に入るものだけ、是正措置は自分の割当の活動か
+    その経路の要素に紐付いたものだけを見せる
+  - 変更履歴（API-CHG-010・6.1・NFR-05）：`backend/app/infra/audit_listener.py` に記録を実装した。アプリのセッションの生成器の `after_flush` で、
+    ORM で追加・更新・削除した行（`audit_logs` 自身を除く）を RULE-CHG-006 の差分にして Core の INSERT で同じトランザクションに追記する。
+    変更者と時刻は認証（`get_current_user`）が `bind_actor` でセッションに載せる。プロジェクトと WBS ID は行の列、無ければ親の行
+    （要素・活動・報告日・カレンダー・レビュー・版）からたどる。検索の期間は `date_from`・`date_to`（UTC の日付で両端を含む。OQ-33 (2)）、新しい順
+- **覆す場合:** 起票の時点の検査は `create_change_request`・`update_change_request` の `_apply`、影響分析の状態の制限は `_IMPACT_CLOSED`、
+  反映の後の WBS の状態は `apply_change_request`、是正措置の必須の紐付けは `create_corrective_action`、「今日」は `backend/app/api/change.py` の `get_today`
+- **限界:** 変更履歴は ORM の単位作業を通る書き込みだけを記録する。`session.execute(update(...))`・`delete(...)` のような一括の文
+  （WBS の要素の削除の後始末、活動の削除の後始末、レビューを閉じる処理など）は記録しない（OQ-33 (7)）。ログインで作る認証セッションは変更者が空。
+  反映は要素の移動（5.9 に操作が無い）を扱わない。試験は SQLite の TestClient だけで、PostgreSQL では流していない
+
+## A-38: 見積（EST）の API（api:EST）の API-EST-001〜003 で決めたこと
+
+- **選択:**
+  - 置き場は `backend/app/api/estimate.py`（ルート）・`backend/app/services/estimate.py`（ユースケース）・`backend/app/schemas/estimate.py`（入出力）、
+    試験は `backend/tests/api/test_est.py`。ルータは `app.main.register_routers` に足した
+  - 見積を書く（API-EST-001。estimate.edit）：`target_type` はパスの `ELEMENT`／`ACTIVITY`（4.1 の値。誤りは 400）。対象がそのプロジェクトに無ければ 404。
+    入力は `input_value`（0 以上・小数 2 桁まで）・`input_unit`（HOUR／DAY）・任意の `method`・`assumptions`・`references`。
+    RULE-EST-002（`record_estimate`）で人時へ換算する。人日の 1 日の稼働時間は `calendars.hours_per_day`（行が無ければ 4.1 の既定 8）。
+    換算後に `Numeric(10,2)` へ入らない値は 400。記録（`estimate_records`）を 1 行足し、対象の今の見積
+    （`wbs_elements.own_estimate_hours`／`activities.estimate_hours`）を換算した値にする。応答は記録・今の見積・WBS の状態・プロジェクトの総見積（RULE-EST-001）
+  - **WBS要素の対象は区分を問わない**（OQ-34 (1)）：API-WBS-003 が全ての要素の自分の見積を変えられ、5.3 の 100% ルールが上位の要素の自分の見積を使うため
+  - **WBS要素の見積を書くのは WBS の編集**（RULE-WBS-006 の EDIT。`app.services.wbs._mark_edited` を共有）：承認待ちの間は 409 `INVALID_STATE`、
+    基準化の後は DRAFT へ戻す（API-WBS-003 で自分の見積を変えたときと同じ）。**活動の見積は WBS の状態を変えない**（活動の更新 API-SCH-003 と同じ）（OQ-34 (2)）
+  - 見積の履歴（API-EST-002。project.view）：対象の記録を古い順（`entered_at`・`id`）に、`limit`・`offset`（6.1）と `total` で返す。
+    記録は対象を消しても残る（A-32）ので、**対象が無くても記録があれば返す**（`target_exists` が偽）。対象も記録も無ければ 404（OQ-34 (3)）。
+    書いた利用者の表示名（`entered_by_name`）を付けた（UI-WBS-002 の根拠の表示のため）
+  - ボトムアップの集計（API-EST-003。project.view）：RULE-EST-001 の要素ごとの値・集計の元・下位の合計・自分の見積と、活動ごとの値を返す。
+    要素は先行順（兄弟は表示順。API-WBS-001 と同じ `_preorder`）、活動は WP の先行順→WP の中の表示順。集計なので `limit`・`offset` は受けない
+  - 委託先だけで読む利用者（9.2 の注記・RULE-AUTH-001）：履歴は見える要素（自分の割当の活動の WBS の経路）と自分の割当の活動だけ（他は 404）。
+    集計は見える要素・活動だけを返し（`restricted` が真）、プロジェクトの値は見える最上位の要素の値の合計（API-WBS-001 の `project_estimate_hours` と同じ。OQ-34 (5)）
+  - 書き込みは ORM を通すので、記録の追加と今の見積の更新が変更履歴（`audit_logs`）に残る（6.1。A-37 の infra のイベント）
+- **理由:** 設計書 4.1・5.3・5.8・5.10・6.1・6.2・9 章、要求仕様書 EST-01・EST-02・EST-08。A-13・A-32 の申し送り（反映と対象の確かめはサービス層の担当）
+- **影響範囲:** `backend/app/api/estimate.py`・`backend/app/services/estimate.py`・`backend/app/schemas/estimate.py`・`backend/app/main.py`・`backend/tests/api/test_est.py`
+- **覆す場合:** 要素の対象を WP に限るなら `write_estimate` で区分を見て 422 にし、試験 `test_put_element_estimate_updates_own_estimate_and_wbs_status` 等を直す。
+  要素の見積を WBS の編集とみなさないなら `write_estimate` の `_mark_edited` を外し、試験 `test_put_element_estimate_while_pending_approval_is_409` を直す
+- **限界:** API-WBS-002・003 は `own_estimate_hours` を記録を残さずに書ける（api:WBS の範囲。OQ-34 (4)）。EST-08 の「履歴が残る」は API-EST-001 で書いた分だけ。
+  前提・参照資料の長さの上限は置いていない（4.1 に定めが無い。A-32）。試験は SQLite の TestClient だけで、PostgreSQL では流していない
+
+## A-39: 表形式の入出力（INT）の API（api:INT）の API-INT-001・002 で決めたこと
+
+- **選択:**
+  - 置き場は 2.1 の名前どおり `backend/app/api/io.py`（ルート）・`backend/app/services/io.py`（ユースケース）・`backend/app/schemas/io.py`（応答）、
+    試験は `backend/tests/api/test_int.py`。ルータは `app.main.register_routers` に足した。列・照合・検査・往復の一致は RULE-INT-001（A-34）をそのまま使う
+  - **取込のファイルは要求の本体そのもの**（`Content-Type` は `text/csv`・xlsx の型・`application/octet-stream` のどれでもよい。JSON の型は不可）。
+    `target`・`format`・`dry_run` はクエリ。multipart は python-multipart が版の固定（`backend/requirements.lock`）に無く、依存を足さずに済むため（OQ-35 (1)）。
+    空の本体は「見出しの行が無い」（`HEADER_MISMATCH`）として返す
+  - `format` は省けば `csv`、`target` は必須。どちらも 6.2 の値でなければ 400
+  - **`dry_run=true` は誤りがあっても 200**（`ok` が偽・`issues` に 6.3 の `{row, column, code, message}` の全件・`changes` は空）。
+    **`dry_run` でなく誤りがあれば何も書かずに 422 `IMPORT_INVALID`**（`details` が同じ誤りの配列。6.1 の「業務ルールの違反は 422」）。
+    通れば 200 で、書いた行（`changes`：行・CREATE／UPDATE・照合キー・変わる列）と `created`・`updated`・`unchanged` を返す（OQ-35 (2)）
+  - WBS を変える取込は RULE-WBS-006 の EDIT（承認待ちの間は `dry_run` でも 409 `INVALID_STATE`、基準化の後は DRAFT へ戻す）。変えない取込は状態を動かさない
+  - ドメインの検査に、サービス層で 3 つ足した（誤りの形は同じ）：書く行の責任者・新しく置く担当は「メンバーである有効な利用者」（API-WBS-003・API-EFF-001 と同じ。
+    今の値に現れる無効な利用者は往復のために「いる」とみなすが、新しくは置けない。`NOT_FOUND`）、0 時間の実績の行に備考は書けない（API-EFF-003 と同じ。`INVALID_VALUE`）
+  - 書き方（1 つのトランザクション）：WBS は追加（親が先。RULE-WBS-002 の `new_element_code` で採番し、ファイルの ID は仮）→ 移動（移した後の木の浅い順に
+    `move_element`。ID は変えず改番待ちを付け直す。表示順は移動先の末尾）→ 列の更新（辞書は 4 項目を置き換え）。活動は追加（WP の末尾）・更新、先行はファイルの値が
+    その活動の先行の全て（足りない依存を足し、外れた依存を消す）、担当は置き換え（`ScheduleLinks.assignments`）、希望開始日は稼働日へ寄せ（`resolve_activity_dates`）、
+    最後に日程を計算し直す（RULE-SCH-002・003）。実績工数は照合キーの行を置き換え、0 時間は行を消す
+  - **見積の値（WBS の自分の見積・活動の見積）を変えた・追加した行は、見積の記録（`estimate_records`。単位 HOUR・手法なし）を 1 行足す**（EST-08 の「見積値を変えた履歴が残る」。
+    API-EST-001 と同じ形。空にした変更は記録しない）（OQ-35 (6)）
+  - 出力の行の順：`wbs` は WBS の並び（先行順・兄弟は表示順）、`activities` は WBS の並び → WP の中の表示順、`time-entries` は作業日 → ログインID → 活動ID。
+    ファイル名は `project-<ID>-<target>.<format>`（`Content-Disposition: attachment`）。xlsx のシート名は `target`
+  - **xlsx のセルは全て文字で置く**（`=` で始まる名称・辞書も式にしない。往復で一致させる）。xlsx に置けない制御文字があれば 422 `EXPORT_UNSUPPORTED_CHARACTER`。
+    読むときは 1 枚目のシートの値（式は計算済みの値）を `cell_text` で直す。xlsx として読めなければ `FILE_UNREADABLE`
+  - 委託先だけで読む利用者（9.2 の注記）が data.export を持つときの出力は、自分の割当の活動とその WBS の経路だけ（見えない活動は先行にも実績にも出さない。RULE-AUTH-001）
+- **理由:** 設計書 1.1（openpyxl 3.1）・2.1・4.1・5.2・5.5・5.10・6.1・6.2・6.3・9 章、要求仕様書 INT-01・BR-02・EST-08・EFF-01・EFF-02。A-34・A-37・A-38
+- **影響範囲:** `backend/app/api/io.py`・`backend/app/services/io.py`・`backend/app/schemas/io.py`・`backend/app/main.py`・`backend/tests/api/test_int.py`
+- **覆す場合:** multipart にするなら python-multipart を版を固定して足し、`import_file` の `content` を `UploadFile` にして試験の `World.load` を直す。
+  誤りのある取込も 200 で返すなら `services.io._rejected` の 422 を外し、試験 `test_import_with_errors_writes_nothing` 等を直す。
+  取込で見積の記録を足さないなら `_add_estimate_record` の呼び出しを外し、試験 `test_import_wbs_creates_updates_and_moves` の記録の確かめを直す
+- **限界:** 実績工数の出力は data.export だけで他人の行も出す（6.2 の権限どおり。VIEWER は API-EFF-004 では他人の行を読めないが、出力では読める。OQ-35 (3)）。
+  委託先だけで読む利用者に data.import を許したとき、取込は見える範囲に絞らない（OQ-35 (4)）。本体の大きさの上限は置いていない（OQ-35 (5)）。
+  担当の置き換えは一括 DELETE なので変更履歴に残らない（A-37 の限界）。CSV の式の解釈（CSV インジェクション）は未対策のまま（OQ-31 (8)）。
+  試験は SQLite の TestClient だけで、PostgreSQL では流していない。画面（UI-INT-001）は ui:INT の範囲
+
+## A-40: レポート・共有（RPT）の API（api:RPT）の API-RPT-001〜004 で決めたこと
+
+- **選択:**
+  - 置き場は既存の群のファイルの名づけ（`change.py`・`estimate.py`）に合わせて `backend/app/api/report.py`（ルート）・`backend/app/services/report.py`
+    （ユースケース）・`backend/app/schemas/report.py`（入出力）、試験は `backend/tests/api/test_rpt.py`。ルータは `app.main.register_routers` に足した
+  - **会議レポート（API-RPT-001）は RULE-RPT-001（`build_meeting_report`。A-35）をそのまま呼ぶ**。値の源は API-PRG-006・009 と同じ：確定済みは
+    `progress_snapshots`・`progress_snapshot_items` の写し（`SNAPSHOT`。写しの後に消した活動の行は activity_id が空のまま渡し、今のガントに無い頂点として外れる）、
+    確定前は今の計画とその報告日の入力から確定と同じ計算（`CALCULATED`。保存しない。日程の無い活動があれば 409 `INVALID_STATE`）
+  - 上段のガントは今の計画を、**その報告日の進捗**（確定済みは写しの進捗率・実績日付、確定前は報告日の入力から RULE-PRG-001 で求めた値）で描き、基準は最新の版。
+    ガントの組み立ては API-SCH-010 と同じにするため、`services.schedule.gantt` の中身を `plan_gantt`（権限を見ない）へ切り出し、API-SCH-010・会議レポート・共有ビューの
+    3 つが使う。応答の形も `api.schedule.gantt_out` へ切り出して共有した（API-SCH-010 の応答は変えていない。`test_sch.py` で確かめた）
+  - KPI の工数は RULE-EFF-002 のプロジェクトの合計（`services.effort.load_basis` を報告日を指定して呼ぶ＝その報告日の進捗率・残工数と報告日以前の実績、最新の基準）。
+    是正措置はプロジェクトの全ての措置の今の状態（A-35・OQ-32 (2)(3)）。見積は `activities.estimate_hours`
+  - ドメインの `ReportError` は 422 `REPORT_INVALID`、日程の循環は 422 `SCHEDULE_CYCLE`
+  - 委託先だけで読む利用者（9.2 の注記）には、自分の割当の活動だけでガント・線・遅延・マイルストーンを組み立て、KPI は null（`restricted` が真）。OQ-36 (5)
+  - **共有リンク（API-RPT-002）**：本体は `scope`（GANTT／REPORT）と `expires_at`（時差つき。無い時差・今以前・他の項目は 400）。トークンは `infra.security.generate_token`
+    （256 ビット）で作り、DB には RULE-AUTH-002 の `hash_token`（SHA-256）だけを書く。トークンは 201 の応答でだけ返す。時刻は UTC で保存し、応答も UTC。OQ-36 (1)(7)
+  - **失効（API-RPT-003）**は行を消さずに `revoked_at` へ今を入れて 204。無い・他のプロジェクトのリンクは 404、既に失効させたリンクは 409 `INVALID_STATE`。OQ-36 (4)
+  - **閲覧（API-RPT-004）**は認証の依存を付けない唯一のルート。トークンのハッシュで行を引き、RULE-AUTH-002 の `verify_share_link` で判定する。
+    通らなければ 404 `NOT_FOUND`（`details` の `reason`）。`GANTT` は API-SCH-010 と同じガント（最新の進捗・最新の基準・全ての活動）、`REPORT` は 4.2 の最新の報告日の
+    会議レポート（API-RPT-001 と同じ形。報告日が無ければ null）。範囲は `ShareLinkVerdict.can_view` で選ぶ。OQ-36 (2)(3)(6)
+- **理由:** 設計書 2.1・2.4・4.1・4.2・5.1・6.1・6.2・7.4・9 章、要求仕様書 RPT-01・RPT-03・NFR-04・BR-13。既にあるルール（RULE-RPT-001・RULE-AUTH-001・002・RULE-EFF-002・
+  RULE-SCH-005）と API-PRG・API-SCH の値の源を使い、同じ計算を二重に持たない
+- **影響範囲:** `backend/app/api/report.py`・`backend/app/services/report.py`・`backend/app/schemas/report.py`・`backend/app/main.py`・
+  `backend/app/services/schedule.py`（`plan_gantt` の切り出し）・`backend/app/api/schedule.py`（`gantt_out` の切り出し）・`backend/tests/api/test_rpt.py`
+- **覆す場合:** 期限切れ・失効を 404 以外にするなら `services.report.shared_view` の `AppError` を変え、試験 `test_revoked_expired_and_unknown_links_cannot_be_viewed` を直す。
+  REPORT の共有で確定済みの報告日だけを見せるなら `_LATEST_REPORT_STATUS_ORDER` を FINALIZED だけにし、試験 `test_shared_view_shows_scope_without_login` を直す。
+  委託先に会議レポートを見せないなら `meeting_report` で 403 にし、試験 `test_meeting_report_permissions_and_errors` を直す
+- **限界:** 共有ビューの応答は API-SCH-010 と同じく担当者の表示名を含む（OQ-36 (6)）。共有リンクの一覧の API は無い（6.2 に無い）。有効期限の上限は置いていない。
+  共有の閲覧に回数の制限（総当たりの対策）は無い（トークンは 256 ビット）。確定済みのレポートでもガント・フロート・見積・EAC・是正措置は今の値（A-35 の限界）。
+  試験は SQLite の TestClient だけで、PostgreSQL では流していない。画面（UI-RPT-001・002）は ui:RPT の範囲
+
+## A-41: 進捗の画面（ui:PRG）の UI-PRG-001・002 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/prg/`（UI-PRG-001 は `StatusReportPage.tsx` と 1 活動の編集の部品 `EntryEditor.tsx`、UI-PRG-002 は `DelaysPage.tsx`）。
+    API の型と呼び出しは `frontend/src/api/prg.ts` に API-PRG-001・003・004・005・007・009 を足した（形は `backend/app/schemas/progress.py` を読んで合わせた）
+  - **UI-PRG-001 の行は API-PRG-006（イナズマ線）の行をそのまま使う**。その報告日の入力（進捗率・実績日付・残工数・遅延理由・完了見込み日）と判定・ずれが 1 回で揃うため。
+    確定済みの報告日はスナップショットの写し（SNAPSHOT）を出し、入力の部品を出さない（BR-13）
+  - 部品は `GET /api/v1/me` の権限で出し分ける（7.2）：報告日の作成・確定は status_report.manage、進捗の入力と算定項目は progress.enter_own か enter_all、
+    算定方式は schedule.edit。enter_own だけの人には「書けるのは自分の割当の活動の進捗だけ」と出し、割当の判定はサーバに任せる（403 の文言を出す）
+  - 進捗の入力（API-PRG-003）は PUT なので、入力欄は今の値で埋めて全項目を送る。進捗率は直接入力（DIRECT）の活動だけが送り、他の方式は空で送る（欄を無効にする）。
+    画面で止めるのは送れない形（進捗率が 0〜100 の外・残工数が負・実績開始日より前の実績終了日（PRG-02 の受入基準））だけ。空欄の残工数は自動（BR-10）で、
+    一覧は「自動」と「N 時間（入力）」で区別する（EFF-06）。進捗率が空の行は「未算定（入力が要る）」と出す（5.6）
+  - 算定方式（API-PRG-005）の選択肢は BR-06 の 7 つと「プロジェクトの既定に従う」（null）。今の値は行の効いている方式で、変えていなければ送れない
+  - 算定項目（API-PRG-004）の入力欄は、効いている方式が項目を数える方式（成果物・承認済み作業・検証項目・重み付きマイルストーン）の活動にだけ出す。
+    読む API が無い（OQ-37 (1)）ので空から始め、置き換えで既存の項目が消える旨を注記する。保存の応答の項目は id 付きで入力欄に残す
+  - 確定（API-PRG-007）は戻せないので、画面の中で確認の段（「確定する」「やめる」）を 1 つ挟む（`window.confirm` は使わない）
+  - 報告日の一覧は新しい順。作った報告日へはそのまま移る。報告日の ID の形は `parseProjectId` と同じ（正の整数）で、正しくなければ API を呼ばない
+  - UI-PRG-002 はサーバの順（ずれの小さい順＝遅れの大きい順）をそのまま出す。表は 1 行 1 活動（ずれ・進捗率・遅延理由・完了見込み日・見込みの終了・クリティカルか・
+    影響するマイルストーン）、その下に活動ごとの影響（後続・マイルストーン・プロジェクトの終了）と全体の影響（5.7 の 4）。終わりのずれは「+N 稼働日」、0 は「ずれなし」。
+    委託先に返らない値（プロジェクトの終了のずれ）は出さない。是正措置（UI-CHG-002）へのリンクを置く（7.2）
+- **理由:** 設計書 6.2（API-PRG-001〜009）・7.1・7.2・5.6・5.7・9 章、要求仕様書 PRG-01・02・03・05・17・19、EFF-06、BR-06・BR-10・BR-13
+- **影響範囲:** `frontend/src/pages/prg/`・`frontend/src/api/prg.ts`・`frontend/src/App.tsx`・`frontend/src/App.test.tsx`・`frontend/src/test/prgFixtures.ts`
+- **覆す場合:** 算定項目を読む API ができたら `EntryEditor.tsx` の `ProgressItemsEditor` の初期値をその応答にし、注記を外す。確定の確認の段は `StatusReportPage.tsx` の `confirming`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバと繋いでは確かめていない。見た目（CSS）は付けていない。最初の報告日を作る入口は無い（OQ-37 (2)）。
+  一覧は報告日の全ての行を 1 つの表に出す（活動 2,000 件の表示の速さは計っていない）。是正措置（UI-CHG-002）の画面は ui:CHG の範囲で、できるまでリンク先は「ページが見つかりません」
+
+## A-42: 変更管理の画面（ui:CHG）の UI-CHG-001〜003 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/chg/`（UI-CHG-001 は `ChangeRequestsPage.tsx` と起票・手直しの `ChangeRequestForm.tsx`・変更内容の `OperationEditor.tsx`・
+    影響分析の `ImpactView.tsx`、UI-CHG-002 は `CorrectiveActionsPage.tsx` と登録の `CorrectiveActionForm.tsx`、UI-CHG-003 は `AuditLogsPage.tsx`）。
+    API の型と呼び出しは `frontend/src/api/chg.ts`（API-CHG-001〜010。形は `backend/app/schemas/change.py` と `backend/app/domain/change.py` の `to_json` に合わせた）
+  - 部品は `GET /api/v1/me` の権限と 5.10 の状態で出し分ける（7.2）：起票・手直し・提出は change.create かつ DRAFT、反映は change.apply かつ APPROVED、
+    影響分析は反映済み・却下以外（サーバが 409 を返す状態。A-37）。承認・却下は UI-CMN-003 で行い、提出済みの変更要求からは承認待ち一覧へ案内する。
+    取り下げ（5.10 の SUBMITTED → DRAFT）は呼ぶ API が無いので部品を置かない（OQ-38 (1)）
+  - 変更内容（5.9）は JSON の手書きではなく、操作を 1 件ずつ組み立てて足す（`operations.ts` の `buildOperation`）。画面が止めるのは必須の欄の空と数の形
+    （期間・活動の ID は整数、見積は 0 以上の数）だけで、参照の解決・業務ルールはサーバ（RULE-CHG-001）の 400・422 の文言を出す。
+    `update_*` の `fields` は入力した項目だけを入れる（空欄は「変えない」。値を空に戻す操作は画面からは作れない）
+  - 影響分析は「試算（本計画は変えない）」と「提出のときの影響分析」（`change_requests.impact`）を見出しで区別する。総工数の差は前後の値（小数 2 桁の文字列）から出す
+  - 是正措置：登録の紐付けの選択肢は WBS の木（API-WBS-001）・活動（API-SCH-001）・報告日（API-PRG-002）・メンバー（API-PRJ-009）を、action.manage を持つ人にだけ読む。
+    状態の選択肢は RULE-CHG-005 の遷移（今の状態のままと、次に進める・戻せる状態）だけを出す。更新は状態・効果・担当・期限を全て送る（PATCH。A-37 の更新できる項目）
+  - 変更履歴：検索の条件は期間（両端を含む）・変更者（メンバーから選ぶ）・対象の種類（表の名前）・対象の ID・WBS ID。期間が逆・対象の ID が整数でないときは送らない。
+    更新は変わった項目だけ、追加は後の値、削除は前の値を出す（RULE-CHG-006 の形）。変更・削除の部品は置かない（4.2・NFR-05）。
+    audit.view が無い人にはサーバの 403 の文言を出す（部品を隠すのではなく、読む画面そのものなので）
+  - 作成者・担当・変更者の名前はメンバーの一覧（API-PRJ-009）から引き、居ない人は `#ID` で出す
+- **理由:** 設計書 5.9・5.10・6.2（API-CHG-001〜010）・7.1・7.2・9 章、要求仕様書 CHG-01〜04・06・09、NFR-05
+- **影響範囲:** `frontend/src/pages/chg/`・`frontend/src/api/chg.ts`・`frontend/src/App.tsx`・`frontend/src/App.test.tsx`・`frontend/src/test/chgFixtures.ts`
+- **覆す場合:** 取り下げの API ができたら `ChangeRequestsPage.tsx` の SUBMITTED の部品に足す。依存の端の解釈は `operations.ts` の `activityEndpoint`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバと繋いでは確かめていない。見た目（CSS）は付けていない。
+  紐付けの選択肢の活動・報告日は先頭の 1000 件まで（OQ-38 (3)）。変更内容の操作は足した順に並び、並べ替えの部品は無い（外して足し直す）
+
+## A-43: 工数の画面（ui:EFF）の UI-EFF-001・002 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/eff/`（UI-EFF-001 は `TimesheetPage.tsx`、UI-EFF-002 は `EffortPage.tsx`、週・入力の解釈・呼び名の小さな計算は `labels.ts`）。
+    API の型と呼び出しは `frontend/src/api/eff.ts` に API-EFF-002〜007 を足した（形は `backend/app/schemas/effort.py` に合わせた）。
+    ヘッダに「タイムシート」への行き先を足した（7.2 のログイン → タイムシート）。工数集計への行き先はプロジェクト一覧に既にある
+  - タイムシート：表示する週は問い合わせの `?week=YYYY-MM-DD`（その日を含む週）。無い・読めないときは端末の今日の週。週は月曜始まり（OQ-39 (2)）。
+    行は /me で effort.enter_own を持つプロジェクトごとの自分の割当（API-EFF-002 の `user_id`＝自分。OQ-39 (1)）を、プロジェクトの順→割当の順に並べ、
+    割当に無いが実績のある活動は読むだけの行として末尾に足す（OQ-39 (4)）。実績は API-EFF-004 で自分の行をその週の範囲で読む
+  - 書き込みは変えたマスだけを API-EFF-003 にまとめて送る（空は 0＝行を消す。同じ値に戻したマスは送らない）。今のメモは時間を変えても送り返して残し、
+    0 にしたマスはメモを送らない（0 のマスにメモは書けない。OQ-39 (3)）。応答の行で、送った日の行を置き換える
+  - 画面の検査は入力の補助で、送る前に止めるのは「0 以上・小数 2 桁までの数でない」マスと「1 日の合計が 24 時間を超える」日（ちょうど 24 は通す。
+    EFF-02・RULE-EFF-005）。正の検査はサーバで、拒まれたら（確定した報告日より前 409・割当でない 403・24 時間超 422 など）文言を出して入力を残す。
+    合計は百分の 1 時間の整数で足す（小数の誤差を出さない）。保存していない入力がある間は週を移る部品を無効にする（取り消すか保存する）
+  - 工数の集計と差異：軸（WBS・担当者・組織・週・月）・報告日（API-PRG-002。新しい順）・基準（API-SCH-012。版の新しい順）を選び、多軸集計（API-EFF-005）は
+    計画・基準・実績・ETC・EAC と表示用の EAC−基準を別の列に、合計の行を末尾に出す。WBS の軸は親をたどった深さで字下げする。
+    差異の分析（API-EFF-006）は軸に依らないので、報告日・基準を変えたときだけ読み直す。基準が無い 409 は差異の欄にだけ出し、集計は出す
+  - 差異の理由（API-EFF-007）は variance.note を持つ人にだけ部品を出し、そのときだけ是正措置の一覧（API-CHG-008）を紐付けの選択肢として読む。
+    理由は選んでいる報告日（選んでいなければ「報告日を指定しない分析」）の理由として書く（サーバが要素・報告日ごとに 1 行を上書きする）
+- **理由:** 設計書 6.2（API-EFF-002〜007）・7.1・7.2・9 章、要求仕様書 EFF-02・EFF-07〜10、BR-11
+- **影響範囲:** `frontend/src/pages/eff/`・`frontend/src/api/eff.ts`・`frontend/src/App.tsx`・`frontend/src/App.test.tsx`・`frontend/src/test/effFixtures.ts`
+- **覆す場合:** プロジェクトをまたぐ割当の API ができたら `TimesheetPage.tsx` の割当の読み込みを置き換える。週の始まりは `labels.ts` の `mondayOf`
+- **限界:** 試験は fetch を差し替えた画面の試験だけで、実際のサーバと繋いでは確かめていない。見た目（CSS）は付けていない。
+  一覧は先頭の 1000 件まで（OQ-39 (5)）。タイムシートは 1 週ずつで、月の一覧や前週の写しの部品は無い
+
+## A-44: 入出力の画面（ui:INT）の UI-INT-001 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/int/`（`ImportExportPage.tsx`。呼び名・6.3 の列の見せ方・拡張子からの形式の推定は `labels.ts`）。
+    API の型と呼び出しは `frontend/src/api/int.ts`（API-INT-001・002。形は `backend/app/schemas/io.py`・`backend/app/api/io.py` に合わせた）。
+    ファイルの受け取り・送りは JSON の `apiFetch` と同じエラーの扱いを `frontend/src/api/client.ts` の `send` にまとめ、`apiDownload`・`apiUpload` を足した
+    （`apiFetch` の振る舞いは変えていない）。保存は `frontend/src/lib/download.ts` の `saveBlob`（`<a download>`）。プロジェクト一覧からの行き先は既にある
+  - 出力・取込の部品は、/me のそのプロジェクトの権限 data.export・data.import を持つときだけ出す（7.2）。両方無ければその旨を出す
+  - 取込は「検査する」（`dry_run=true`。誤りがあっても 200 で `ok` が偽）と「取り込む」（`dry_run=false`）の 2 つのボタン。
+    取り込む前に検査を必須にはしない（サーバが全行を先に検査し、誤りが 1 件でもあれば何も書かないため。6.3）
+  - 誤りは `{行, 列, コード, メッセージ}` の表に出す。422 `IMPORT_INVALID` のときは `details` を同じ表に出し、alert には文言だけを出す（箇条書きと重ねない）
+  - 形式は利用者が選び、ファイルを選んだときに拡張子（.csv・.xlsx。大文字も可）で選び直す。送る本体の型は csv が `text/csv`、xlsx が xlsx の型
+    （サーバの試験 `backend/tests/api/test_int.py` と同じ）
+  - 対象・形式・ファイルを変えたら、前の検査・取込の結果を消す（別のファイルの結果を見せない）。ファイル名はサーバの Content-Disposition、
+    無ければサーバと同じ形 `project-<ID>-<target>.<format>`
+  - 6.3 の列の並びと照合キーを画面に出す（見せるだけ。正の定義はサーバの `backend/app/domain/tabular.py`）
+- **理由:** 設計書 6.2（API-INT-001・002）・6.3・7.1・7.2・9 章、要求仕様書 INT-01
+- **影響範囲:** `frontend/src/pages/int/`・`frontend/src/api/int.ts`・`frontend/src/api/client.ts`・`frontend/src/lib/download.ts`・`frontend/src/App.tsx`・
+  `frontend/src/test/mockApi.ts`（送った本体そのものを `rawBody` に残す）・`frontend/src/test/download.ts`
+- **覆す場合:** 取込の前に検査を必須にするなら `ImportExportPage.tsx` の `ImportSection` で、検査を通った同じファイル・対象・形式のときだけ「取り込む」を有効にする
+- **限界:** 試験は fetch・`URL.createObjectURL`・`<a>` の click を差し替えた画面の試験だけで、実際のサーバ・ブラウザの保存とは繋いでいない。
+  列の定義の表示はサーバの定義と手で揃えたもので、機械で突き合わせていない。見た目（CSS）は付けていない
+
+## A-45: レポート・共有の画面（ui:RPT）の UI-RPT-001・002 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/rpt/`（UI-RPT-001 は `MeetingReportPage.tsx`、UI-RPT-002 は `SharedViewPage.tsx`、7.4 の本体は両方が使う `MeetingReportView.tsx`、
+    共有リンクの部品は `ShareLinkPanel.tsx`、呼び名・書式・印刷の CSS は `labels.ts`）。API の型と呼び出しは `frontend/src/api/rpt.ts`（API-RPT-001〜004。
+    形は `backend/app/schemas/report.py` に合わせた）。ルートは `frontend/src/App.tsx`：UI-RPT-001 はログインが要り、UI-RPT-002 は `RequireAuth` で囲まない（6.1）
+  - **7.4 の欄の値と並びはサーバ（RULE-RPT-001）のまま出す**。画面で数え直さない：遅延一覧はサーバの順（遅れの大きい順）、完了見込みは「入力」「計算」を付ける、
+    マイルストーンのずれは UI-PRG-002 と同じ「+N 稼働日」／「ずれなし」、KPI は求められない値（null）をその理由とともに出す。値の源（写し／計算値）を見出しの下に出す
+  - 上段のガントは UI-SCH-002 の描画（`frontend/src/components/gantt/GanttChart.tsx`）を使い、2 つの任意の引数を足した：`fixedRange`（横軸を報告日の前後 4 週に固定し、
+    範囲の外へ出るバー・線を切り取る）と `reportLightning`（API-RPT-001 の頂点は行の番号で今のガントの行へ当てる）。どちらも渡さなければ今までの描画のまま（UI-SCH-002 の試験で確かめた）
+  - 会議レポートは紙の 1 枚に載せるため、ガントの縦の仮想化をせずに全ての行を描く（行は絞らない。A-35）。表示の単位（日・週・月）は選べる（既定は日）
+  - 印刷用の CSS は `@page { size: A3 landscape; }` を含む `<style>` を本体に置く（CSS の仕組みが画面に無いため。本体を出している間だけ効く）。
+    印刷ではヘッダ・行き先・設定・共有リンクを出さず、ガントを紙の幅に縮め、下段を 3 列に並べる。「印刷する」はブラウザの印刷（`window.print`）を呼ぶ
+  - **共有リンクの作成・失効は UI-RPT-001 の下に置き、share.manage を持つ人にだけ出す**（7.2。OQ-40 (1)）。有効期限は端末の時刻の日時を UTC の時差つきの時刻にして送り、
+    既定値は置かない（OQ-40 (2)）。トークンは作った応答でだけ返るので、URL（`<origin>/shared/<token>`）は作ったときにだけ見せる。失効は戻せないので確認の段を 1 つ挟む。
+    一覧の API が無いので、失効させられるのはこの画面で作ったリンクだけ（OQ-36 (7)・OQ-40 (3)）
+  - 共有ビューはリンクの範囲（GANTT／REPORT）だけを読むだけで見せ、書き込みの部品を置かない。閲覧できないリンクはサーバの 404 の文言に、`details` の `reason`
+    （NOT_FOUND・REVOKED・EXPIRED）の説明を添えて出す
+  - 7.2 の遷移（進捗入力 → 会議レポート）のため、UI-PRG-001 の行き先に UI-RPT-001 へのリンクを足した
+- **理由:** 設計書 6.1・6.2（API-RPT-001〜004）・7.1・7.2・7.3・7.4・9 章、要求仕様書 RPT-01・RPT-03。既にある画面の部品（ガントの描画・遅延分析の書式・/me の権限）を使い、同じ描画を二重に持たない
+- **影響範囲:** `frontend/src/pages/rpt/`・`frontend/src/api/rpt.ts`・`frontend/src/components/gantt/GanttChart.tsx`・`frontend/src/App.tsx`・`frontend/src/App.test.tsx`・
+  `frontend/src/pages/prg/StatusReportPage.tsx`（行き先のリンク）・`frontend/src/test/rptFixtures.ts`
+- **覆す場合:** 共有リンクの部品を別の画面へ移すなら `ShareLinkPanel` をその画面に置き、`MeetingReportPage.tsx` から外す。上段の行を範囲で絞るなら、サーバ（A-35）に絞った行を足してから
+  `MeetingReportView.tsx` の `GanttChart` に渡す行を変える。有効期限に既定値を置くなら `ShareLinkPanel.tsx` の `expiresAt` の初期値（本番値は要求元が決める）
+- **限界:** 試験は fetch・`window.print` を差し替えた画面の試験だけで、実際のサーバ・ブラウザの印刷とは繋いでいない（A3 横の 1 枚に収まるかは見ていない。行が多いと収まらない。OQ-40 (5)）。
+  見た目（印刷以外の CSS）は付けていない。前に作った共有リンクを画面から失効させる口は無い（OQ-40 (3)）
+
+
+## A-46: WBS の画面（ui:WBS）の UI-WBS-001〜004 で決めたこと
+
+- **選択:**
+  - 置き場は `frontend/src/pages/wbs/`（UI-WBS-001 は `WbsPage.tsx`＋要素の編集 `ElementEditor.tsx`・採番と改番 `NumberingPanel.tsx`、
+    UI-WBS-002 は `WbsElementPage.tsx`＋横断照会 `TracePanel.tsx`、UI-WBS-003 は `WbsReviewPage.tsx`＋`ReviewPanel.tsx`・`ScopeBaselinesPanel.tsx`、
+    UI-WBS-004 は `ResponsibilityPage.tsx`、見積の記入は UI-WBS-001・002 が共有する `EstimateForm.tsx`、呼び名は `labels.ts`）。
+    API の型と呼び出しは `frontend/src/api/wbs.ts`（API-WBS-001〜023 のうち画面が呼ぶもの）と `frontend/src/api/est.ts`（API-EST-001・002）。
+    形は `backend/app/schemas/wbs.py`・`estimate.py` を読んで合わせた。木の型（`WbsTree`）に `numbering_rule`・`validation` を足した（サーバは前から返している）
+  - **ツリー図とアウトラインは同じ木（API-WBS-001）を 2 つの表示で切り替える**（WBS-04）。アウトラインは先行順の表（深さで字下げ）、ツリー図は入れ子の一覧（`role="tree"`）。
+    どちらで選んでも同じ編集の部品が開く（「どちらからでも編集できる」）。集計値はサーバの値（RULE-EST-001）をそのまま出し、画面で数え直さない
+  - 要素の変更（API-WBS-003）は**変えた項目だけ**を送る。移動（API-WBS-004）の移動先に自分・配下・WP を出さない（サーバも 422 で拒む）。位置は画面で 1 から数え、API へは 0 から送る。
+    削除（API-WBS-005）は `window.confirm` で確かめ、子を持つ要素は配下の件数を示す（WBS-01）。追加（API-WBS-002）の親の選択肢に WP を出さない（WBS-02）
+  - **見積は API-EST-001 で書く**（人時・人日、手法・前提・参照資料。EST-08 の履歴が残る）。API-WBS-003 の `own_estimate_hours` は画面から送らない（OQ-41 (4)）。
+    入力は 0 以上・小数 2 桁までを画面でも止める（EST-01）
+  - 採番規則（API-WBS-006）を変えても ID は変わらず、改番（API-WBS-007）で変わることを画面に書き、改番の結果（旧 ID → 新 ID）と新旧対応の一覧（API-WBS-008）を出す
+  - UI-WBS-002：辞書は WBS-11 の 8 項目（＋区分）を並べ、WBS ID・名称・責任者・見積は要素の値（API-WBS-009）。WP で成果物か完了条件が空なら「承認を申請できない」と示す（WBS-13）。
+    見積の履歴（API-EST-002）は古い順。記録の無い要素（404）は「記録はまだありません」にする。横断照会（API-WBS-023）は開いた要素の今の ID で自動で照会し、旧 ID でも照会できる。
+    変更要求・是正措置は件数と ID を出して一覧の画面へ送る（個別の画面のルートが 7.1 に無い）
+  - **スコープ項目の紐付け（API-WBS-013）は、今の紐付けを読む API が無いので、選んだ項目での丸ごとの置き換えであることを画面に書く**（OQ-41 (2)）
+  - UI-WBS-003：**開いているレビューを URL の `?review=<ID>` で持つ**（レビューの一覧の API が無い。OQ-41 (1)）。始める（wbs.edit）・指摘を書く（wbs.review）・
+    指摘の状態と対応を変える（wbs.edit。閉じたレビューでは出さない）を権限で出し分ける（9.2・7.2）。
+    承認の申請（API-WBS-018）が 422 `WBS_NOT_READY` なら `details` の `{condition, count}` を前提ごとの件数で出す。
+    判断（API-WBS-019）は承認待ち一覧（API-WBS-020）からこのプロジェクトの WBS の申請だけを出し、wbs.approve を持つ人にだけ判断の部品を出す。差戻しの呼び名は A-25 と同じ「差戻し」。
+    判断の後と失敗（403 自分の申請・409 判断済み）の後は読み直す。100% ルールの許容幅は割合なので百分率で出す
+  - UI-WBS-004：表の列はサーバの順（メンバーを加えた順、メンバー外は後ろに「（メンバー外）」）、マスは CSV（A-18）と同じ言い方（「責任者」「担当 N 人時」「責任者・担当 N 人時」か空）。
+    CSV は API-WBS-011 の `format=csv` をそのまま保存する（画面で作らない）。責任者の割当は UI-WBS-001 で行い、この画面から行き先を出す
+- **理由:** 設計書 6.2（API-WBS-001〜023・API-EST-001・002・API-PRJ-005・009）・7.1・7.2・5.2・5.3・5.10・9 章、要求仕様書 WBS-01・02・04〜08・10・11・13・16・20〜22、EST-01・02・08、PRJ-02
+- **影響範囲:** `frontend/src/pages/wbs/`・`frontend/src/api/wbs.ts`・`frontend/src/api/est.ts`・`frontend/src/App.tsx`・`frontend/src/App.test.tsx`・`frontend/src/test/wbsFixtures.ts`
+- **覆す場合:** レビュー・紐付けを読む API が 6.2 に足されたら、`ReviewPanel.tsx` の番号で開く部品を一覧に、`WbsElementPage.tsx` の紐付けの初期値を読んだ値に替える。
+  ツリー図を箱と線の図にするなら `WbsPage.tsx` の `TreeBranch` を描き替える（`buildTree` はそのまま使える）。見積を API-WBS-003 で書くなら `ElementEditor.tsx` の `EstimateForm` を外す
+- **限界:** 試験は fetch・`window.confirm` を差し替えた画面の試験だけで、実際のサーバとは繋いでいない。見た目（CSS）は付けていない（ツリー図は入れ子の一覧のまま）。
+  前に始めたレビューを開くには番号が要り、今の紐付けは画面に出ない（OQ-41）。木の要素が多いときの描画の速さは計っていない（仮想化していない）

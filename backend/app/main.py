@@ -21,7 +21,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings, get_settings
 from app.errors import AppError
+from app.infra.audit_listener import register_audit_listener
 from app.infra.db import create_db_engine, create_session_factory
+from app.services.change import ChangeRequestStateMachine
 from app.services.effort import CorrectiveActionsTable, EffortLinks, eac_by_element
 from app.services.progress import ComputedEtcEffort, ProgressLinks
 from app.services.project_access import AssignmentsTable, ProjectMembersTable
@@ -30,7 +32,6 @@ from app.services.schedule import AssignmentsStore, ScheduleCalculator, Schedule
 from app.services.users import ensure_initial_admin
 from app.services.wbs import (
     ActivitiesTable,
-    ChangeRequestTransitionNotWired,
     CrossGroupReaders,
     change_requests_table,
     corrective_actions_table,
@@ -105,16 +106,20 @@ def _unhandled_error_handler(_request: Request, _exc: Exception) -> JSONResponse
 
 def register_routers(api: APIRouter) -> None:
     """群ごとのルータを ``/api/v1`` の下に登録する。群のルータを足したらここに 1 行足す。"""
-    from app.api import auth, effort, health, progress, projects, schedule, users, wbs
+    from app.api import auth, change, effort, estimate, health, io, progress, projects, report, schedule, users, wbs
 
     api.include_router(health.router)
     api.include_router(auth.router)
     api.include_router(users.router)
     api.include_router(projects.router)
     api.include_router(wbs.router)
+    api.include_router(estimate.router)
     api.include_router(schedule.router)
     api.include_router(progress.router)
     api.include_router(effort.router)
+    api.include_router(change.router)
+    api.include_router(io.router)
+    api.include_router(report.router)
 
 
 @asynccontextmanager
@@ -138,6 +143,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
+    # 書き込みは全て変更履歴に残す（6.1・NFR-05。RULE-CHG-006 を infra の after_flush のイベントが呼ぶ。A-37）
+    register_audit_listener(app.state.session_factory)
     # プロジェクトの有無とメンバーを読む口（app.services.project_access。docs/decisions/ASSUMPTIONS.md A-10・A-11）。
     # 割当の活動は assignments（DB-EFF-001）を読む（db:EFF で差し替えた。A-27）
     app.state.project_access = ProjectMembersTable(assignments=AssignmentsTable())
@@ -156,9 +163,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                               estimate_records=estimate_records_table,
                                               change_requests=change_requests_table,
                                               corrective_actions=corrective_actions_table, eac_hours=eac_by_element)
-    # 変更要求の承認申請への判断（API-WBS-019）を変更要求へ反映する口（A-18）。表はある（db:CHG）が、状態遷移（RULE-CHG-003）を
-    # 通す実装が無いので止める口（A-31）。api:CHG のスコープが差し替える
-    app.state.change_request_approvals = ChangeRequestTransitionNotWired()
+    # 変更要求の承認申請への判断（API-WBS-019）を変更要求へ反映する口（A-18）。RULE-CHG-003 で SUBMITTED → APPROVED／REJECTED
+    # を動かす実装（api:CHG で ChangeRequestTransitionNotWired から差し替えた。A-37）
+    app.state.change_request_approvals = ChangeRequestStateMachine()
     # スケジュールの API が読み書きする別の群の表（割当・最新の進捗。app.services.schedule。A-21）。
     # 割当は表を読み書きする（db:EFF で差し替えた。A-27）。最新の進捗は進捗の表を読む（db:PRG で差し替えた。A-22）
     app.state.schedule_links = ScheduleLinks(assignments=assignments, latest_progress=progress_entries_latest)

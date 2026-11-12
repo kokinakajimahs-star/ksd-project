@@ -855,6 +855,23 @@ def gantt(
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
     plan = load_plan(session, project_id)
+    visible = _visible_activity_ids(session, access, actor, project_id, table, plan.activities)
+    progress = links.latest_progress(session, project_id)
+    chart, baseline = plan_gantt(session, links, plan, visible=visible, progress=progress, baseline_id=baseline_id)
+    return GanttView(chart=chart, project_start=plan.project.start_date, baseline=baseline,
+                     report_date=progress.report_date, restricted=visible is not None)
+
+
+def plan_gantt(
+    session: Session, links: ScheduleLinks, plan: Plan, *, visible: frozenset[int] | None, progress: LatestProgress,
+    baseline_id: int | None = None,
+) -> tuple[GanttChart, ScheduleBaseline | None]:
+    """計画のガント（RULE-SCH-005）と基準のバーを取った版（権限は呼び手が確かめる）。
+
+    ``visible`` は見せる活動（``None`` は全て）。実績のバー・進捗率は ``progress``（その報告日まで描く）。
+    基準は ``baseline_id`` の版（省けば最新の版。版が無ければ基準のバーは無い）。無い版・他のプロジェクトの版は 404。
+    """
+    project_id = plan.project.id
     baselines = _baselines_of(session, project_id)
     try:
         chosen = select_baseline([BaselineVersion(id=b.id, version=b.version) for b in baselines], baseline_id)
@@ -867,8 +884,6 @@ def gantt(
             if item.activity_id is not None:
                 bars[item.activity_id] = BaselineBarInput(item.start_date, item.finish_date, item.is_milestone)
 
-    visible = _visible_activity_ids(session, access, actor, project_id, table, plan.activities)
-    progress = links.latest_progress(session, project_id)
     assignees = _assignees_by_activity(session, links, project_id)
     activities = [
         GanttActivity(
@@ -900,8 +915,7 @@ def gantt(
         baseline=bars if baseline is not None else None,
         report_date=progress.report_date,
     )
-    return GanttView(chart=chart, project_start=plan.project.start_date, baseline=baseline,
-                     report_date=progress.report_date, restricted=visible is not None)
+    return chart, baseline
 
 
 # ---------------------------------------------------------------------------

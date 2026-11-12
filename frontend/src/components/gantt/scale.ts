@@ -1,0 +1,199 @@
+// ガントの座標の計算（設計書 7.3）。横軸は稼働日の軸ではなく暦日で描く。
+// サーバが返す暦日上の座標（日付＋その日の中の割合）をそのまま x にする（画面で稼働日を数え直さない）
+import type { Judgement } from "../../api/prg";
+import type { CalendarPoint, Gantt } from "../../api/sch";
+
+/** 表示の単位。単位は 1 日あたりの横幅だけを変える（7.3） */
+export type GanttUnit = "day" | "week" | "month";
+
+export const DAY_WIDTH: Record<GanttUnit, number> = { day: 24, week: 6, month: 2 };
+
+export const UNIT_LABELS: Record<GanttUnit, string> = { day: "日", week: "週", month: "月" };
+
+/** 行の高さは一定（7.3） */
+export const ROW_HEIGHT = 28;
+export const HEADER_HEIGHT = 32;
+export const LABEL_WIDTH = 280;
+
+const MS_PER_DAY = 86_400_000;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** YYYY-MM-DD を UTC の 0 時の時刻（ミリ秒）にする。形が違えば例外 */
+export function parseIsoDate(value: string): number {
+  const match = ISO_DATE.exec(value);
+  if (match === null) {
+    throw new Error(`日付の形が違う: ${value}`);
+  }
+  return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function formatIsoDate(time: number): string {
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+/** from から to までの暦日の数（to が前なら負） */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((parseIsoDate(to) - parseIsoDate(from)) / MS_PER_DAY);
+}
+
+export function addDays(value: string, days: number): string {
+  return formatIsoDate(parseIsoDate(value) + days * MS_PER_DAY);
+}
+
+/** 暦日 date の始まり（0 時）の x（描画域の左端が rangeStart の 0 時） */
+export function xOfDate(rangeStart: string, date: string, dayWidth: number): number {
+  return daysBetween(rangeStart, date) * dayWidth;
+}
+
+/** 暦日上の座標（日付＋その日の中の割合）の x */
+export function xOfPoint(rangeStart: string, point: CalendarPoint, dayWidth: number): number {
+  return (daysBetween(rangeStart, point.date) + point.fraction) * dayWidth;
+}
+
+export interface DateRange {
+  /** 描く最初の暦日 */
+  start: string;
+  /** 描く最後の暦日（この日を含む） */
+  end: string;
+}
+
+/** 描く暦日の範囲：サーバの範囲に、報告日線・イナズマ線の頂点などの日付（extraDates）を足して広げる。活動が無ければ null */
+export function chartRange(gantt: Pick<Gantt, "range_start" | "range_end">, extraDates: string[]): DateRange | null {
+  const dates = [gantt.range_start, gantt.range_end, ...extraDates].filter((d): d is string => d !== null);
+  if (dates.length === 0 || gantt.range_start === null) {
+    return null;
+  }
+  let start = dates[0]!;
+  let end = dates[0]!;
+  for (const d of dates) {
+    if (parseIsoDate(d) < parseIsoDate(start)) {
+      start = d;
+    }
+    if (parseIsoDate(d) > parseIsoDate(end)) {
+      end = d;
+    }
+  }
+  return { start, end };
+}
+
+/** 範囲を描く幅（最後の日を含む） */
+export function rangeWidth(range: DateRange, dayWidth: number): number {
+  return (daysBetween(range.start, range.end) + 1) * dayWidth;
+}
+
+export interface RowWindow {
+  /** 描く最初の行の番号（0 始まり） */
+  first: number;
+  /** 描く最後の行の番号（この行を含む。行が無ければ first − 1） */
+  last: number;
+}
+
+/** 見えている行（縦方向の仮想化。7.3・NFR-02）。前後に overscan 行ずつ余分に描く */
+export function visibleRows(
+  scrollTop: number,
+  viewportHeight: number,
+  rowCount: number,
+  rowHeight: number,
+  overscan = 5,
+): RowWindow {
+  if (rowCount <= 0) {
+    return { first: 0, last: -1 };
+  }
+  const top = Math.max(0, scrollTop);
+  const first = Math.max(0, Math.floor(top / rowHeight) - overscan);
+  const last = Math.min(rowCount - 1, Math.ceil((top + Math.max(0, viewportHeight)) / rowHeight) + overscan);
+  return { first, last: Math.max(first - 1, last) };
+}
+
+/** 判定の上で数える値（設計書 5.6：完了・未着手（予定内）は予定どおりに数える） */
+export function countedAs(judgement: Judgement): Judgement {
+  return judgement === "COMPLETED" || judgement === "NOT_STARTED" ? "ON_SCHEDULE" : judgement;
+}
+
+/** イナズマ線の頂点の色（7.3：遅れ＝赤、前倒し＝青、予定どおり＝緑、未算定＝灰） */
+export function judgementColor(judgement: Judgement): string {
+  switch (countedAs(judgement)) {
+    case "BEHIND":
+      return "#d32f2f";
+    case "AHEAD":
+      return "#1976d2";
+    case "NOT_COMPUTED":
+      return "#9e9e9e";
+    default:
+      return "#388e3c";
+  }
+}
+
+export const JUDGEMENT_LABELS: Record<Judgement, string> = {
+  COMPLETED: "完了",
+  NOT_STARTED: "未着手（予定内）",
+  BEHIND: "遅れ",
+  AHEAD: "前倒し",
+  ON_SCHEDULE: "予定どおり",
+  NOT_COMPUTED: "未算定",
+};
+
+/** 過去の線の種類（7.3 の ⑧：選んだ報告日ごとに線の種類を変える）。style_index の順に繰り返す */
+export const PAST_LINE_DASHES = ["6 3", "2 3", "10 3 2 3", "1 5", "12 4"] as const;
+
+export function pastLineDash(styleIndex: number): string {
+  const n = PAST_LINE_DASHES.length;
+  return PAST_LINE_DASHES[((styleIndex % n) + n) % n]!;
+}
+
+export interface Tick {
+  date: string;
+  label: string;
+}
+
+/** 目盛り：日は毎日（月の初日と最初の日は 月/日）、週は月曜（と最初の日）、月は 1 日（と最初の日） */
+export function ticks(range: DateRange, unit: GanttUnit): Tick[] {
+  const result: Tick[] = [];
+  const count = daysBetween(range.start, range.end);
+  for (let i = 0; i <= count; i += 1) {
+    const date = addDays(range.start, i);
+    const d = new Date(parseIsoDate(date));
+    const day = d.getUTCDate();
+    const month = d.getUTCMonth() + 1;
+    if (unit === "day") {
+      result.push({ date, label: i === 0 || day === 1 ? `${month}/${day}` : String(day) });
+    } else if (unit === "week") {
+      if (i === 0 || d.getUTCDay() === 1) {
+        result.push({ date, label: `${month}/${day}` });
+      }
+    } else if (i === 0 || day === 1) {
+      result.push({ date, label: `${d.getUTCFullYear()}-${String(month).padStart(2, "0")}` });
+    }
+  }
+  return result;
+}
+
+/** 折れ線の頂点：行の番号（描く順の位置）と x */
+export interface LineVertex {
+  row: number;
+  x: number;
+}
+
+/**
+ * イナズマ線の折れ線（7.3 の ⑦・PRG-12）。報告日線の上端から始め、行の順に頂点を結び、報告日線の下端で終える。
+ * y は行の中央。top は行の描画域の上端
+ */
+export function lightningPolyline(
+  vertices: LineVertex[],
+  reportX: number,
+  rowCount: number,
+  rowHeight: number,
+  top: number,
+): string {
+  const sorted = [...vertices].sort((a, b) => a.row - b.row);
+  const points: [number, number][] = [[reportX, top]];
+  for (const v of sorted) {
+    points.push([v.x, top + v.row * rowHeight + rowHeight / 2]);
+  }
+  points.push([reportX, top + rowCount * rowHeight]);
+  return points.map(([x, y]) => `${round(x)},${round(y)}`).join(" ");
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
+}

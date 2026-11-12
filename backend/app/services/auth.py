@@ -31,6 +31,7 @@ from app.errors import AppError
 from app.infra.security import generate_token, hash_token, spend_password_check_time, verify_password
 from app.models.cmn import AuthSession, RolePermission
 from app.models.cmn import User as User  # API 層は利用者の型をここから取る（1.3：API はモデルを直接 import しない）
+from app.infra.audit_listener import bind_actor as bind_actor  # 変更履歴の変更者・時刻を要求ごとに載せる（6.1。A-37）
 from app.services.project_access import ProjectAccess
 
 _PERMISSION_ORDER = {permission: index for index, permission in enumerate(PERMISSIONS)}

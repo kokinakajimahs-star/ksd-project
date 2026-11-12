@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.services import get_session
-from app.services.auth import User, authenticate
+from app.services.auth import User, authenticate, bind_actor
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
 from app.services.projects import NumberingRulesStore, ScheduleRecalculator
@@ -41,6 +41,8 @@ def get_current_user(
     user = authenticate(session, token, now=now)
     if user is None:
         raise _unauthorized()
+    # この要求で書く変更を、変更者と時刻つきで変更履歴に残す（6.1・NFR-05。記録は infra のイベント。A-37）
+    bind_actor(session, user.id, now)
     return user
 
 
