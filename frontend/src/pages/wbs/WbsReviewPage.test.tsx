@@ -174,7 +174,7 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
     expect(within(screen.getByRole("table", { name: "指摘" })).getAllByRole("row")[2]).toHaveTextContent("WBS 全体");
   });
 
-  it("wbs.edit を持つ人は指摘の状態と対応を更新でき、閉じたレビューでは書けない（API-WBS-017）", async () => {
+  it("wbs.edit を持つ人は指摘の状態と対応を更新でき、閉じたレビューでも更新できる（指摘は書けない）（API-WBS-017・5.10）", async () => {
     let closed = false;
     const { calls } = mockApi(
       routes(meWith(PLANNER), {
@@ -196,8 +196,13 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
     expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`).map((c) => c.body)).toEqual([
       { status: "RESOLVED", resolution: "移行を足した" },
     ]);
-    expect(screen.queryByLabelText("指摘 #501 の状態")).toBeNull();
     expect(screen.queryByRole("form", { name: "指摘を書く" })).toBeNull();
+
+    // 閉じても指摘は残り、申請の前提の未対応の指摘に数えるので、閉じたレビューの指摘も更新できる
+    fireEvent.change(screen.getByLabelText("指摘 #501 の状態"), { target: { value: "REJECTED" } });
+    fireEvent.click(screen.getByRole("button", { name: "指摘 #501 を更新する" }));
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`)).toHaveLength(2));
+    expect(sent(calls, "PATCH", `${BASE}/wbs/reviews/50/comments/501`)[1]!.body).toMatchObject({ status: "REJECTED" });
   });
 
   it("レビューの一覧を新しい順に出し、選んだレビューを URL で開く（API-WBS-025・015・WBS-20）", async () => {
@@ -270,10 +275,11 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
       expect(within(screen.getByRole("table", { name: "レビューの一覧" })).getAllByRole("row")[1]).toHaveTextContent("終了"),
     );
     expect(sent(calls, "GET", `${BASE}/wbs/reviews`).length).toBeGreaterThanOrEqual(2);
-    // 指摘は残り、閉じた後は書けない・更新できない
+    // 指摘は残り、閉じた後は新しい指摘を書けない。残った指摘の状態は閉じた後も更新できる（申請の前提に数えるため。5.10）
     expect(within(screen.getByRole("table", { name: "指摘" })).getAllByRole("row")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "レビューを閉じる" })).toBeNull();
-    expect(screen.queryByLabelText("指摘 #501 の状態")).toBeNull();
+    expect(screen.queryByRole("form", { name: "指摘を書く" })).toBeNull();
+    expect(screen.getByLabelText("指摘 #501 の状態")).toBeInTheDocument();
   });
 
   it("wbs.edit の無い人には、実施中のレビューでも閉じるボタンを出さない（7.2）", async () => {

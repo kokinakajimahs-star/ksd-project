@@ -30,7 +30,7 @@ from app.domain.wbs_rules import (
 from app.domain.workflow import ApprovalStatus
 from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
-from app.models.cmn import AuthSession, User
+from app.models.cmn import AuthSession, RolePermission, User
 from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import (
@@ -648,7 +648,10 @@ def test_review_start_comment_and_update(world: World) -> None:
 
 
 def test_review_rejections(world: World, db_session: Session) -> None:
-    """API-WBS-014〜017：レビュー中の開始は 409、メンバーでない人は 400、権限なしは 403、無いものは 404、閉じたレビューは 409。"""
+    """API-WBS-014〜017：レビュー中の開始は 409、メンバーでない人は 400、権限なしは 403、無いものは 404。
+
+    閉じたレビューに指摘を書くのは 409。閉じたレビューの指摘の状態は変えられる（5.10。設計書 1.1・CR-004）。
+    """
     element = world.add("要素")
     outsider = world.users["outsider"].id
     assert world.client.post(world.url("/reviews"), json={"reviewer_ids": [outsider]},
@@ -679,11 +682,14 @@ def test_review_rejections(world: World, db_session: Session) -> None:
     db_review.status, db_review.closed_at = "CLOSED", NOW
     db_session.commit()
     assert world.client.post(comments_url, json=body, headers=world.headers["pm"]).status_code == 409
-    assert world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "OPEN"},
-                              headers=world.headers["planner"]).status_code == 409
+    reopened = world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "OPEN"},
+                                  headers=world.headers["planner"])
+    assert (reopened.status_code, reopened.json()["status"]) == (200, "OPEN")
+    assert world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "RESOLVED"},
+                              headers=world.headers["viewer"]).status_code == 403
 
 
-def test_review_list_and_close(world: World) -> None:
+def test_review_list_and_close(world: World, db_session: Session) -> None:
     """API-WBS-025 レビューの一覧・API-WBS-024 レビューを閉じる（IN_REVIEW → DRAFT。設計書 1.1・CR-004）。
 
     一覧は新しい順（project.view）。閉じると CLOSED と閉じた時刻が入り、WBS は DRAFT に戻る（指摘は残る）。
@@ -703,6 +709,17 @@ def test_review_list_and_close(world: World) -> None:
     close_url = world.url(f"/reviews/{first['id']}/close")
     assert world.client.post(close_url, headers=world.headers["viewer"]).status_code == 403
     assert world.client.post(world.url(f"/reviews/{MISSING}/close"), headers=world.headers["planner"]).status_code == 404
+    # PM がロールの表から project.view を外し wbs.edit だけを持つロールでは、応答（レビューと指摘）を読めないので閉じる前に 403
+    view = db_session.scalars(select(RolePermission).where(
+        RolePermission.project_id == world.pid, RolePermission.role == "PLANNER", RolePermission.permission == "project.view",
+    )).one()
+    db_session.delete(view)
+    db_session.commit()
+    assert world.client.post(close_url, headers=world.headers["planner"]).status_code == 403
+    db_session.add(RolePermission(project_id=world.pid, role="PLANNER", permission="project.view"))
+    db_session.commit()
+    still = world.client.get(world.url(f"/reviews/{first['id']}"), headers=world.headers["viewer"]).json()
+    assert (still["status"], world.tree()["wbs_status"]) == ("OPEN", "IN_REVIEW")  # 403 の前に何も変えていない
     closed = world.client.post(close_url, headers=world.headers["planner"])
     assert closed.status_code == 200, closed.text
     body = closed.json()
@@ -727,6 +744,19 @@ def test_review_list_and_close(world: World) -> None:
     world.set_status("DRAFT")
     stale = world.client.post(world.url(f"/reviews/{second.json()['id']}/close"), headers=world.headers["planner"])
     assert (stale.status_code, stale.json()["error"]["code"]) == (409, "INVALID_STATE")
+
+    # 閉じたレビューに残った未対応の指摘は申請の前提（5.10）に数え、閉じた後でも対応すれば前提から外れる（申請が塞がらない）
+    def unmet() -> list[str]:
+        response = world.client.post(world.url("/approval-requests"), headers=world.headers["planner"])
+        assert response.status_code in (201, 422), response.text
+        return [] if response.status_code == 201 else [d["condition"] for d in response.json()["error"]["details"]]
+
+    assert "open_comments" in unmet()
+    resolved = world.client.patch(world.url(f"/reviews/{first['id']}/comments/{comment['id']}"),
+                                  json={"status": "RESOLVED", "resolution": "直した"}, headers=world.headers["planner"])
+    assert resolved.status_code == 200, resolved.text
+    assert (resolved.json()["status"], resolved.json()["resolution"]) == ("RESOLVED", "直した")
+    assert "open_comments" not in unmet()
 
 
 # ---------------------------------------------------------------------------

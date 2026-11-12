@@ -1115,7 +1115,11 @@ def update_comment(
     session: Session, access: ProjectAccess, actor: User, project_id: int, review_id: int, comment_id: int,
     changes: Mapping[str, Any],
 ) -> WbsReviewComment:
-    """指摘の状態・対応を変える（wbs.edit）。載せた項目だけ。状態の null は 400、閉じたレビューは 409。"""
+    """指摘の状態・対応を変える（wbs.edit）。載せた項目だけ。状態の null は 400。
+
+    閉じたレビューの指摘も変えられる：閉じても指摘はそのまま残り（5.10。API-WBS-024）、申請の前提の「未対応の指摘」に数えるので、
+    閉じた後に対応できないと申請が塞がる（設計書 1.1・CR-004。A-48 (7)）。新しい指摘を書くのは開いているレビューだけ。
+    """
     authorize_project(session, access, actor, project_id, "wbs.edit")
     review = _review_of(session, project_id, review_id)
     comment = session.get(WbsReviewComment, comment_id)
@@ -1123,7 +1127,6 @@ def update_comment(
         raise AppError(404, "NOT_FOUND", "指摘が見つかりません", details=[{"comment_id": comment_id}])
     if "status" in changes and changes["status"] is None:
         raise _validation_error([{"loc": ["body", "status"], "message": "空にできません"}])
-    _ensure_review_open(review)
     for name in ("status", "resolution"):
         if name in changes:
             setattr(comment, name, changes[name])

@@ -293,10 +293,17 @@ def test_non_working_days_in_given_display_range() -> None:
 def test_display_range_errors() -> None:
     """RULE-SCH-005：表示範囲の始まりが終わりより後、長さが上限（MAX_GANTT_RANGE_DAYS）を超える範囲は拒む（CR-008）。"""
     acts = [activity(1, 11, 1, "12/02", "12/04")]
-    with pytest.raises(GanttRangeError):
+    with pytest.raises(GanttRangeError) as both:
         build_gantt(ELEMENTS, acts, [], calendar=CAL, project_start=START, range_start=d("12/10"), range_end=d("12/09"))
-    with pytest.raises(GanttRangeError):  # 省いた終わり（バーの終わり 12/04）より後の始まり
+    assert both.value.fields == ("range_start", "range_end")
+    with pytest.raises(GanttRangeError) as start_only:  # 省いた終わり（バーの終わり 12/04）より後の始まり
         build_gantt(ELEMENTS, acts, [], calendar=CAL, project_start=START, range_start=d("12/05"))
+    assert start_only.value.fields == ("range_start",)  # 誤りに関わるのは渡した端だけ
+    with pytest.raises(GanttRangeError) as end_only:  # 省いた始まり（バーの始まり 12/02）より前の終わり
+        build_gantt(ELEMENTS, acts, [], calendar=CAL, project_start=START, range_end=d("12/01"))
+    assert end_only.value.fields == ("range_end",)
+    # 片方だけ渡し、省いた端にバーが無ければ非稼働日は空（誤りにしない）
+    assert build_gantt(ELEMENTS, [], [], calendar=CAL, project_start=START, range_start=d("12/05")).non_working_days == ()
     limit = START + timedelta(days=MAX_GANTT_RANGE_DAYS - 1)
     at_limit = build_gantt(ELEMENTS, acts, [], calendar=CAL, project_start=START, range_start=START, range_end=limit)
     assert at_limit.non_working_days[0] == d("12/05")
@@ -304,6 +311,25 @@ def test_display_range_errors() -> None:
         build_gantt(ELEMENTS, acts, [], calendar=CAL, project_start=START, range_start=START,
                     range_end=limit + timedelta(days=1))
     assert issubclass(GanttRangeError, GanttError)
+
+
+def test_bar_range_without_display_range_has_no_limit() -> None:
+    """RULE-SCH-005：表示範囲を渡さなければ、バーの範囲が上限（MAX_GANTT_RANGE_DAYS）より長くても拒まない（6.2 の「省けばバーの範囲」）。
+
+    上限は渡した範囲の歯止めで、渡した端があればバーの範囲の端と合わせた長さに掛かる（CR-008）。
+    """
+    finish = START + timedelta(days=MAX_GANTT_RANGE_DAYS + 30)
+    long_act = GanttActivity(id=1, work_package_id=11, name="長い活動", sort_order=1, is_milestone=False,
+                             start_date=START, finish_date=finish)
+    chart = build_gantt(ELEMENTS, [long_act], [], calendar=CAL, project_start=START)
+    assert chart.range_start is not None and chart.range_end is not None
+    assert (chart.range_end - chart.range_start).days + 1 > MAX_GANTT_RANGE_DAYS
+    assert chart.non_working_days[0] == d("12/05")  # 2026-12-05（土）から
+    assert chart.non_working_days[-1] <= chart.range_end
+    assert len(chart.non_working_days) > 2 * (MAX_GANTT_RANGE_DAYS // 7)  # バーの範囲の全ての週末
+    with pytest.raises(GanttRangeError) as given:
+        build_gantt(ELEMENTS, [long_act], [], calendar=CAL, project_start=START, range_start=START)
+    assert given.value.fields == ("range_start",)
 
 
 def test_input_errors() -> None:

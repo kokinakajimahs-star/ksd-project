@@ -1,6 +1,7 @@
 // UI-WBS-003 のレビューの部品（WBS-20）：レビューの一覧（API-WBS-025。新しい順）・始める（API-WBS-014。wbs.edit）・
 // 読む（API-WBS-015）・閉じる（API-WBS-024。wbs.edit。WBS は作成中に戻り、指摘は残る）・
-// 指摘を書く（API-WBS-016。wbs.review）・指摘の状態と対応を更新する（API-WBS-017。wbs.edit）。
+// 指摘を書く（API-WBS-016。wbs.review。開いているレビューだけ）・指摘の状態と対応を更新する（API-WBS-017。wbs.edit。
+// 閉じたレビューの指摘も：閉じても指摘は残り、申請の前提の未対応の指摘に数えるので、閉じた後にも対応できるようにする）。
 // 開いているレビューは画面の URL（`?review=<ID>`）で持つ。始めたレビューはその ID へ進み、別のレビューは一覧から開く
 import { useEffect, useState, type FormEvent } from "react";
 
@@ -380,7 +381,7 @@ export default function ReviewPanel({
                   <th scope="col">対応</th>
                   <th scope="col">書いた人</th>
                   <th scope="col">更新した日時</th>
-                  {canEdit && isOpen && <th scope="col">操作</th>}
+                  {canEdit && <th scope="col">操作</th>}
                 </tr>
               </thead>
               <tbody>
@@ -390,7 +391,7 @@ export default function ReviewPanel({
                     comment={c}
                     target={c.element_id === null ? "WBS 全体" : (elementLabel.get(c.element_id) ?? `#${c.element_id}`)}
                     author={names.get(c.author_id) ?? `#${c.author_id}`}
-                    editable={canEdit && isOpen}
+                    editable={canEdit}
                     onSave={handleSave}
                   />
                 ))}

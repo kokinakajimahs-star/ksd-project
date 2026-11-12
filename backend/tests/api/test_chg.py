@@ -400,7 +400,7 @@ def test_withdraw_returns_to_draft_and_removes_pending_approval(world: World) ->
     submitted = world.submit(created["id"])
     approval_id = submitted["approval_request_id"]
     assert world.client.post(url, headers=world.h["executor"]).status_code == 403  # change.create が無い
-    assert world.client.post(url, headers=world.h["outsider"]).status_code in (403, 404)
+    assert world.client.post(url, headers=world.h["outsider"]).status_code == 403  # メンバーでない
     missing = world.client.post(world.url(f"/change-requests/{MISSING}/withdraw"), headers=world.h["planner"])
     assert missing.status_code == 404
     withdrawn = world.client.post(url, headers=world.h["planner"])

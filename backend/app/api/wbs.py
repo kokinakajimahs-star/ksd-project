@@ -495,7 +495,10 @@ def close_review(
 
     権限は wbs.edit。OPEN のレビューを CLOSED にし（``closed_at``）、WBS を DRAFT に戻す。指摘はそのまま残る（5.10）。
     閉じたレビュー・WBS が IN_REVIEW でなければ 409 ``INVALID_STATE``、無いレビューは 404（設計書 1.1・CR-004）。
+    応答はレビューと指摘（API-WBS-015 と同じ形で project.view が要る）。PM がロールの表を変えて wbs.edit だけを持つロールが
+    できても、閉じてから 403 を返さないよう、読めることを閉じる前に確かめる。
     """
+    wbs_service.get_review(session, access, user, activities, project_id, review_id)
     wbs_service.close_review(session, access, user, project_id, review_id, now=now)
     review, comments = wbs_service.get_review(session, access, user, activities, project_id, review_id)
     return _review_out(review, comments)
@@ -549,7 +552,8 @@ def patch_comment(
 ) -> CommentOut:
     """API-WBS-017 指摘の状態・対応を更新する。
 
-    権限は wbs.edit。状態は OPEN・RESOLVED・REJECTED。閉じたレビューは 409、無い指摘は 404。
+    権限は wbs.edit。状態は OPEN・RESOLVED・REJECTED。閉じたレビューの指摘も更新できる（5.10：指摘は残り、申請の前提に数える）。
+    無い指摘は 404。
     """
     comment = wbs_service.update_comment(
         session, access, user, project_id, review_id, comment_id, body.model_dump(exclude_unset=True)

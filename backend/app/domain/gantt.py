@@ -39,7 +39,14 @@ class GanttError(ValueError):
 
 
 class GanttRangeError(GanttError):
-    """表示範囲（``range_start``・``range_end``）が不正：始まりが終わりより後、または長さが上限を超える。"""
+    """表示範囲（``range_start``・``range_end``）が不正：始まりが終わりより後、または長さが上限を超える。
+
+    ``fields`` は誤りに関わる、渡された端の名前（``range_start``・``range_end`` の順）。
+    """
+
+    def __init__(self, message: str, fields: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.fields = fields
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +353,12 @@ def build_gantt(
     - ``baseline``：選んだベースラインの項目を活動の ID で引くもの（選ばなければ ``None`` で、基準のバーを出さない）
     - ``report_date``：報告日。未完了の実績のバーの終わりに使う（未完了の実績があるのに無ければ ``GanttError``）
     - ``range_start``・``range_end``：表示範囲（6.2 の API-SCH-010。設計書 1.1・CR-008）。この範囲の非稼働日を返す。
-      省いた端はバーの範囲の端（両方省けばバーの範囲）。始まりが終わりより後、または長さが ``MAX_GANTT_RANGE_DAYS`` を
-      超えれば ``GanttRangeError``。バーが無くても両端を渡せばその範囲の非稼働日を返す
+      省いた端はバーの範囲の端（両方省けばバーの範囲。省いた端にバーが無ければ空）。どちらかの端を渡したときだけ、
+      始まりが終わりより後、または長さが ``MAX_GANTT_RANGE_DAYS`` を超える範囲を ``GanttRangeError`` で拒む
+      （両方省いたバーの範囲には上限を掛けない）。バーが無くても両端を渡せばその範囲の非稼働日を返す
     """
     if range_start is not None and range_end is not None and range_start > range_end:
-        raise GanttRangeError(f"表示範囲の始まり {range_start} が終わり {range_end} より後")
+        raise GanttRangeError(f"表示範囲の始まり {range_start} が終わり {range_end} より後", ("range_start", "range_end"))
     element_list = list(elements)
     by_element = {e.id: e for e in element_list}
     if len(by_element) != len(element_list):
@@ -438,6 +446,13 @@ def build_gantt(
     bar_end = max((max(bar.end.calendar.date, bar.end_date) for bar in bars), default=None)
     shown_start = range_start if range_start is not None else bar_start
     shown_end = range_end if range_end is not None else bar_end
+    given = tuple(name for name, value in (("range_start", range_start), ("range_end", range_end)) if value is not None)
+    if given and shown_start is not None and shown_end is not None:
+        if shown_start > shown_end:
+            raise GanttRangeError(f"表示範囲の始まり {shown_start} が終わり {shown_end} より後", given)
+        if (shown_end - shown_start).days + 1 > MAX_GANTT_RANGE_DAYS:
+            raise GanttRangeError(
+                f"表示範囲が長すぎる（{shown_start}〜{shown_end}。上限 {MAX_GANTT_RANGE_DAYS} 日）", given)
     return GanttChart(
         rows=tuple(rows),
         links=tuple(links),
@@ -451,10 +466,6 @@ def _non_working_days(calendar: WorkCalendar, start: date | None, end: date | No
     """表示範囲 ``start``〜``end``（両端を含む）の非稼働日。どちらかの端が無ければ空。"""
     if start is None or end is None:
         return ()
-    if start > end:
-        raise GanttRangeError(f"表示範囲の始まり {start} が終わり {end} より後")
-    if (end - start).days + 1 > MAX_GANTT_RANGE_DAYS:
-        raise GanttRangeError(f"表示範囲が長すぎる（{start}〜{end}。上限 {MAX_GANTT_RANGE_DAYS} 日）")
     non_working: list[date] = []
     day = start
     while day <= end:

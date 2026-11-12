@@ -582,8 +582,12 @@ def test_gantt_non_working_days_follow_display_range(world: World, client: TestC
     reversed_range = client.get(url, params={"range_start": "2026-12-10", "range_end": "2026-12-09"},
                                 headers=world.h["viewer"])
     assert reversed_range.status_code == 400 and reversed_range.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert [e["loc"] for e in reversed_range.json()["error"]["details"]] == [["query", "range_start"], ["query", "range_end"]]
     too_long = client.get(url, params={"range_start": "2000-01-01", "range_end": "2026-12-09"}, headers=world.h["viewer"])
     assert too_long.status_code == 400 and too_long.json()["error"]["code"] == "VALIDATION_ERROR"
+    end_before_bars = client.get(url, params={"range_end": "2026-11-30"}, headers=world.h["viewer"])  # バーは 12/01 から
+    assert end_before_bars.status_code == 400
+    assert [e["loc"] for e in end_before_bars.json()["error"]["details"]] == [["query", "range_end"]]
     assert client.get(url, params={"range_start": "12/01"}, headers=world.h["viewer"]).status_code == 400
 
 

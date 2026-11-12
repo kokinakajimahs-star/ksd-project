@@ -920,7 +920,7 @@ def plan_gantt(
             range_end=range_end,
         )
     except GanttRangeError as exc:
-        raise _validation_error([{"loc": ["query", "range_start"], "message": str(exc)}]) from exc
+        raise _validation_error([{"loc": ["query", name], "message": str(exc)} for name in exc.fields]) from exc
     return chart, baseline
 
 
