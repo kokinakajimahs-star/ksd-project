@@ -1,6 +1,6 @@
 WBS・工数・進捗管理システム（PMT）設計書
 
-作成日：2026年11月10日　版：1.0（初版）　対象：リリース1（要求仕様書5章の64件）
+作成日：2026年11月10日　改訂日：2026年11月12日　版：1.1　対象：リリース1（要求仕様書5章の64件）
 
 # 0. 本書について
 
@@ -35,6 +35,32 @@ WBS・工数・進捗管理システム（PMT）設計書
 | APIと画面 | 6、7 |
 | 要求からどの設計IDへ落ちたか | 11 |
 | 実装ループでの進め方・検証器が見ていないもの | 13 |
+| 版ごとの変更 | 0.4 |
+
+## 0.4 改訂履歴
+
+| 版 | 日付 | 変更の内容 | 根拠 |
+|---|---|---|---|
+| 1.0 | 2026-11-10 | 初版（設計ID 187 件） | — |
+| 1.1 | 2026-11-12 | 下の CR-001〜009 を反映した（設計ID 193 件。API を 6 件足した） | `docs/instruction-change-requests.md` の CR-001〜009（2026-11-12 に推奨案で承認） |
+
+1.1 の変更の内訳：
+
+| CR | 変えた箇所 | 内容 |
+|---|---|---|
+| CR-001 | 1.1 | 画面の依存の下限を React Router 7・Vite 6・Vitest 4 にし、`npm audit` で high 以上の勧告が無い版を選ぶ注を足した |
+| CR-002 | 4.2 | ベースライン・スナップショットの写しの表の、要素・活動を指す列に外部キー制約を張らない。要素・活動の内部キーを再利用しない |
+| CR-003 | 4.1 DB-WBS-002・5.2 | 第 1 階層の順番を数える列 `top_last_child_seq` を足した |
+| CR-004 | 5.10・6.2・11 | API-WBS-024〜026・API-PRG-010・API-CHG-011・API-RPT-005 を足した（取り下げ・レビューを閉じる・置き換えだけで読めなかった資源の読み出し・一覧） |
+| CR-005 | 5.1 RULE-EFF-005 | 実績工数を締める境界を「確定した報告日以前」にした（5.8 の集計の範囲と合わせた） |
+| CR-006 | 6.2 API-INT-002 | 取込の権限に、対象の書く権限（wbs.edit・schedule.edit・estimate.edit）を足した |
+| CR-007 | 5.1 RULE-EFF-004・5.8 | 基準の値の数え方（WP は版の WORK_PACKAGE の項目、消した活動・WP は桶「基準にあって今は無い」）と、BR-11 の「追加された要素」の範囲を定めた |
+| CR-008 | 6.2 API-SCH-010・7.1・7.2・7.3・7.4・11 | タスクリストで活動の見積を書く（EST-01）、ガントから報告日を作る（PRG-01）、ガントの非稼働日を表示範囲で返す |
+| CR-009 | 4.1・5.6・5.7・7.3 | 進捗率の精度（小数 2 桁）と P は丸める前の値から求めること、完了見込み日を稼働日へ寄せること、完了・未着手（予定内）の頂点の印 |
+
+- CR-009 の提案は「P は丸める前の進捗率から求める」を 5.4 に足すとしていたが、P を定める節は 5.6 なので 5.6 に書いた。
+- CR-007 の提案の「消した活動の基準は桶に置く」は、どの軸でも基準の合計が版の合計に一致するよう（EFF-09）、消した WP にも同じ扱いを当て、子の無い WP 以外の要素の基準を 0 とした（「追加」から外す）。
+- CR-008 の 7.2 の追加に合わせ、UI-SCH-002 の関連要求に PRG-01 を足した（11 章の PRG-01 の行も同じ）。
 
 # 1. 方式設計
 
@@ -51,11 +77,11 @@ WBS・工数・進捗管理システム（PMT）設計書
 | Excel | openpyxl | 3.1 | INT-01 |
 | 試験（サーバ） | pytest・httpx | 8 | FastAPI の TestClient |
 | 言語（画面） | TypeScript | 5 | |
-| 画面 | React・React Router・Vite | 18・6・5 | |
-| 試験（画面） | Vitest・Testing Library | 2 | |
+| 画面 | React・React Router・Vite | 18・7・6 以上（勧告の無い版） | |
+| 試験（画面） | Vitest・Testing Library | 4 以上（勧告の無い版） | |
 | ガント・イナズマ線 | 自前の SVG 描画 | — | イナズマ線を描ける部品は商用のみ（要求仕様書1.3） |
 
-- 依存は版を固定する（サーバは `backend/requirements.lock`、画面は `frontend/package-lock.json`）。
+- 依存は版を固定する（サーバは `backend/requirements.lock`、画面は `frontend/package-lock.json`）。画面の依存は `npm audit` で high 以上の勧告が無い版を選ぶ。
 - パスワードのハッシュは標準ライブラリの `hashlib.scrypt` を使い、依存を増やさない。
 
 ## 1.2 全体構成
@@ -213,7 +239,7 @@ erDiagram
 | DB-PRJ-004 | `calendar_holidays` | 休日 | id, calendar_id, holiday_date, name（calendar_id＋holiday_date で一意） | PRJ-04 |
 | DB-PRJ-005 | `project_members` | メンバー | id, project_id, user_id（組で一意）, roles（JSON 配列）, organization, team | PRJ-06 |
 | DB-WBS-001 | `wbs_elements` | WBS要素 | id, project_id, parent_id, kind（DELIVERABLE/MANAGEMENT/COMPONENT/WORK_PACKAGE）, name, wbs_code, sibling_seq, last_child_seq, sort_order, own_estimate_hours, responsible_user_id, responsible_team, needs_renumber | WBS-01, WBS-02, WBS-04, WBS-08, WBS-10 |
-| DB-WBS-002 | `wbs_numbering_rules` | 採番規則 | id, project_id（一意）, separator（既定 `.`）, min_digits（既定 1）, prefix（既定 空）, pad_first_level（既定 真） | WBS-05 |
+| DB-WBS-002 | `wbs_numbering_rules` | 採番規則 | id, project_id（一意）, separator（既定 `.`）, min_digits（既定 1）, prefix（既定 空）, pad_first_level（既定 真）, top_last_child_seq（既定 0。第1階層で今まで使った最大の順番。5.2） | WBS-05 |
 | DB-WBS-003 | `wbs_code_history` | WBS IDの新旧対応 | id, project_id, element_id, old_code, new_code, renumbered_at, renumbered_by | WBS-06, WBS-07 |
 | DB-WBS-004 | `wbs_dictionary_entries` | WBS辞書 | id, element_id（一意）, deliverable, work_scope, completion_criteria, assumptions | WBS-11, WBS-13 |
 | DB-WBS-005 | `wbs_scope_links` | 要素とスコープ項目の紐付け | id, element_id, scope_item_id（組で一意） | PRJ-02, WBS-16 |
@@ -228,10 +254,10 @@ erDiagram
 | DB-SCH-003 | `schedule_baselines` | スケジュールベースライン | id, project_id, version, name, reason（MANUAL/RE_APPROVAL/CHANGE_REQUEST）, change_request_id, created_by, created_at | SCH-16, SCH-17 |
 | DB-SCH-004 | `schedule_baseline_items` | ベースラインの項目 | id, schedule_baseline_id, item_type（ACTIVITY/WORK_PACKAGE）, activity_id, element_id, wbs_code, name, start_date, finish_date, duration_days, is_milestone, estimate_hours | SCH-16, SCH-18, EFF-08 |
 | DB-PRG-001 | `status_reports` | 報告日 | id, project_id, report_date（組で一意）, status（OPEN/FINALIZED）, created_by, created_at, finalized_by, finalized_at | PRG-01, PRG-17 |
-| DB-PRG-002 | `progress_entries` | 進捗の入力 | id, status_report_id, activity_id（組で一意）, percent_complete（NULL＝未算定）, actual_start, actual_finish, remaining_hours（NULL＝自動）, delay_reason, forecast_finish, entered_by, entered_at | PRG-02, PRG-03, EFF-06 |
+| DB-PRG-002 | `progress_entries` | 進捗の入力 | id, status_report_id, activity_id（組で一意）, percent_complete（0〜100・小数 2 桁。NULL＝未算定）, actual_start, actual_finish, remaining_hours（NULL＝自動）, delay_reason, forecast_finish, entered_by, entered_at | PRG-02, PRG-03, EFF-06 |
 | DB-PRG-003 | `progress_items` | 進捗の算定項目 | id, activity_id, item_type（DELIVERABLE/WORK/CHECK/MILESTONE）, title, weight（既定 1）, done, approved, done_at | PRG-05 |
 | DB-PRG-004 | `progress_snapshots` | スナップショット | id, status_report_id（一意）, report_date, report_line, tolerance_days, extract_days, plan_basis（LATEST）, created_at | PRG-17 |
-| DB-PRG-005 | `progress_snapshot_items` | スナップショットの活動 | id, snapshot_id, activity_id, row_order, wbs_code, name, start_date, finish_date, duration_days, is_milestone, is_critical, percent_complete, actual_start, actual_finish, actual_hours, etc_hours, point, deviation, judgement | PRG-17, PRG-18 |
+| DB-PRG-005 | `progress_snapshot_items` | スナップショットの活動 | id, snapshot_id, activity_id, row_order, wbs_code, name, start_date, finish_date, duration_days, is_milestone, is_critical, percent_complete（小数 2 桁）, actual_start, actual_finish, actual_hours, etc_hours, point, deviation, judgement | PRG-17, PRG-18 |
 | DB-EFF-001 | `assignments` | 担当・割当 | id, activity_id, user_id（組で一意）, planned_hours | EFF-01, WBS-10 |
 | DB-EFF-002 | `time_entries` | 実績工数 | id, user_id, activity_id, work_date, hours, note（user_id＋activity_id＋work_date で一意） | EFF-02 |
 | DB-EFF-003 | `variance_notes` | 差異の理由 | id, project_id, element_id, status_report_id, reason, corrective_action_id, created_by, created_at | EFF-10 |
@@ -248,6 +274,8 @@ erDiagram
 ## 4.2 列の補足
 
 - 全てのテーブルは整数の主キー `id` を持つ。外部キーは `<テーブルの単数形>_id` とし、DB の外部キー制約を張る。
+- ただし、ベースライン・スナップショットの写しの表（`scope_baseline_elements`・`schedule_baseline_items`・`progress_snapshot_items`）の、写した時点の要素・活動を指す列（`element_id`・`parent_element_id`・`activity_id`）は、写しの値として持ち、外部キー制約を張らない（基準の後に要素・活動を消しても版は変わらない。WBS-22）。写しの表から版・スナップショットの親（`scope_baseline_id`・`schedule_baseline_id`・`snapshot_id`）への外部キー制約は張る。
+- 要素・活動の内部キー（`wbs_elements.id`・`activities.id`）は再利用しない（SQLite は `AUTOINCREMENT`。写しの値が後から作った別の行を指さないため）。
 - `projects.settings` の既定値：`{"progress_method_default": "DIRECT", "delay_tolerance_days": 0.5, "delay_extract_days": 2, "variance_rate": 0.10, "variance_hours": 8, "hundred_percent_tolerance": 0.0}`（要求仕様書 BR-03・09・11）。
 - `activities` の日程の列のうち、`requested_start`・`duration_days`・`is_milestone` が利用者の入力で、`start_date` 以降は RULE-SCH-002・003 の計算結果である。マイルストーンは `duration_days = 0`。
 - `progress_entries` は報告日ごとに持つ。最新の値は「確定していない最新の報告日、無ければ最新の確定済みの報告日」の行である。
@@ -290,8 +318,8 @@ erDiagram
 | RULE-EFF-001 | 残工数（ETC） | 入力値を優先、無ければ 見積×（1−進捗率）、未算定なら max(見積−実績, 0)、完了は0（5.8） | `effort.py` | EFF-06 |
 | RULE-EFF-002 | EACと上位への集計 | EAC＝実績＋ETC、上位は下位の合計、ベースラインの値と予測の値を別に持つ（5.8） | `effort.py` | EFF-07, EFF-08 |
 | RULE-EFF-003 | 多軸集計 | WBS・担当者・期間・組織の4軸で計画・基準・実績・ETC・EACを集計し、どの軸でも合計が一致する（5.8） | `effort.py` | EFF-09 |
-| RULE-EFF-004 | 差異の判定 | 差異＝EAC−基準、差異率と絶対値の両方の閾値を超えた要素と、基準に無い要素を抽出する（要求仕様書 BR-11） | `effort.py` | EFF-10 |
-| RULE-EFF-005 | 実績工数の入力検査 | 自分の割当の活動だけ、1日の合計24時間以下、負の値の禁止、確定した報告日より前の日は変えない | `effort.py` | EFF-02, EFF-01 |
+| RULE-EFF-004 | 差異の判定 | 差異＝EAC−基準、差異率と絶対値の両方の閾値を超えた要素と、基準に無い要素（5.8 の「追加された要素」）を抽出する（要求仕様書 BR-11） | `effort.py` | EFF-10 |
+| RULE-EFF-005 | 実績工数の入力検査 | 自分の割当の活動だけ、1日の合計24時間以下、負の値の禁止、確定した報告日以前の日は変えない | `effort.py` | EFF-02, EFF-01 |
 | RULE-CHG-001 | 変更内容の適用 | 変更内容（5.9の操作の列）を計画のモデルへ順に当て、参照の解決（WBS ID・仮の参照名）と検査を行う | `change.py` | CHG-01, CHG-04 |
 | RULE-CHG-002 | 影響分析 | 計画の写しに変更を当てて再計算し、終了日・マイルストーン・クリティカルパス・総工数・要素の差を返す（5.9） | `change.py` | CHG-02 |
 | RULE-CHG-003 | 変更要求の状態遷移 | 5.10の遷移と、本人の承認の禁止、反映は承認済みだけ | `workflow.py` | CHG-03 |
@@ -319,6 +347,7 @@ code_without_first_pad(第1階層の要素) = prefix + pad(順番)
 
 - 既定の規則で、要求仕様書の W§4 の例（1.0、1.1、1.2、2.0、2.1…）と一致する。
 - 新規の要素：`順番 = 親の last_child_seq + 1`。`last_child_seq` は減らさない（削除した番号を再利用しない）。
+- 第1階層の要素の「親の `last_child_seq`」は `wbs_numbering_rules.top_last_child_seq` とする（新規・移動とも）。
 - 移動：移動先の親の `last_child_seq + 1` を新しい順番にするが、**`wbs_code` は変えない**。親の `wbs_code` と形が合わない要素（配下を含む）の `needs_renumber` を真にする。
 - 改番（明示の操作）：兄弟の表示順（`sort_order`）に 1 から振り直し、全要素の `wbs_code` を作り直す。変わった要素ごとに `(element_id, old_code, new_code)` を返し、サービス層が `wbs_code_history` に保存する。`needs_renumber` は全て偽にする。
 - 旧IDの解決：現在の `wbs_code` に一致すればそれを返す。無ければ `wbs_code_history` を新しい順にたどり、`old_code` が一致した要素の現在のIDを返す。
@@ -374,7 +403,8 @@ M(m)  = max(下限(m), max{ EF(p) | p は先行 })   ※先行がマイルスト
 | マイルストーン | `M(m)`（その日の終業の位置） | ずれで判定 |
 | 上記以外の活動 | `S_a + d_a × 進捗率` | ずれで判定 |
 
-- ずれ `δ = P − L`。`δ < −許容幅` は遅れ、`δ > 許容幅` は前倒し、それ以外は予定どおり。完了・未着手（予定内）は判定の上では予定どおりに数え、表示で区別する。
+- ずれ `δ = P − L`。`δ < −許容幅` は遅れ、`δ > 許容幅` は前倒し、それ以外は予定どおり。完了・未着手（予定内）は判定の上では予定どおりに数え、表示で区別する（7.3）。
+- P・ずれ・判定・表示の日付は、**丸める前の進捗率**（入力の値、または RULE-PRG-001 の算定方式で求めた値）から求める。保存する進捗率（4.1 の `percent_complete`）は小数 2 桁に丸めた値であり、P の計算に使わない（例：3 項目中 2 完了の 66.67% から求めると、d＝3 の活動の P が 2 を超えて境目の日付と判定がずれる）。
 - 進捗率が未算定（項目0件など）の活動は判定を「未算定」とし、線の上では L に置く（線を途切れさせない）。一覧で入力を促す。
 - 計算の基準は最新計画（`activities.start_date`・`duration_days`）である（要求仕様書 OQ-03）。
 
@@ -392,7 +422,7 @@ M(m)  = max(下限(m), max{ EF(p) | p は先行 })   ※先行がマイルスト
 ## 5.7 遅延の影響（RULE-PRG-006）
 
 1. 抽出：`δ ≤ −delay_extract_days` の活動をずれの小さい順（遅れの大きい順）に並べる。
-2. 見込みの終了：完了見込み日（PRG-03）があれば `index(完了見込み日) + 1`、無ければ `L + ceil(d × (1 − 進捗率))`。
+2. 見込みの終了：完了見込み日（PRG-03）があれば、それを要求仕様書 BR-04 で稼働日へ寄せて（非稼働日なら前の稼働日）から `index(完了見込み日) + 1`、無ければ `L + ceil(d × (1 − 進捗率))`。
 3. 個別の影響：その活動の EF を `max(EF, 見込みの終了)` に固定して前進計算をやり直し、変わった後続の活動・マイルストーン（ずれの稼働日）・プロジェクトの終了のずれを返す。あわせて、その活動がクリティカルかと、推移的な後続の一覧を返す。
 4. 全体の影響：抽出した全ての活動の見込みを同時に当てた前進計算の結果（マイルストーンとプロジェクトの終了のずれ）も返す。
 
@@ -401,7 +431,12 @@ M(m)  = max(下限(m), max{ EF(p) | p は先行 })   ※先行がマイルスト
 - 集計の単位：活動の値をWPへ、WPを上位へ足す。**活動を1つも持たないWP**は、自分の見積を見積の値とし、実績は0、ETC＝見積とする。
 - 実績工数：活動の `time_entries` の合計（報告日を指定したときは報告日以前の分）。
 - 進捗率・ETCの入力値は、対象の報告日の `progress_entries` を使う（報告日を指定しなければ4.2の「最新」）。
-- 計画の値＝現在の見積、基準の値＝選んだスケジュールベースライン（既定は最新の版）の見積。予測の値＝EAC。三つを別の列で返す（EFF-08）。
+- 計画の値＝現在の見積、基準の値＝選んだスケジュールベースライン（既定は最新の版）の項目の見積（下の数え方）。予測の値＝EAC。三つを別の列で返す（EFF-08）。
+- 基準の値の数え方：
+  - WBS の軸：WP は版のその WP の WORK_PACKAGE の項目の見積とする（その時点の活動の見積の和、活動が無ければ WP の見積）。上位は下位の合計。子の無い WP 以外の要素は 0 とする。
+  - 担当者・組織・期間の軸：版の活動の項目の見積を配る（担当者は今の割当の比、期間は項目の開始日〜終了日の稼働日に均等）。版に活動の項目を持たない WP は、その WORK_PACKAGE の項目の見積を活動を持たない WP と同じく置く（担当者は「未割当」、期間は項目の開始日〜終了日）。
+  - 版にあって今は無い活動・WP の基準は、どの軸でも桶「基準にあって今は無い」に置く（WBS の軸ではプロジェクトの直下の行）。これで、どの軸でも基準の合計が版の合計に一致する（EFF-09）。
+  - **追加された要素**（要求仕様書 BR-11・RULE-EFF-004）：版に WORK_PACKAGE の項目も活動の項目も無い WP、版に項目の無い活動、配下の WP・活動が全て追加された要素である上位の要素。基準の値を持たず、差異・差異率を計算しない。
 - 多軸集計：
 
 | 軸 | 計画・基準 | 実績 | ETC・EAC |
@@ -448,6 +483,7 @@ stateDiagram-v2
 
 - 申請の前提：完了条件の欠け0件（RULE-WBS-005）・未対応の指摘0件・100%ルールの ERROR 0件。
 - 基準化の後もWBSは編集できる。編集すると `DRAFT` に戻り、基準（版）との差は画面で示す。改めて承認すると reason＝RE_APPROVAL の新しい版になる。
+- レビューを閉じる（API-WBS-024）：OPEN のレビューを CLOSED にし（`closed_at`）、WBS を `IN_REVIEW` から `DRAFT` に戻す。指摘はそのまま残る。
 
 変更要求（RULE-CHG-003）：
 
@@ -462,6 +498,8 @@ stateDiagram-v2
     REJECTED --> [*]
     APPLIED --> [*]
 ```
+
+- 取り下げ（API-CHG-011）：`SUBMITTED` を `DRAFT` に戻し、保留中（PENDING）の承認申請を取り下げる（承認申請の行を消す。承認申請の状態に値を足さない。消したことは変更履歴に残る）。保存した影響分析は残し、提出し直すときに流し直す。
 
 報告日（RULE-PRG-007）：`OPEN → FINALIZED`（確定でスナップショットを作る。戻さない）。
 是正措置（RULE-CHG-005）：`NOT_STARTED → IN_PROGRESS → DONE`（DONE から IN_PROGRESS へ戻せる）。
@@ -517,6 +555,9 @@ stateDiagram-v2
 | API-WBS-021 | `GET /api/v1/projects/{project_id}/scope-baselines` | スコープベースラインの版の一覧 | project.view | WBS-22 |
 | API-WBS-022 | `GET /api/v1/projects/{project_id}/scope-baselines/{baseline_id}` | スコープベースラインの1版（要素と辞書） | project.view | WBS-22 |
 | API-WBS-023 | `GET /api/v1/projects/{project_id}/wbs-codes/{wbs_code}/trace` | WBS IDによる横断照会 | project.view | WBS-07 |
+| API-WBS-024 | `POST /api/v1/projects/{project_id}/wbs/reviews/{review_id}/close` | レビューを閉じる（IN_REVIEW → DRAFT） | wbs.edit | WBS-20 |
+| API-WBS-025 | `GET /api/v1/projects/{project_id}/wbs/reviews` | レビューの一覧 | project.view | WBS-20 |
+| API-WBS-026 | `GET /api/v1/projects/{project_id}/wbs/elements/{element_id}/scope-links` | 要素とスコープ項目の紐付けを読む | project.view | PRJ-02, WBS-16 |
 | API-EST-001 | `PUT /api/v1/projects/{project_id}/estimates/{target_type}/{target_id}` | 見積を書く（単位・手法・前提・参照資料） | estimate.edit | EST-01, EST-08 |
 | API-EST-002 | `GET /api/v1/projects/{project_id}/estimates/{target_type}/{target_id}/history` | 見積の履歴 | project.view | EST-08 |
 | API-EST-003 | `GET /api/v1/projects/{project_id}/estimates/rollup` | ボトムアップの集計 | project.view | EST-02 |
@@ -529,7 +570,7 @@ stateDiagram-v2
 | API-SCH-007 | `DELETE /api/v1/projects/{project_id}/dependencies/{dependency_id}` | 依存を消す | schedule.edit | SCH-04 |
 | API-SCH-008 | `POST /api/v1/projects/{project_id}/schedule/calculate` | 日程を計算し直す | schedule.edit | SCH-06, SCH-10 |
 | API-SCH-009 | `GET /api/v1/projects/{project_id}/schedule/critical-path` | クリティカルパスとフロート | project.view | SCH-10 |
-| API-SCH-010 | `GET /api/v1/projects/{project_id}/gantt` | ガントの描画データ（`baseline_id` 任意） | project.view | SCH-11, SCH-12, SCH-13 |
+| API-SCH-010 | `GET /api/v1/projects/{project_id}/gantt` | ガントの描画データ（`baseline_id`・`range_start`・`range_end` 任意。非稼働日は表示範囲 `range_start`〜`range_end` の分を返し、省けばバーの範囲） | project.view | SCH-11, SCH-12, SCH-13 |
 | API-SCH-011 | `POST /api/v1/projects/{project_id}/schedule-baselines` | スケジュールベースラインを保存する | baseline.manage | SCH-16 |
 | API-SCH-012 | `GET /api/v1/projects/{project_id}/schedule-baselines` | スケジュールベースラインの版の一覧 | project.view | SCH-17 |
 | API-SCH-013 | `GET /api/v1/projects/{project_id}/schedule-baselines/{baseline_id}/variance` | 基準と最新計画の差異 | project.view | SCH-18 |
@@ -542,6 +583,7 @@ stateDiagram-v2
 | API-PRG-007 | `POST /api/v1/projects/{project_id}/status-reports/{report_id}/finalize` | 報告日を確定してスナップショットを作る | status_report.manage | PRG-17 |
 | API-PRG-008 | `GET /api/v1/projects/{project_id}/lightning-lines` | 確定済みの複数の報告日の線（`report_ids`） | project.view | PRG-18 |
 | API-PRG-009 | `GET /api/v1/projects/{project_id}/status-reports/{report_id}/delays` | 遅延活動と影響 | project.view | PRG-19, PRG-13 |
+| API-PRG-010 | `GET /api/v1/projects/{project_id}/activities/{activity_id}/progress-items` | 進捗の算定項目を読む | project.view | PRG-05 |
 | API-EFF-001 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/assignments` | 活動の担当と割当工数を置き換える | schedule.edit | EFF-01 |
 | API-EFF-002 | `GET /api/v1/projects/{project_id}/assignments` | 割当の一覧（担当者・活動で絞れる） | project.view | EFF-01, WBS-10 |
 | API-EFF-003 | `PUT /api/v1/time-entries` | 自分の実績工数をまとめて書く（日×活動） | effort.enter_own | EFF-02 |
@@ -559,12 +601,14 @@ stateDiagram-v2
 | API-CHG-008 | `GET /api/v1/projects/{project_id}/corrective-actions` | 是正措置の一覧（状態・期限超過・WBS IDで絞れる） | project.view | CHG-06 |
 | API-CHG-009 | `PATCH /api/v1/projects/{project_id}/corrective-actions/{action_id}` | 是正措置の状態・効果を更新する | action.manage | CHG-06 |
 | API-CHG-010 | `GET /api/v1/projects/{project_id}/audit-logs` | 変更履歴の検索（期間・変更者・対象・WBS ID） | audit.view | CHG-09 |
+| API-CHG-011 | `POST /api/v1/projects/{project_id}/change-requests/{change_request_id}/withdraw` | 提出した変更要求を取り下げる（SUBMITTED → DRAFT。承認申請を取り下げる） | change.create | CHG-03 |
 | API-RPT-001 | `GET /api/v1/projects/{project_id}/status-reports/{report_id}/meeting-report` | 定例会議用レポートのデータ | project.view | RPT-01 |
 | API-RPT-002 | `POST /api/v1/projects/{project_id}/share-links` | 共有リンクを作る（トークンはこの応答でだけ返す） | share.manage | RPT-03 |
 | API-RPT-003 | `DELETE /api/v1/projects/{project_id}/share-links/{link_id}` | 共有リンクを失効させる | share.manage | RPT-03 |
 | API-RPT-004 | `GET /api/v1/shared/{token}` | 共有リンクで閲覧する（認証なし・読むだけ） | （トークン） | RPT-03 |
+| API-RPT-005 | `GET /api/v1/projects/{project_id}/share-links` | 共有リンクの一覧（トークンは返さない） | share.manage | RPT-03 |
 | API-INT-001 | `GET /api/v1/projects/{project_id}/export` | 出力する（`target`＝wbs/activities/time-entries、`format`＝csv/xlsx） | data.export | INT-01 |
-| API-INT-002 | `POST /api/v1/projects/{project_id}/import` | 取り込む（`target`・`format`・`dry_run`。検査が全て通ったときだけ書く） | data.import | INT-01 |
+| API-INT-002 | `POST /api/v1/projects/{project_id}/import` | 取り込む（`target`・`format`・`dry_run`。検査が全て通ったときだけ書く） | data.import と対象の書く権限（`wbs`：wbs.edit、`activities`：schedule.edit。どちらも見積の列を変えるなら estimate.edit も。`time-entries`：data.import のみ） | INT-01 |
 | API-CMN-001 | `POST /api/v1/auth/login` | ログインしてトークンを得る | （なし） | CMN-01 |
 | API-CMN-002 | `POST /api/v1/auth/logout` | トークンを失効させる | （ログイン） | CMN-01 |
 | API-CMN-003 | `GET /api/v1/users` | ユーザーの一覧 | user.admin か member.manage | CMN-01, PRJ-06 |
@@ -574,7 +618,7 @@ stateDiagram-v2
 | API-CMN-007 | `PUT /api/v1/projects/{project_id}/role-permissions` | ロール×権限の表を置き換える | permission.manage | CMN-01 |
 | API-CMN-008 | `GET /api/v1/me` | 自分の情報とプロジェクトごとの権限 | （ログイン） | CMN-01 |
 
-件数：90。
+件数：96。
 
 ## 6.3 入出力ファイルの定義（RULE-INT-001）
 
@@ -606,8 +650,8 @@ CSV は UTF-8（BOM付き）・カンマ区切り・1行目が見出し。xlsx �
 | UI-WBS-002 | WBS辞書・横断照会 | `/projects/:projectId/wbs/:elementId` | 計画担当者 | WBS-11, WBS-13, WBS-07, EST-08, PRJ-02 |
 | UI-WBS-003 | WBSの検証・レビュー・承認 | `/projects/:projectId/wbs-review` | PM・計画担当者・承認者 | WBS-13, WBS-16, WBS-20, WBS-21, WBS-22 |
 | UI-WBS-004 | 責任分担表 | `/projects/:projectId/responsibility` | PM | WBS-10 |
-| UI-SCH-001 | タスクリスト | `/projects/:projectId/activities` | 計画担当者 | SCH-01, SCH-02, SCH-03, SCH-04, SCH-09, EFF-01 |
-| UI-SCH-002 | ガントチャート・イナズマ線 | `/projects/:projectId/gantt` | 全員 | SCH-06, SCH-10, SCH-11, SCH-12, SCH-13, PRG-08, PRG-12, PRG-13, PRG-18 |
+| UI-SCH-001 | タスクリスト | `/projects/:projectId/activities` | 計画担当者 | SCH-01, SCH-02, SCH-03, SCH-04, SCH-09, EFF-01, EST-01 |
+| UI-SCH-002 | ガントチャート・イナズマ線 | `/projects/:projectId/gantt` | 全員 | SCH-06, SCH-10, SCH-11, SCH-12, SCH-13, PRG-01, PRG-08, PRG-12, PRG-13, PRG-18 |
 | UI-SCH-003 | ベースラインと差異 | `/projects/:projectId/baselines` | PM | SCH-16, SCH-17, SCH-18 |
 | UI-PRG-001 | 進捗入力（報告日） | `/projects/:projectId/status-reports/:reportId` | 実行担当者・進捗管理担当者 | PRG-01, PRG-02, PRG-03, PRG-05, PRG-17, EFF-06 |
 | UI-PRG-002 | 遅延分析 | `/projects/:projectId/status-reports/:reportId/delays` | 進捗管理担当者・PM | PRG-19 |
@@ -634,7 +678,7 @@ flowchart LR
     W --> RAM["UI-WBS-004 責任分担表"]
     P --> A["UI-SCH-001 タスクリスト"]
     P --> G["UI-SCH-002 ガント"]
-    G --> PR["UI-PRG-001 進捗入力"]
+    G -->|報告日を選ぶ・作る| PR["UI-PRG-001 進捗入力"]
     PR --> DL["UI-PRG-002 遅延分析"]
     DL --> CA["UI-CHG-002 是正措置"]
     PR --> MR["UI-RPT-001 会議レポート"]
@@ -647,19 +691,22 @@ flowchart LR
     L --> AP["UI-CMN-003 承認待ち"]
 ```
 
+- ガント（UI-SCH-002）から報告日を作る（API-PRG-001。status_report.manage）。報告日が1件も無いプロジェクトでも、ここから進捗入力（UI-PRG-001）へ進める。
+- 活動の見積（人時・人日、手法・前提・参照資料）はタスクリスト（UI-SCH-001）で書く（API-EST-001 の `ACTIVITY`。EST-01）。
+
 権限の無い操作のボタンは出さない（`GET /api/v1/me` の権限で決める）。サーバ側でも必ず判定する（NFR-04）。
 
 ## 7.3 ガントとイナズマ線の描画（`frontend/src/components/gantt/`）
 
-- 横軸は RULE-CAL-002 の稼働日の軸ではなく**暦日**で描き、非稼働日の列を灰色にする。サーバは稼働日の位置と、その位置の暦日上の座標（日付＋その日の中の割合）を両方返し、画面は暦日の座標で描く。
-- SVG のレイヤ（下から）：①非稼働日の帯 ②ベースラインのバー（細い灰色） ③予定のバー（クリティカルは赤い枠） ④実績のバー ⑤依存の矢印 ⑥報告日線（縦の破線） ⑦イナズマ線（折れ線。判定で頂点の色を変える：遅れ＝赤、前倒し＝青、予定どおり＝緑、未算定＝灰） ⑧過去の線（選んだ報告日ごと。線の種類を変える）。
+- 横軸は RULE-CAL-002 の稼働日の軸ではなく**暦日**で描き、非稼働日の列を灰色にする。非稼働日は画面が自分で数えず、表示範囲を API-SCH-010 の `range_start`・`range_end` に渡してサーバから受け取る（祝日などの例外を画面は知らない）。サーバは稼働日の位置と、その位置の暦日上の座標（日付＋その日の中の割合）を両方返し、画面は暦日の座標で描く。
+- SVG のレイヤ（下から）：①非稼働日の帯 ②ベースラインのバー（細い灰色） ③予定のバー（クリティカルは赤い枠） ④実績のバー ⑤依存の矢印 ⑥報告日線（縦の破線） ⑦イナズマ線（折れ線。判定で頂点の色を変える：遅れ＝赤、前倒し＝青、予定どおり＝緑、未算定＝灰。完了・未着手（予定内）は予定どおりの色に印（形）を重ねて区別する（5.6）） ⑧過去の線（選んだ報告日ごと。線の種類を変える）。
 - 表示の単位（日・週・月）は1日あたりの横幅だけを変える。行の高さは一定で、行の順はサーバが返す順（RULE-SCH-005）に従う。
 - マイルストーンは菱形で描く。
 - 活動 2,000 件で3秒以内に描画を終える（NFR-02）。見えている行だけを描く（縦方向の仮想化）。
 
 ## 7.4 定例会議レポート（UI-RPT-001）
 
-A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週）、下段左：遅延一覧（ずれの大きい順・遅延理由・完了見込み）、下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要KPI（全体の進捗率＝見積で重み付けした進捗率の平均、遅れの件数、EACと基準の差、クリティカルパスの最小フロート、是正措置の期限超過の件数）。印刷用の CSS（`@page { size: A3 landscape; }`）を持つ。
+A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週。この表示範囲を API-SCH-010 の `range_start`・`range_end` に渡し、範囲の非稼働日を灰色にする）、下段左：遅延一覧（ずれの大きい順・遅延理由・完了見込み）、下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要KPI（全体の進捗率＝見積で重み付けした進捗率の平均、遅れの件数、EACと基準の差、クリティカルパスの最小フロート、是正措置の期限超過の件数）。印刷用の CSS（`@page { size: A3 landscape; }`）を持つ。
 
 # 8. 非機能設計
 
@@ -758,7 +805,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | 要求ID | 要求の名称 | テーブル（DB） | ルール（RULE） | API | 画面（UI） |
 |---|---|---|---|---|---|
 | PRJ-01 | プロジェクト基本情報の登録 | DB-PRJ-001 | — | API-PRJ-001, API-PRJ-002, API-PRJ-003, API-PRJ-004 | UI-PRJ-001, UI-PRJ-002 |
-| PRJ-02 | スコープ定義（対象内・対象外） | DB-PRJ-002, DB-WBS-005 | RULE-WBS-004 | API-PRJ-005, API-PRJ-006, API-WBS-013 | UI-PRJ-002, UI-WBS-002 |
+| PRJ-02 | スコープ定義（対象内・対象外） | DB-PRJ-002, DB-WBS-005 | RULE-WBS-004 | API-PRJ-005, API-PRJ-006, API-WBS-013, API-WBS-026 | UI-PRJ-002, UI-WBS-002 |
 | PRJ-04 | 稼働カレンダーの設定 | DB-PRJ-003, DB-PRJ-004 | RULE-CAL-001 | API-PRJ-007, API-PRJ-008 | UI-PRJ-002 |
 | PRJ-06 | メンバー・ロールの管理 | DB-PRJ-005, DB-CMN-001 | RULE-AUTH-001 | API-PRJ-009, API-PRJ-010, API-PRJ-011, API-CMN-003 | UI-PRJ-002 |
 | WBS-01 | 階層構造の作成・編集 | DB-WBS-001 | RULE-WBS-003 | API-WBS-001, API-WBS-002, API-WBS-003, API-WBS-004, API-WBS-005 | UI-WBS-001 |
@@ -771,11 +818,11 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | WBS-10 | 責任者割当・責任分担表 | DB-WBS-001, DB-EFF-001 | RULE-WBS-007 | API-WBS-003, API-WBS-011, API-EFF-002 | UI-WBS-004 |
 | WBS-11 | WBS辞書の作成・編集 | DB-WBS-004 | RULE-WBS-005 | API-WBS-009, API-WBS-010 | UI-WBS-002 |
 | WBS-13 | 完了条件の必須化 | DB-WBS-004 | RULE-WBS-005 | API-WBS-010, API-WBS-012, API-WBS-018 | UI-WBS-002, UI-WBS-003 |
-| WBS-16 | 100%ルールチェック | DB-WBS-005 | RULE-WBS-004 | API-WBS-012, API-WBS-013 | UI-WBS-003 |
-| WBS-20 | WBSレビュー | DB-WBS-006, DB-WBS-007 | RULE-WBS-006 | API-WBS-014, API-WBS-015, API-WBS-016, API-WBS-017 | UI-WBS-003 |
+| WBS-16 | 100%ルールチェック | DB-WBS-005 | RULE-WBS-004 | API-WBS-012, API-WBS-013, API-WBS-026 | UI-WBS-003 |
+| WBS-20 | WBSレビュー | DB-WBS-006, DB-WBS-007 | RULE-WBS-006 | API-WBS-014, API-WBS-015, API-WBS-016, API-WBS-017, API-WBS-024, API-WBS-025 | UI-WBS-003 |
 | WBS-21 | WBS承認ワークフロー | DB-WBS-008 | RULE-WBS-006 | API-WBS-018, API-WBS-019, API-WBS-020 | UI-CMN-003, UI-WBS-003 |
 | WBS-22 | スコープベースライン化 | DB-WBS-009, DB-WBS-010 | RULE-WBS-006, RULE-CHG-004 | API-WBS-019, API-WBS-021, API-WBS-022 | UI-WBS-003 |
-| EST-01 | WP・活動単位の工数見積 | DB-EST-001 | RULE-EST-002 | API-EST-001 | UI-WBS-001 |
+| EST-01 | WP・活動単位の工数見積 | DB-EST-001 | RULE-EST-002 | API-EST-001 | UI-WBS-001, UI-SCH-001 |
 | EST-02 | ボトムアップ集計 | — | RULE-EST-001 | API-WBS-001, API-EST-003 | UI-WBS-001 |
 | EST-08 | 見積根拠の記録 | DB-EST-001 | RULE-EST-002 | API-EST-001, API-EST-002 | UI-WBS-002 |
 | SCH-01 | WPからの活動展開 | DB-SCH-001 | RULE-WBS-003 | API-SCH-002, API-SCH-005 | UI-SCH-001 |
@@ -791,10 +838,10 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | SCH-16 | ベースラインの保存 | DB-SCH-003, DB-SCH-004 | RULE-CHG-004 | API-SCH-011 | UI-SCH-003 |
 | SCH-17 | 複数ベースラインの保持 | DB-SCH-003 | RULE-SCH-004 | API-SCH-012 | UI-SCH-003 |
 | SCH-18 | 基準計画と最新計画の差異表示 | DB-SCH-004 | RULE-SCH-004 | API-SCH-013 | UI-SCH-003 |
-| PRG-01 | 報告日の設定 | DB-PRG-001 | RULE-PRG-007 | API-PRG-001, API-PRG-002 | UI-PRG-001 |
+| PRG-01 | 報告日の設定 | DB-PRG-001 | RULE-PRG-007 | API-PRG-001, API-PRG-002 | UI-PRG-001, UI-SCH-002 |
 | PRG-02 | 進捗率・実績日付の入力 | DB-PRG-002 | RULE-PRG-001 | API-PRG-003 | UI-PRG-001 |
 | PRG-03 | 遅延理由・完了見込みの入力 | DB-PRG-002 | RULE-PRG-006 | API-PRG-003 | UI-PRG-001 |
-| PRG-05 | 進捗率の算定方式の設定 | DB-PRG-003 | RULE-PRG-001 | API-PRG-004, API-PRG-005 | UI-PRG-001 |
+| PRG-05 | 進捗率の算定方式の設定 | DB-PRG-003 | RULE-PRG-001 | API-PRG-004, API-PRG-005, API-PRG-010 | UI-PRG-001 |
 | PRG-08 | 報告日線の描画 | — | RULE-CAL-002, RULE-PRG-005 | API-PRG-006 | UI-SCH-002 |
 | PRG-09 | 進捗ポイントの計算 | — | RULE-PRG-002 | API-PRG-006 | — |
 | PRG-10 | 稼働日ベースの計算 | — | RULE-CAL-002, RULE-PRG-002 | API-PRG-006 | — |
@@ -813,12 +860,12 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | EFF-10 | 予定対実績の差異分析 | DB-EFF-003 | RULE-EFF-004 | API-EFF-006, API-EFF-007 | UI-EFF-002 |
 | CHG-01 | 変更要求の登録 | DB-CHG-001 | RULE-CHG-001 | API-CHG-001, API-CHG-002, API-CHG-003 | UI-CHG-001 |
 | CHG-02 | 変更の影響分析 | DB-CHG-001 | RULE-CHG-002 | API-CHG-004 | UI-CHG-001 |
-| CHG-03 | 変更承認ワークフロー | DB-WBS-008, DB-CHG-001 | RULE-CHG-003 | API-WBS-019, API-WBS-020, API-CHG-005 | UI-CMN-003, UI-CHG-001 |
+| CHG-03 | 変更承認ワークフロー | DB-WBS-008, DB-CHG-001 | RULE-CHG-003 | API-WBS-019, API-WBS-020, API-CHG-005, API-CHG-011 | UI-CMN-003, UI-CHG-001 |
 | CHG-04 | 再基準化 | DB-WBS-009, DB-CHG-001 | RULE-CHG-001, RULE-CHG-004 | API-CHG-006 | UI-CHG-001 |
 | CHG-06 | 遅延原因・是正措置の管理 | DB-CHG-002 | RULE-CHG-005 | API-CHG-007, API-CHG-008, API-CHG-009 | UI-CHG-002 |
 | CHG-09 | 変更履歴の記録 | DB-CHG-003 | RULE-CHG-006 | API-CHG-010 | UI-CHG-003 |
 | RPT-01 | 定例会議用の進捗レポート | — | RULE-RPT-001 | API-RPT-001 | UI-RPT-001 |
-| RPT-03 | 計画の共有 | DB-CMN-003 | RULE-AUTH-001, RULE-AUTH-002 | API-RPT-002, API-RPT-003, API-RPT-004 | UI-RPT-002 |
+| RPT-03 | 計画の共有 | DB-CMN-003 | RULE-AUTH-001, RULE-AUTH-002 | API-RPT-002, API-RPT-003, API-RPT-004, API-RPT-005 | UI-RPT-002 |
 | INT-01 | Excel・CSVの入出力 | — | RULE-INT-001 | API-INT-001, API-INT-002 | UI-INT-001 |
 | CMN-01 | ユーザー・権限の管理 | DB-CMN-001, DB-CMN-002, DB-CMN-004 | RULE-AUTH-001 | API-CMN-001, API-CMN-002, API-CMN-003, API-CMN-004, API-CMN-005, API-CMN-006, API-CMN-007, API-CMN-008 | UI-CMN-001, UI-CMN-002, UI-PRJ-002 |
 <!-- MAP:END -->
@@ -841,7 +888,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 
 ## 13.1 進捗の測り方
 
-設計ID（4.1・5.1・6.2・7.1の 187 件）のうち実装に現れていないものの数を進捗の指標とする（`kloop verify`。`spec-ids.toml`）。あわせて、サーバと画面の試験・型検査・DB の移行・要求→設計の写像（`ksdx trace verify`）を検証器の `[[checks]]` で見る。
+設計ID（4.1・5.1・6.2・7.1の 193 件）のうち実装に現れていないものの数を進捗の指標とする（`kloop verify`。`spec-ids.toml`）。あわせて、サーバと画面の試験・型検査・DB の移行・要求→設計の写像（`ksdx trace verify`）を検証器の `[[checks]]` で見る。
 
 ## 13.2 実装ループの原則
 
@@ -893,6 +940,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | D-06 | 報告日線は報告日の終業の位置 | 進捗は報告日の終わりの時点の値として入れるため。稲妻チャート.txt §6 の例と一致する | 2026-11-10 |
 | D-07 | 基準化の後も WBS を直接編集でき、編集で DRAFT に戻る | 小さな直しのたびに変更要求を通す負担を避ける。正式の変更は変更要求（CHG-04）で版を作る | 2026-11-10 |
 | D-08 | ガントの描画は自前の SVG | イナズマ線を描ける部品は商用のみ | 2026-11-10 |
+| D-09 | 実装の中で見つかった設計書の欠け・食い違い（CR-001〜009）を、本書を直す側で解き、版 1.1 にした（0.4） | 記載どおりでは成り立たない・両立しない・権限を迂回できる箇所で、実装の側では直せないため（`docs/instruction-change-requests.md`） | 2026-11-12 |
 
 未確定事項は要求仕様書11章を正とする（写さない）。
 
