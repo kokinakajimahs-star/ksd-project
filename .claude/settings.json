@@ -1,0 +1,77 @@
+{
+  "$comment": [
+    "kloop テンプレート（指示書 §9.5、§10）。permissions と sandbox は別レイヤなので両方設定する。",
+    "allowedDomains / denyRead / deny はプロジェクトの実情に合わせて最小化すること。",
+    "sandbox は WSL2 が必要。ネイティブ Windows では Bash sandbox は使えない。",
+    "Linux では bubblewrap と socat が要る（sudo apt install bubblewrap socat）。無いと sandbox は黙って外れ denyRead・denyWrite が効かないので、failIfUnavailable で止める（CR-101）。",
+    "~/.config/ksdls はグラフ DB の接続先と書き先の承認（graph.toml）の置き場。読ませず書かせない（Read・Edit・Write と sandbox の denyRead・denyWrite。CR-101）。"
+  ],
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh release:*)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(kubectl delete:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/specarch/**)",
+      "Read(~/.config/ksdls/**)",
+      "Edit(~/.config/ksdls/**)",
+      "Write(~/.config/ksdls/**)",
+      "Read(~/.config/gcloud/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": [
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "github.com"
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.claude/.credentials.json",
+        "~/.config/specarch",
+        "~/.config/ksdls",
+        "~/.config/gcloud"
+      ],
+      "denyWrite": [
+        "~/.config/ksdls"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

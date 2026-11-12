@@ -1,0 +1,207 @@
+# ksd-project — 構築パイプライン（`kloop bootstrap` が生成）
+#
+#   kloop graph graphs/build.toml --dry-run
+#
+# **実装ノードは直列にしている。** 複数のエージェントが同じ作業ツリーを
+# 同時に編集すると、片方の変更をもう片方が壊すためである。
+
+[graph]
+name = "build"
+description = "設計書からの実装を順に収束させ、独立レビューで終わる"
+max_parallel = 1
+fail_fast = false
+
+[[nodes]]
+id = "db-chg"
+kind = "loop"
+task = "db-chg"
+
+[[nodes]]
+id = "db-cmn"
+kind = "loop"
+needs = ["db-chg"]
+task = "db-cmn"
+
+[[nodes]]
+id = "db-eff"
+kind = "loop"
+needs = ["db-cmn"]
+task = "db-eff"
+
+[[nodes]]
+id = "db-est"
+kind = "loop"
+needs = ["db-eff"]
+task = "db-est"
+
+[[nodes]]
+id = "db-prg"
+kind = "loop"
+needs = ["db-est"]
+task = "db-prg"
+
+[[nodes]]
+id = "db-prj"
+kind = "loop"
+needs = ["db-prg"]
+task = "db-prj"
+
+[[nodes]]
+id = "db-sch"
+kind = "loop"
+needs = ["db-prj"]
+task = "db-sch"
+
+[[nodes]]
+id = "db-wbs"
+kind = "loop"
+needs = ["db-sch"]
+task = "db-wbs"
+
+[[nodes]]
+id = "rule-auth"
+kind = "loop"
+needs = ["db-wbs"]
+task = "rule-auth"
+
+[[nodes]]
+id = "rule-cal"
+kind = "loop"
+needs = ["rule-auth"]
+task = "rule-cal"
+
+[[nodes]]
+id = "rule-chg"
+kind = "loop"
+needs = ["rule-cal"]
+task = "rule-chg"
+
+[[nodes]]
+id = "rule-eff"
+kind = "loop"
+needs = ["rule-chg"]
+task = "rule-eff"
+
+[[nodes]]
+id = "rule-est"
+kind = "loop"
+needs = ["rule-eff"]
+task = "rule-est"
+
+[[nodes]]
+id = "rule-int"
+kind = "loop"
+needs = ["rule-est"]
+task = "rule-int"
+
+[[nodes]]
+id = "rule-prg"
+kind = "loop"
+needs = ["rule-int"]
+task = "rule-prg"
+
+[[nodes]]
+id = "rule-rpt"
+kind = "loop"
+needs = ["rule-prg"]
+task = "rule-rpt"
+
+[[nodes]]
+id = "rule-sch"
+kind = "loop"
+needs = ["rule-rpt"]
+task = "rule-sch"
+
+[[nodes]]
+id = "rule-wbs"
+kind = "loop"
+needs = ["rule-sch"]
+task = "rule-wbs"
+
+[[nodes]]
+id = "api-chg"
+kind = "loop"
+needs = ["rule-wbs"]
+task = "api-chg"
+
+[[nodes]]
+id = "api-cmn"
+kind = "loop"
+needs = ["api-chg"]
+task = "api-cmn"
+
+[[nodes]]
+id = "api-eff"
+kind = "loop"
+needs = ["api-cmn"]
+task = "api-eff"
+
+[[nodes]]
+id = "api-est"
+kind = "loop"
+needs = ["api-eff"]
+task = "api-est"
+
+[[nodes]]
+id = "api-int"
+kind = "loop"
+needs = ["api-est"]
+task = "api-int"
+
+[[nodes]]
+id = "api-prg"
+kind = "loop"
+needs = ["api-int"]
+task = "api-prg"
+
+[[nodes]]
+id = "api-prj"
+kind = "loop"
+needs = ["api-prg"]
+task = "api-prj"
+
+[[nodes]]
+id = "api-rpt"
+kind = "loop"
+needs = ["api-prj"]
+task = "api-rpt"
+
+[[nodes]]
+id = "api-sch"
+kind = "loop"
+needs = ["api-rpt"]
+task = "api-sch"
+
+[[nodes]]
+id = "api-wbs"
+kind = "loop"
+needs = ["api-sch"]
+task = "api-wbs"
+
+[[nodes]]
+id = "ui"
+kind = "loop"
+needs = ["api-wbs"]
+task = "ui"
+
+[[nodes]]
+id = "scaffold"
+kind = "loop"
+needs = ["ui"]
+task = "scaffold"
+
+[[nodes]]
+id = "converge"
+kind = "loop"
+needs = ["scaffold"]
+task = "all"
+
+[[nodes]]
+id = "review"
+kind = "agent"
+needs = ["converge"]
+prompt_file = "prompts/_review.md"
+outputs = ["findings.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Bash(git diff:*)", "Bash(git status:*)"]
+effort = "high"
+max_turns = 40

@@ -1,0 +1,22 @@
+# **このファイルは `ksdx plan agents` が生成した。手で編集しない。**
+#
+# 手で直すと次の生成で消える。変えたいのは、たいてい生成の入力側である。
+#   - 分割の単位        spec-ids.toml の [[kinds]] と group_from
+#   - どの分母を回すか  trace.toml / spec-ids.toml
+#
+# **ksd-x はこれを実行しない**（指示書 §7.1）。実行するのは kloop である。
+
+id            = "AG-IMPLEMENT-BY-SCOPE-REVIEW-001"
+version       = 1
+role          = "実装差分の独立レビュー"
+graph         = "graphs/implement.toml"
+graph_node    = "review"
+prompt_file   = "prompts/review-diff.md"
+outputs       = ["findings.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git status:*)"]
+grounding     = "not_applicable"
+grounding_reason = "findings.md はコード差分への指摘であり、§5.1.1 の出典（[desc] など閉じた 5 種）を持つ文書ではない。中身は review ノードの成果物に残り、コミットする作業者が読む（コミットの前の承認ゲートは置かない。CR-I-034）"
+effort        = "high"
+effects       = ["reads-tree"]
+
+notes = "実装者の仮定を引き継がない。**検証器を変更しない**（指示書 §9-11）。Bash は git にしか開かない"

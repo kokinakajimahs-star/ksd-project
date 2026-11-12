@@ -1,0 +1,71 @@
+# kloop ガード Hook のルール（指示書 §9.3）
+#
+# ここに書いた内容は .claude/hooks/guard.py の組み込みルールを **置き換える**（bash.deny）
+# または **追加する**（paths.*）。
+# 拒否理由には必ず代替手段を書くこと。「駄目」だけではエージェントが迂回を試みる。
+#
+# **ここで置き換えられない拒否がある**（CR-073。ksd-ls の CR-LS-KL-008・docs/branch-rules.md §6）。
+# 次は guard.py の FIXED_BASH_RULES と protected_branch_denial() が止め、[bash].deny を書き換えても外れない：
+#   - main への直接のコミット（git commit・cherry-pick・revert・am・rebase、--ff-only の無い merge・pull）
+#   - フックの迂回（--no-verify・git commit -n・core.hooksPath・KSDLS_ESCALATE=）
+#   - クラウドの資源を変えるコマンド（gcloud の create / delete / update / deploy / IAM、gs:// への cp・rsync、
+#     gsutil rm・mb、bq rm・mk・DML、terraform / tofu / pulumi の apply・destroy、kubectl apply・delete・create・patch、
+#     helm install・upgrade、aws の作成・削除・更新・実行と s3:// への cp・sync、kubectl exec・debug・attach、gh api の書込み、
+#     gh repo edit・secret set など、firebase の deploy・削除・設定・データの書込み（npx firebase も。CR-124）。
+#     sh -c・env・sudo・npx・絶対パス・引用符で包んだ形も読み替えて当てる）。読むだけ（list・describe・get）と firebase の
+#     手元だけの口（emulators・login・init・serve・use・target）は止めない。
+#     クラウドを変えるのは effects = ["writes-cloud:<環境>"] を宣言した command ノードだけで、上流に承認ゲートが要る
+#   - kloop.toml の [graph.wrappers] に宣言したラッパ（中でクラウドを変える・push するスクリプト）は guard は読まない。
+#     エージェントに打たせないなら、下の deny に同じパスの行を足す（例：pattern = '(^|[\s/])scripts/apply\.sh\b'。CR-124）
+# 以前ここにあった terraform apply|destroy・kubectl delete|apply の行は、この固定の拒否に含めた
+#   - ksdls の書く口（loop plan apply・loop import・graph schema|roles --apply・graph backup|restore・setup env|project・
+#     task import・task export（--check なし）・表に無い口など。python -m ksdls.cli と絶対パスの ksdls も）。読むだけの口
+#     （graph doctor|query・loop reconcile|claims|state|plan <run_id>・task reconcile・task export --check・lint context・
+#     setup env --check・--version）は止めない。ksdls を呼ぶかを見分けられない形
+#     （変数のコマンド名・$(…)・入れ子のシェル・python -c）は止める。人は自分の端末で流す（CR-101）
+#     導入先の下見 setup project <導入先> --dry-run [--diff]（何も書かない）は止めない。--dry-run の無い形・--lead・--mcp は止める（CR-130）
+
+[bash]
+deny = [
+  { pattern = '\bgit\s+push\b',              reason = "git push は不可逆な公開操作である", alternative = 'kind = "push" ノード（11 規則と [push].allowed_branches）を通すこと' },
+  { pattern = '\bgit\s+reset\s+--hard\b',    reason = "作業内容を復元不能に破棄する",       alternative = "git stash を使うこと" },
+  { pattern = '\bgit\s+clean\s+-[a-zA-Z]*f', reason = "追跡外ファイルを復元不能に削除する", alternative = "削除対象を確認してから人が実行すること" },
+  { pattern = '\bgh\s+(pr\s+create|release|repo\s+delete)\b', reason = "外部へ公開・削除する操作である", alternative = "人が実行すること（PR を作るノードは kloop に無い。公開は push ノードの 11 規則と全件の関門を通す）" },
+  { pattern = '\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+/(?!tmp)', reason = "ルート直下を再帰削除しようとしている", alternative = "対象パスを見直すこと" },
+  { pattern = '\bcurl\b[^|]*\|\s*(ba)?sh\b', reason = "検証されていないスクリプトを実行する", alternative = "内容を保存して確認してから実行すること" },
+  # --- ここから下は 2026-08-18 に補った。**組み込み既定にあったのに、この一覧から漏れていた。**
+  # `[bash].deny` は組み込みを *置き換える* ため、書き落とした 4 件は黙って通っていた
+  # （実測: fork bomb も `docker system prune -a` も allow）。
+  # `guard.py --selftest` が組み込み全件を叩くようになり、この漏れが数字で出るようになった
+  { pattern = '\bgit\s+(filter-branch|filter-repo)\b', reason = "履歴を書き換える",           alternative = "人が実行すること" },
+  { pattern = '\bgit\s+push\b.*--force|--force.*\bgit\s+push\b', reason = "履歴を上書きする", alternative = "人が実行すること" },
+  { pattern = '\bdocker\s+system\s+prune\b', reason = "他の作業の成果物も削除しうる",         alternative = "対象を限定して人が実行すること" },
+  { pattern = ':\(\)\{.*\};:', reason = "fork bomb",                                          alternative = "—" },
+]
+
+[paths]
+# 書き込みを禁止するパス（組み込みの参照プロジェクト保護に追加される）
+deny_write = [
+  # "scripts/verify.sh",   # 検証器そのもの。protected_paths と併せて二重に守る場合
+  # グラフ DB の接続先と書き先の承認（graph.toml の [[approved]]）の置き場。エージェントに承認を書かせない（CR-101）
+  "~/.config/ksdls",
+]
+
+# 読み取りを禁止するパス（秘密情報）
+deny_read = [
+  # "config/secrets.yaml",
+  # グラフ DB の資格・接続先と Google Cloud の資格（ADC・gcloud の資格）。エージェントへ渡さない
+  # （CR-LS-KL-010。ksd-ls 統合設計書 §18。~/.config/specarch は guard の組み込みが拒む）
+  "~/.config/ksdls",
+  "~/.config/gcloud",
+]
+
+# --- 例外（deny より優先する）------------------------------------------------
+# 組み込みの拒否パスの一部だけを開けたいときに使う。
+# **拒否の既定を弱めるため、誰がいつ何を承認したかを必ずコメントに残すこと。**
+allow_write = [
+  # "/mnt/c/devkdc/llu",   # 2026-08-13 利用者が当該ディレクトリでの構築を明示的に指示
+]
+allow_read = [
+]
+

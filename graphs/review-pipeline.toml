@@ -1,0 +1,116 @@
+# kloop グラフの雛形（指示書 §6.1）
+#
+#   diagnose → fix(loop) → verify → review → commit
+#
+# 矢印は順序である。**成果物が渡るのは agent ノードの直接の上流からだけ**で、diagnose の diagnosis.md は
+# fix（loop）に渡らない（下の diagnose の節。CR-086）。
+#
+# **コミットの前の承認ゲート（gate-commit）は置かない**（CR-073。ksd-ls の CR-LS-KL-008・Q-LS-34）。
+# 人の承認のゲートはクラウドの資源の構成変更（effects = ["writes-cloud:<環境>"]）にだけ置く。
+# コミットは手元の操作で、外へ出すのは push ノード（11 規則）と全件の関門である
+#
+# 実行:
+#   kloop graph graphs/review-pipeline.toml --dry-run   # 計画を見る
+#   kloop graph graphs/review-pipeline.toml --backend mock
+#   kloop graph graphs/review-pipeline.toml -v
+
+# ---------------------------------------------------------------------------
+# `needs` と `effects` の役割分担（指示書 §6.2 / §6.3）
+# ---------------------------------------------------------------------------
+#   needs    … **論理的な順序だけ**を書く（この検証はこの実装の後でなければ意味が無い）
+#   effects  … このノードが触る資源を宣言する
+#   排他     … effects から engine が導出する。**人は書かない**
+#
+# **資源競合を理由に needs を書かないこと。** 書くと「なぜ繋いだのか」が
+# 定義から読み取れなくなり、グラフを写すたびに理由ごと誤って伝播する。
+#
+#   effects = ["reads-tree"]              読むだけ。互いに並列でよい（verify の既定）
+#   effects = ["writes-tree"]             作業ツリーを書く。engine が直列化する（agent/loop/command の既定）
+#   effects = ["writes-shared:docs/ui"]   同じパスを宣言したノードとだけ排他する
+#   effects = ["exclusive:db"]            名前つき排他
+#   effects = ["reads-tree", "slots:4"]   並列度を 4 消費する（重いテスト等）
+#   effects = ["writes-cloud:prod"]       同じクラウド環境を書くノードとだけ排他する
+#   effects = ["reads-cloud:prod", "slots:4"]
+#                                         読むだけなので排他しない。料金・レート制限は
+#                                         slots で会計に載せる（宣言だけでは直列化しない）
+#
+# 省略すると kind から導出される。**既存のグラフ定義は書き換え不要である。**
+# ---------------------------------------------------------------------------
+
+[graph]
+name = "review-pipeline"
+description = "診断 → 有界ループで修正 → 検証 → 独立レビュー → コミット"
+max_parallel = 2
+fail_fast = false
+
+# --- 1. 診断（編集しない。読み取り権限のみ）
+#
+# **diagnosis.md は fix（loop）に渡らない**（CR-086）。kloop が上流の成果物をプロンプトへ注入するのは
+# agent ノードの直接の needs・needs_optional の分だけで、loop の反復のプロンプトには上流の節が無い
+# （作業ディレクトリはプロジェクトの根。diagnosis.md はノードディレクトリ `.kloop/runs/<run>/nodes/diagnose/`
+# に置かれる）。**この診断は人が読む記録である**（`kloop report` がノードごとの成果物の置き場を示す）。
+# fix のタスク（`prompts/fix-tests.md`）は、検証器の出力から自分で根本原因を特定する。
+# 診断を fix に読ませたいなら、diagnose の後に diagnosis.md を作業ツリーの決まった場所へ写す command ノードを置き
+# （兄弟のノードディレクトリ `"$(dirname "$KLOOP_NODE_DIR")/diagnose/diagnosis.md"` から読む）、fix の
+# タスクのプロンプトでその場所を指すこと（ksd-x の要求ループの verify-research と同じ形。前の run の写しを
+# 読ませない工夫が要る）
+[[nodes]]
+id = "diagnose"
+kind = "agent"
+# agent の既定は writes-tree だが、この節は読むだけである。
+# **宣言すると、他の読み取りノードと並列に走れる。**
+effects = ["reads-tree"]
+prompt = """
+検証器 `bash scripts/verify.sh` を実行し、失敗の全文を読んで根本原因を特定すること。
+**ファイルを編集してはならない。**
+仮説ごとに、それを棄却できる観測を挙げること。
+"""
+outputs = ["diagnosis.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Bash"]
+max_turns = 10
+
+# --- 2. 修正（有界ループ。kloop.toml の [tasks.fix-tests] を使う）
+#
+# `needs = ["diagnose"]` は順序だけである（診断が終わってから直す。diagnosis.md は渡らない。上の節）
+[[nodes]]
+id = "fix"
+kind = "loop"
+needs = ["diagnose"]
+task = "fix-tests"
+max_iterations = 6
+on_fail = "stop"
+
+# --- 3. 検証（ループとは独立にもう一度回す）
+[[nodes]]
+id = "verify"
+kind = "verify"
+needs = ["fix"]
+
+# --- 4. 独立レビュー（fresh context。実装者の仮定を引き継がない）
+#
+# **`needs` を `["fix"]` にして検証と並列に走らせることもできる。**
+# その場合、検証が失敗してもレビューは実行される
+# （`needs` の上流が失敗すると下流は SKIPPED になるため、
+#  検証にぶら下げると「最も知りたいときにレビューが飛ぶ」）。
+[[nodes]]
+id = "review"
+kind = "agent"
+needs = ["verify"]
+prompt_file = "prompts/review-diff.md"
+outputs = ["findings.md"]
+allowed_tools = ["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git log:*)", "Write"]
+effort = "high"
+# 成果物は自分のノードディレクトリにしか書かない。作業ツリーは変更しない
+effects = ["reads-tree"]
+
+# --- 5. コミット（レビューの指摘は findings.md に残る。直すならループに戻す）
+#
+# **`bash -c "..."` を使わない**（指示書 §6.2、CR-014）。`kloop.toml` へ
+# `[graph.command_policy]` を宣言すると `-c` を含む argv は拒否される
+# （argv からは `-c` に渡した文字列の中身を判定できないため）。
+# スクリプトへ切り出しておけば、許可一覧へそのまま足せる。
+[[nodes]]
+id = "commit"
+kind = "command"
+needs = ["review"]
+command = ["bash", "scripts/kloop-commit.sh"]

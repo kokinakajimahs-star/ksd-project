@@ -1,0 +1,68 @@
+# trace.toml — PMT（WBS・工数・進捗管理システム）/ 層間写像の契約
+#
+# 要求層: docs/pmt-requirements.md の 5 章（R1 の 64 件）
+# 設計層: docs/pmt-design.md の 4.1・5.1・6.2・7.1（187 件）。抽出式は spec-ids.toml が正（from_spec_ids）
+# 写像  : docs/pmt-design.md の 11 章（要求→設計 対応表）
+#
+# 2026-11-10 に手で数えた値: 要求 64 / 設計 187（db 35・rule 40・api 90・ui 22）/ GAP 0 / ORPHAN 0
+# ksdx trace verify の出力がこの数と一致しなければ、正規表現か文書のどちらかが誤っている。
+#
+# 測るもの  : 宣言の欠落（下流の無い要求 / 上流の無い設計要素 / 分母の減少）
+# 測らないもの: 宣言はあるが中身が伴わないもの（設計が要求を満たしているか）。R2・R3（6 章）の要求
+#
+# **保護パスである。baseline を下げない。**
+
+[trace]
+name     = "PMT（WBS・工数・進捗管理システム）"
+document = "docs/pmt-design.md"
+spec_ids = "spec-ids.toml"
+
+[[layers]]
+key      = "requirement"
+label    = "要求（R1）"
+source   = "docs/pmt-requirements.md"
+section  = '^# 5\. '
+row      = '^\|\s*(?P<id>(?:PRJ|WBS|EST|SCH|PRG|EFF|ANL|RES|CHG|RPT|INT|CMN)-\d{2})\s*\|\s*(?P<name>[^|]+?)\s*\|'
+baseline = 64
+chapter  = "5"
+
+[[layers]]
+key           = "design"
+label         = "設計"
+source        = "docs/pmt-design.md"
+from_spec_ids = true
+kinds         = ["db", "rule", "api", "ui"]
+
+[[maps]]
+from    = "requirement"
+to      = "design"
+via     = "table"
+section = '^# 11\. '
+# 列: 要求ID | 要求の名称 | DB | RULE | API | UI
+row     = '^\|\s*(?P<from>(?:PRJ|WBS|EST|SCH|PRG|EFF|ANL|RES|CHG|RPT|INT|CMN)-\d{2})\s*\|[^|]*\|(?P<db>[^|]*)\|(?P<rule>[^|]*)\|(?P<api>[^|]*)\|(?P<ui>[^|]*)\|'
+required_coverage = 1.0
+orphan_policy     = "fail"
+
+[maps.to_patterns]
+db   = 'DB-[A-Z]{3}-\d{3}'
+rule = 'RULE-[A-Z]{3,4}-\d{3}'
+api  = 'API-[A-Z]{3}-\d{3}'
+ui   = 'UI-[A-Z]{3}-\d{3}'
+
+[untraced]
+# **ここへ章を足すことは「見なくてよい」と決めることである。**
+# 設計書のうち、設計 ID を持たない章（記述・方針・判断の記録）。
+chapters = [
+  "0. 本書について",
+  "1. 方式設計",
+  "2. 実装の置き場と規約",
+  "3. ドメインモデル",
+  "8. 非機能設計",
+  "9. 権限設計",
+  "10. 構成管理と開発の進め方",
+  "11. 要求→設計 対応表",   # 写像そのもの（[[maps]] が読む）。層の行としては数えない
+  "12. 試験方針",
+  "13. kloop による実装ループ",
+  "14. 判断の記録と未確定事項",
+  "15. R2・R3への拡張点",
+]
