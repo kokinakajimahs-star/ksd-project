@@ -1,4 +1,5 @@
 // 見積の API（設計書 6.2 の API-EST-001・002）。WBS の画面（UI-WBS-001・002）が見積を書き、根拠と履歴を読む。
+// タスクリスト（UI-SCH-001）は活動（ACTIVITY）の見積を書く。
 // 形はサーバの schemas（backend/app/schemas/estimate.py）に合わせる
 import { apiFetch } from "./client";
 import type { PageQuery } from "./cmn";

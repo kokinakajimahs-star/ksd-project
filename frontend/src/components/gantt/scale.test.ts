@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 
+import type { ReportLightning } from "../../api/rpt";
+import {
+  makeGanttRow,
+  makeLightningLine,
+  makeLightningRow,
+  makeOverlaidLine,
+  point,
+} from "../../test/schFixtures";
 import {
   addDays,
+  chartExtraDates,
   chartRange,
   countedAs,
   DAY_WIDTH,
@@ -10,6 +19,8 @@ import {
   lightningPolyline,
   pastLineDash,
   PAST_LINE_DASHES,
+  rangeContains,
+  rangeToRefetch,
   rangeWidth,
   ticks,
   vertexMark,
@@ -54,6 +65,77 @@ describe("ガントの座標（設計書 7.3：横軸は暦日）", () => {
       { start: "2026-03-31", end: "2026-05-08" },
     );
     expect(chartRange({ range_start: null, range_end: null }, ["2026-05-08"])).toBeNull();
+  });
+});
+
+describe("描く範囲を広げる日付と、非稼働日を受け取り直す範囲（7.3・API-SCH-010）", () => {
+  const rows = [makeGanttRow({ row_index: 0, activity_id: 21 }), makeGanttRow({ row_index: 1, activity_id: 22 })];
+  const bars = { range_start: "2026-12-01", range_end: "2026-12-21" };
+
+  it("報告日線と、ガントの行に当たるイナズマ線の頂点の日付。行に無い活動の頂点は入れない", () => {
+    const lightning = makeLightningLine(
+      [
+        makeLightningRow({ activity_id: 21, point: point("2026-12-06", 0.25) }),
+        makeLightningRow({ row_index: 1, activity_id: 22, point: point("2026-12-13", 0.6) }),
+        makeLightningRow({ row_index: 5, activity_id: 99, point: point("2027-02-01", 0) }),
+        makeLightningRow({ row_index: 6, activity_id: null, point: point("2027-03-01", 0) }),
+      ],
+      { report_line: point("2026-12-10", 1) },
+    );
+    expect(chartExtraDates(rows, { lightning })).toEqual(["2026-12-10", "2026-12-06", "2026-12-13"]);
+    expect(chartExtraDates(rows, {})).toEqual([]);
+  });
+
+  it("過去の線は報告日線と全ての頂点。会議レポートの線は行の番号で当て、lightning があればそちらを使う", () => {
+    // 報告日 12/03 の線、頂点 12/02
+    const past = makeOverlaidLine();
+    const reportLightning: ReportLightning = {
+      report_date: "2026-12-24",
+      report_line: point("2026-12-24", 1),
+      tolerance_days: 0.5,
+      vertices: [
+        { ...makeOverlaidLine().vertices[0]!, row_index: 1, point: point("2026-12-28", 0) },
+        { ...makeOverlaidLine().vertices[0]!, row_index: 7, point: point("2027-01-15", 0) },
+      ],
+      missing_activity_ids: [],
+    };
+    expect(chartExtraDates(rows, { pastLines: [past] })).toEqual(["2026-12-03", "2026-12-02"]);
+    expect(chartExtraDates(rows, { reportLightning })).toEqual(["2026-12-24", "2026-12-28"]);
+    const lightning = makeLightningLine([], { report_line: point("2026-12-10", 1) });
+    expect(chartExtraDates(rows, { lightning, reportLightning, pastLines: [past] })).toEqual([
+      "2026-12-10",
+      "2026-12-03",
+      "2026-12-02",
+    ]);
+  });
+
+  it("範囲が収まるかは両端を含めて比べる", () => {
+    const outer = { start: "2026-12-01", end: "2026-12-21" };
+    expect(rangeContains(outer, outer)).toBe(true);
+    expect(rangeContains(outer, { start: "2026-12-05", end: "2026-12-10" })).toBe(true);
+    expect(rangeContains(outer, { start: "2026-11-30", end: "2026-12-10" })).toBe(false);
+    expect(rangeContains(outer, { start: "2026-12-05", end: "2026-12-22" })).toBe(false);
+  });
+
+  it("範囲を渡していなければバーの範囲と比べ、はみ出せば描く範囲を返す。収まれば null", () => {
+    expect(rangeToRefetch(bars, ["2026-12-10", "2026-12-21"], null)).toBeNull();
+    expect(rangeToRefetch(bars, ["2026-12-24", "2026-12-28"], null)).toEqual({ start: "2026-12-01", end: "2026-12-28" });
+    expect(rangeToRefetch(bars, ["2026-11-25"], null)).toEqual({ start: "2026-11-25", end: "2026-12-21" });
+  });
+
+  it("範囲を渡したあとは、その範囲と比べる（返した範囲で読み直せば止まる。狭まっても読み直さない）", () => {
+    const requested = { start: "2026-12-01", end: "2026-12-28" };
+    expect(rangeToRefetch(bars, ["2026-12-28"], requested)).toBeNull();
+    expect(rangeToRefetch(bars, [], requested)).toBeNull();
+    // 日程を計算し直してバーが渡した範囲の外へ伸びたら、また読み直す
+    expect(rangeToRefetch({ range_start: "2026-12-01", range_end: "2027-01-08" }, [], requested)).toEqual({
+      start: "2026-12-01",
+      end: "2027-01-08",
+    });
+  });
+
+  it("描く活動（バー）が無ければ読み直さない", () => {
+    expect(rangeToRefetch({ range_start: null, range_end: null }, ["2026-12-10"], null)).toBeNull();
   });
 });
 

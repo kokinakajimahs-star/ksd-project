@@ -392,7 +392,8 @@ function WbsElementView() {
         {canEstimate && dictionary !== null && (
           <EstimateForm
             projectId={projectId}
-            elementId={elementId}
+            targetType="ELEMENT"
+            targetId={elementId}
             label={`${dictionary.wbs_code} ${dictionary.name}`}
             onSaved={handleEstimateSaved}
           />

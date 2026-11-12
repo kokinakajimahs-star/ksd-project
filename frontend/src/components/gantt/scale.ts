@@ -1,7 +1,8 @@
 // ガントの座標の計算（設計書 7.3）。横軸は稼働日の軸ではなく暦日で描く。
 // サーバが返す暦日上の座標（日付＋その日の中の割合）をそのまま x にする（画面で稼働日を数え直さない）
-import type { Judgement } from "../../api/prg";
-import type { CalendarPoint, Gantt } from "../../api/sch";
+import type { Judgement, LightningLine, OverlaidLine } from "../../api/prg";
+import type { ReportLightning } from "../../api/rpt";
+import type { CalendarPoint, Gantt, GanttRow } from "../../api/sch";
 
 /** 表示の単位。単位は 1 日あたりの横幅だけを変える（7.3） */
 export type GanttUnit = "day" | "week" | "month";
@@ -74,6 +75,72 @@ export function chartRange(gantt: Pick<Gantt, "range_start" | "range_end">, extr
     }
   }
   return { start, end };
+}
+
+/** 描く範囲を広げる線（GanttChart の lightning・reportLightning・pastLines と同じもの） */
+export interface RangeLines {
+  lightning?: LightningLine | null;
+  reportLightning?: ReportLightning | null;
+  pastLines?: OverlaidLine[];
+}
+
+/**
+ * 描く範囲を広げる日付（chartRange の extraDates）：⑥⑦ の報告日線と、ガントの行に当たるイナズマ線の頂点（API-PRG-006 の線は
+ * 活動、会議レポートの線は行の番号で当てる。両方あれば lightning）、⑧ の過去の線の報告日線と頂点。
+ * GanttChart（描く範囲）と GanttPage（非稼働日を受け取る範囲。7.3）が同じ日付を使う
+ */
+export function chartExtraDates(rows: Pick<GanttRow, "row_index" | "activity_id">[], lines: RangeLines): string[] {
+  const { lightning = null, reportLightning = null, pastLines = [] } = lines;
+  const extra: string[] = [];
+  if (lightning !== null) {
+    const activities = new Set(rows.map((r) => r.activity_id));
+    extra.push(lightning.report_line.calendar.date);
+    for (const row of lightning.rows) {
+      if (row.activity_id !== null && activities.has(row.activity_id)) {
+        extra.push(row.point.calendar.date);
+      }
+    }
+  } else if (reportLightning !== null) {
+    const rowIndexes = new Set(rows.map((r) => r.row_index));
+    extra.push(reportLightning.report_line.calendar.date);
+    for (const v of reportLightning.vertices) {
+      if (rowIndexes.has(v.row_index)) {
+        extra.push(v.point.calendar.date);
+      }
+    }
+  }
+  for (const line of pastLines) {
+    extra.push(line.report_line.calendar.date);
+    for (const v of line.vertices) {
+      extra.push(v.point.calendar.date);
+    }
+  }
+  return extra;
+}
+
+/** inner が outer に収まる（両端を含む） */
+export function rangeContains(outer: DateRange, inner: DateRange): boolean {
+  return parseIsoDate(outer.start) <= parseIsoDate(inner.start) && parseIsoDate(inner.end) <= parseIsoDate(outer.end);
+}
+
+/**
+ * 非稼働日を受け取り直す表示範囲（7.3・API-SCH-010 の range_start・range_end）。非稼働日は、前回の要求で渡した範囲
+ * （requested。渡していなければ null で、応答のバーの範囲）の分しか受け取っていない。描く範囲がそこに収まっていなければ
+ * 描く範囲を返し、収まっていれば null（読み直さない）。描く活動が無ければ null
+ */
+export function rangeToRefetch(
+  gantt: Pick<Gantt, "range_start" | "range_end">,
+  extraDates: string[],
+  requested: DateRange | null,
+): DateRange | null {
+  const drawn = chartRange(gantt, extraDates);
+  if (drawn === null) {
+    return null;
+  }
+  const covered =
+    requested ??
+    (gantt.range_start !== null && gantt.range_end !== null ? { start: gantt.range_start, end: gantt.range_end } : null);
+  return covered !== null && rangeContains(covered, drawn) ? null : drawn;
 }
 
 /** 範囲を描く幅（最後の日を含む） */

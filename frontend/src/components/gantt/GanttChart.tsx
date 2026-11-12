@@ -7,6 +7,7 @@ import type { Judgement, LightningLine, OverlaidLine } from "../../api/prg";
 import type { ReportLightning } from "../../api/rpt";
 import type { AxisPoint, Gantt, GanttBar, GanttRow } from "../../api/sch";
 import {
+  chartExtraDates,
   chartRange,
   type DateRange,
   DAY_WIDTH,
@@ -127,25 +128,13 @@ export default function GanttChart({
     return null;
   }, [gantt.rows, lightning, reportLightning, positionOfActivity, positionOfRow]);
 
+  // 範囲を広げる日付は GanttPage（非稼働日を受け取る範囲）と同じ関数で集める（7.3）
   const range = useMemo((): DateRange | null => {
     if (fixedRange !== null) {
       return fixedRange;
     }
-    const extra: string[] = [];
-    if (mainLine !== null) {
-      extra.push(mainLine.reportLine.calendar.date);
-      for (const v of mainLine.vertices) {
-        extra.push(v.point.calendar.date);
-      }
-    }
-    for (const line of pastLines) {
-      extra.push(line.report_line.calendar.date);
-      for (const v of line.vertices) {
-        extra.push(v.point.calendar.date);
-      }
-    }
-    return chartRange(gantt, extra);
-  }, [gantt, mainLine, pastLines, fixedRange]);
+    return chartRange(gantt, chartExtraDates(gantt.rows, { lightning, reportLightning, pastLines }));
+  }, [gantt, lightning, reportLightning, pastLines, fixedRange]);
 
   if (range === null || gantt.rows.length === 0) {
     return <p className="gantt-empty">描く活動がありません</p>;

@@ -1367,6 +1367,11 @@
      **バーの範囲のまま**にし（意味を変えない）、`non_working_days` だけが表示範囲の分になる。バーが無くても両端を渡せばその範囲の非稼働日を返す。
      始まりが終わりより後・長さが 3660 日（`MAX_GANTT_RANGE_DAYS`。業務の値ではなく応答の大きさの歯止め）を超える範囲は 400 `VALIDATION_ERROR`。
      会議レポート（API-RPT-001・共有ビューの REPORT）は報告日の前後 4 週を渡す。共有ビューの GANTT はバーの範囲のまま
+     - 画面：UI-SCH-001 は estimate.edit を持つ人に行ごとの「見積」を出し、API-EST-001 の ACTIVITY で書く（`EstimateForm` を対象の種類で一般化した）。
+       活動の `estimate_hours` を書く経路は API-EST-001・変更要求・取込だけ（API-SCH-002〜004 は受けない。OQ-22 (1)）。
+       UI-SCH-002 は status_report.manage を持つ人に報告日の作成の部品（UI-PRG-001 と共用の `CreateReportForm`）を出す（報告日が 0 件でも）。
+       非稼働日は、描く範囲（バーの範囲を報告日線・頂点・過去の線で広げたもの。`chartExtraDates`）が前回受け取った範囲に収まらないときだけ、
+       描く範囲を渡して API-SCH-010 を読み直す（バーより広いときに 1 回増える。狭まっても読み直さない）。ガントのデータは API-SCH-010 だけで取る（NFR-02）
 - **理由:** 設計書 1.1 の 0.4・4.1・4.2・5.1・5.2・5.6・5.7・5.8・6.2・7.3。承認した CR の推奨案のとおり
 - **影響範囲:** `backend/app/domain/{effort,progress,lightning,delay,snapshot,change,tabular,wbs_code}.py`、
   `backend/app/services/{effort,wbs,io,change,schedule,progress,report}.py`、`backend/app/api/{effort,wbs}.py`・`backend/app/schemas/effort.py`、

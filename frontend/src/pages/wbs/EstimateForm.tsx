@@ -1,9 +1,16 @@
-// WBS要素の見積を書く部品（API-EST-001。EST-01・EST-08）。estimate.edit を持つ人にだけ出す（7.2）。
+// WBS要素・活動の見積を書く部品（API-EST-001。EST-01・EST-08）。estimate.edit を持つ人にだけ出す（7.2）。
+// WBS（UI-WBS-001・002）は ELEMENT、タスクリスト（UI-SCH-001）は ACTIVITY で使う。
 // 人時・人日のどちらでも入れられ、人日はサーバが 1 日の稼働時間で人時へ換算する（RULE-EST-002）。
 // 手法・前提・参照資料を見積値とあわせて送り、履歴（API-EST-002）に残る
 import { useState, type FormEvent } from "react";
 
-import { putEstimate, type EstimateMethod, type EstimateWritten, type InputUnit } from "../../api/est";
+import {
+  putEstimate,
+  type EstimateMethod,
+  type EstimateTargetType,
+  type EstimateWritten,
+  type InputUnit,
+} from "../../api/est";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import ErrorAlert from "../../components/ErrorAlert";
 import { optionalText } from "../../lib/form";
@@ -19,13 +26,15 @@ export function parseEstimateValue(text: string): number | null {
 
 export interface EstimateFormProps {
   projectId: number;
-  elementId: number;
-  /** 見出しに出す要素（WBS ID と名称） */
+  /** 見積の対象の種類：WBS要素（ELEMENT）か活動（ACTIVITY） */
+  targetType: EstimateTargetType;
+  targetId: number;
+  /** 見出しに出す対象（要素は WBS ID と名称） */
   label: string;
   onSaved: (result: EstimateWritten) => void;
 }
 
-export default function EstimateForm({ projectId, elementId, label, onSaved }: EstimateFormProps) {
+export default function EstimateForm({ projectId, targetType, targetId, label, onSaved }: EstimateFormProps) {
   const [value, setValue] = useState("");
   const [unit, setUnit] = useState<InputUnit>("HOUR");
   const [method, setMethod] = useState<EstimateMethod | "">("");
@@ -44,7 +53,7 @@ export default function EstimateForm({ projectId, elementId, label, onSaved }: E
     }
     setSaving(true);
     try {
-      const result = await putEstimate(projectId, "ELEMENT", elementId, {
+      const result = await putEstimate(projectId, targetType, targetId, {
         input_value: parsed,
         input_unit: unit,
         method: method === "" ? null : method,

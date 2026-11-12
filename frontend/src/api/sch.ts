@@ -178,8 +178,10 @@ export interface Gantt {
   project_start: string;
   report_date: string | null;
   baseline: BaselineRef | null;
+  /** バーの範囲（バーが無ければ null）。表示範囲を渡しても変わらない */
   range_start: string | null;
   range_end: string | null;
+  /** 表示範囲（渡さなければバーの範囲）の非稼働日 */
   non_working_days: string[];
   rows: GanttRow[];
   links: GanttLink[];
@@ -270,9 +272,20 @@ export function getCriticalPath(projectId: number): Promise<ScheduleResult> {
   return apiFetch<ScheduleResult>(`/projects/${projectId}/schedule/critical-path`);
 }
 
-/** baselineId を省けば最新の版（版が無ければ基準のバーは無い） */
-export function getGantt(projectId: number, baselineId?: number): Promise<Gantt> {
-  return apiFetch<Gantt>(`/projects/${projectId}/gantt`, { query: { baseline_id: baselineId } });
+/** ガントの表示範囲（暦日。両端を含む） */
+export interface GanttDisplayRange {
+  start: string;
+  end: string;
+}
+
+/**
+ * baselineId を省けば最新の版（版が無ければ基準のバーは無い）。range を渡せば、非稼働日はその表示範囲の分を返す
+ * （省けばバーの範囲。応答の range_start・range_end はどちらでもバーの範囲。設計書 6.2・7.3）
+ */
+export function getGantt(projectId: number, baselineId?: number, range?: GanttDisplayRange): Promise<Gantt> {
+  return apiFetch<Gantt>(`/projects/${projectId}/gantt`, {
+    query: { baseline_id: baselineId, range_start: range?.start, range_end: range?.end },
+  });
 }
 
 export function createScheduleBaseline(projectId: number, name: string): Promise<ScheduleBaseline> {
