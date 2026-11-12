@@ -14,7 +14,7 @@ import {
   makeProgressMethodResult,
 } from "../../test/prgFixtures";
 import { makeLightningLine, makeLightningRow, makeStatusReport, point } from "../../test/schFixtures";
-import { buildEntryInput, buildItemsInput, type EntryForm } from "./EntryEditor";
+import { buildEntryInput, buildItemsInput, itemDraftsFrom, type EntryForm } from "./EntryEditor";
 import StatusReportPage, { remainingText } from "./StatusReportPage";
 
 const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
@@ -288,6 +288,7 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     let saved = 0;
     const { calls } = mockApi(
       routes(meWith(["project.view", "progress.enter_all"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, makeProgressItems()),
         [`PUT ${BASE}/activities/22/progress-items`]: () => {
           saved += 1;
           return jsonResponse(
@@ -314,7 +315,8 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     await table();
 
     fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
-    const form = screen.getByRole("form", { name: "算定項目" });
+    // 今の項目（API-PRG-010。ここでは 0 件）を読んでから編集を出す
+    const form = await screen.findByRole("form", { name: "算定項目" });
     expect(within(form).getByText(/並べなかった既存の項目は消える/)).toBeInTheDocument();
     fireEvent.click(within(form).getByRole("button", { name: "項目を足す" }));
     expect(within(form).getByLabelText("1 行目の種類")).toHaveValue("DELIVERABLE");
@@ -336,6 +338,67 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)[1]!.body).toEqual({
       items: [{ id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: false }],
     });
+  });
+
+  it("算定項目の編集は今の項目（API-PRG-010）から始め、残した項目は id を載せ、外した項目は載せずに置き換える（PRG-05）", async () => {
+    const current = makeProgressItems({
+      percent_complete: 33.33,
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: false, done_at: "2026-12-09T00:00:00Z" },
+        { id: 91, item_type: "DELIVERABLE", title: "試験仕様書", weight: 2, done: false, approved: false, done_at: null },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+        [`PUT ${BASE}/activities/22/progress-items`]: () =>
+          jsonResponse(200, makeProgressItems({ percent_complete: 50, items: [current.items[0]!] })),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const form = await screen.findByRole("form", { name: "算定項目" });
+    expect(within(form).getByLabelText("1 行目の名前")).toHaveValue("設計書");
+    expect(within(form).getByLabelText("1 行目の完了")).toBeChecked();
+    expect(within(form).getByLabelText("2 行目の名前")).toHaveValue("試験仕様書");
+    expect(within(form).getByLabelText("2 行目の重み")).toHaveValue(2);
+    expect(within(form).getByLabelText("2 行目の完了")).not.toBeChecked();
+
+    // 2 行目を外し、新しい項目を 1 つ足す
+    fireEvent.click(within(form).getByRole("button", { name: "2 行目を外す" }));
+    fireEvent.click(within(form).getByRole("button", { name: "項目を足す" }));
+    fireEvent.change(within(form).getByLabelText("2 行目の名前"), { target: { value: "移行手順書" } });
+    fireEvent.click(within(form).getByRole("button", { name: "算定項目を保存する" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("算定項目を 1 件で保存した。進捗率 50%");
+    expect(sent(calls, "GET", `${BASE}/activities/22/progress-items`)).toHaveLength(1);
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`).map((c) => c.body)).toEqual([
+      {
+        items: [
+          { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: false },
+          { item_type: "DELIVERABLE", title: "移行手順書", weight: 1, done: false, approved: false },
+        ],
+      },
+    ]);
+  });
+
+  it("今の算定項目が読めなければ、算定項目の編集を出さずに理由を出す（空から置き換えない）", async () => {
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => errorResponse(404, "NOT_FOUND", "活動が見つかりません"),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const region = screen.getByRole("region", { name: "算定項目" });
+    expect(await within(region).findByRole("alert")).toHaveTextContent("活動が見つかりません");
+    expect(screen.queryByRole("form", { name: "算定項目" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "算定項目を保存する" })).toBeNull();
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)).toHaveLength(0);
   });
 
   it("status_report.manage を持つ人は報告日を作り、作った報告日へ移る（API-PRG-001。PRG-01）", async () => {
@@ -512,6 +575,15 @@ describe("進捗の入力欄の値の組み立て", () => {
       "1 行目：名前を入力してください",
       "1 行目：重みは 0 より大きい数で入力してください",
     ]);
+  });
+
+  it("保存済みの算定項目は id を保った入力欄の行になる（key は指定の数から振る）", () => {
+    expect(
+      itemDraftsFrom(
+        [{ id: 90, item_type: "CHECK", title: "試験", weight: 1.5, done: true, approved: true, done_at: null }],
+        7,
+      ),
+    ).toEqual([{ key: 7, id: 90, itemType: "CHECK", title: "試験", weight: "1.5", done: true, approved: true }]);
   });
 
   it("残工数の表示は自動か入力かを区別する（EFF-06）", () => {

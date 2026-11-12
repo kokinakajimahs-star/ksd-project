@@ -1,15 +1,18 @@
 // 進捗入力（UI-PRG-001）の 1 つの活動の編集の部品：
 // 進捗率・実績日付・残工数・遅延理由・完了見込み日（API-PRG-003。PRG-02・03、EFF-06）、
-// 算定方式（API-PRG-005。schedule.edit を持つ人だけ）、算定項目（API-PRG-004。項目を数える方式の活動だけ）。PRG-05
-import { useState, type FormEvent } from "react";
+// 算定方式（API-PRG-005。schedule.edit を持つ人だけ）、算定項目（今の項目を API-PRG-010 で読み、API-PRG-004 で置き換える。
+// 項目を数える方式の活動だけ）。PRG-05
+import { useEffect, useState, type FormEvent } from "react";
 
 import { toErrorView, type ErrorView } from "../../api/errors";
 import {
+  getProgressItems,
   putProgress,
   replaceProgressItems,
   setProgressMethod,
   type LightningRow,
   type ProgressEntryInput,
+  type ProgressItem,
   type ProgressItemInput,
   type ProgressItemType,
 } from "../../api/prg";
@@ -90,7 +93,7 @@ export function buildEntryInput(
   };
 }
 
-/** 算定項目の入力欄 1 行。id は保存済みの項目（保存の応答で得る） */
+/** 算定項目の入力欄 1 行。id は保存済みの項目（読んだ今の項目・保存の応答で得る） */
 export interface ItemDraft {
   key: number;
   id: number | null;
@@ -99,6 +102,19 @@ export interface ItemDraft {
   weight: string;
   done: boolean;
   approved: boolean;
+}
+
+/** 保存済みの算定項目を入力欄の行にする（key は keyFrom から順に振る。id を保つ） */
+export function itemDraftsFrom(items: ProgressItem[], keyFrom: number): ItemDraft[] {
+  return items.map((i, index) => ({
+    key: keyFrom + index,
+    id: i.id,
+    itemType: i.item_type,
+    title: i.title,
+    weight: String(i.weight),
+    done: i.done,
+    approved: i.approved,
+  }));
 }
 
 /** 算定項目の入力欄を API-PRG-004 の本体にする。名前の空・重みが正の数でないものは理由を返す */
@@ -371,10 +387,32 @@ function ProgressItemsEditor({
 }) {
   const [drafts, setDrafts] = useState<ItemDraft[]>([]);
   const [nextKey, setNextKey] = useState(1);
-  /** この画面で保存した（＝サーバの今の項目を知っている）か */
-  const [synced, setSynced] = useState(false);
+  /** 今の項目（API-PRG-010）を読めたか。読めるまでは編集を出さない（空から始めて保存すると今の項目が消える） */
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getProgressItems(projectId, activityId).then(
+      (result) => {
+        if (!cancelled) {
+          setDrafts(itemDraftsFrom(result.items, 1));
+          setNextKey(result.items.length + 1);
+          setLoaded(true);
+        }
+      },
+      (err: unknown) => {
+        if (!cancelled) {
+          setLoadError(toErrorView(err));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, activityId]);
 
   function update(key: number, patch: Partial<ItemDraft>) {
     setDrafts((ds) => ds.map((d) => (d.key === key ? { ...d, ...patch } : d)));
@@ -399,20 +437,8 @@ function ProgressItemsEditor({
     setError(null);
     try {
       const result = await replaceProgressItems(projectId, activityId, built.items);
-      let key = nextKey;
-      setDrafts(
-        result.items.map((i) => ({
-          key: key++,
-          id: i.id,
-          itemType: i.item_type,
-          title: i.title,
-          weight: String(i.weight),
-          done: i.done,
-          approved: i.approved,
-        })),
-      );
-      setNextKey(key);
-      setSynced(true);
+      setDrafts(itemDraftsFrom(result.items, nextKey));
+      setNextKey(nextKey + result.items.length);
       const percent = result.percent_complete === null ? "未算定" : `${result.percent_complete}%`;
       onSaved(`算定項目を ${result.items.length} 件で保存した。進捗率 ${percent}`);
     } catch (err) {
@@ -422,15 +448,21 @@ function ProgressItemsEditor({
     }
   }
 
+  if (!loaded) {
+    return (
+      <section aria-label="算定項目" className="progress-items">
+        <h4>算定項目（{ITEM_TYPE_LABELS[itemType]}を数える）</h4>
+        {loadError === null ? <p>今の算定項目を読み込んでいる</p> : <ErrorAlert error={loadError} />}
+      </section>
+    );
+  }
+
   return (
     <form aria-label="算定項目" onSubmit={(e) => void handleSubmit(e)}>
       <h4>算定項目（{ITEM_TYPE_LABELS[itemType]}を数える）</h4>
-      {!synced && (
-        <p className="note">
-          保存すると、ここに並べた項目で活動の算定項目を置き換える（並べなかった既存の項目は消える）。
-          既存の項目はこの画面では読み出せないため、全ての項目を並べてから保存すること
-        </p>
-      )}
+      <p className="note">
+        今の項目から始める。保存すると、ここに並べた項目で活動の算定項目を置き換える（並べなかった既存の項目は消える）
+      </p>
       <ErrorAlert error={error} />
       {drafts.length === 0 ? (
         <p>項目がありません（項目が 0 件の活動の進捗率は未算定になる）</p>

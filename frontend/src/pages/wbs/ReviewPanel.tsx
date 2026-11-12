@@ -1,23 +1,27 @@
-// UI-WBS-003 のレビューの部品（WBS-20）：レビューを始める（API-WBS-014。wbs.edit）・読む（API-WBS-015）・
+// UI-WBS-003 のレビューの部品（WBS-20）：レビューの一覧（API-WBS-025。新しい順）・始める（API-WBS-014。wbs.edit）・
+// 読む（API-WBS-015）・閉じる（API-WBS-024。wbs.edit。WBS は作成中に戻り、指摘は残る）・
 // 指摘を書く（API-WBS-016。wbs.review）・指摘の状態と対応を更新する（API-WBS-017。wbs.edit）。
-// レビューの一覧を読む API が 6.2 に無いので、開いているレビューは画面の URL（`?review=<ID>`）で持つ。
-// 始めたレビューはその ID へ進み、別のレビューは番号で開く（OQ-41）
+// 開いているレビューは画面の URL（`?review=<ID>`）で持つ。始めたレビューはその ID へ進み、別のレビューは一覧から開く
 import { useEffect, useState, type FormEvent } from "react";
 
 import { toErrorView, type ErrorView } from "../../api/errors";
 import type { Member } from "../../api/prj";
 import {
   addReviewComment,
+  closeReview,
   getReview,
+  listReviews,
   startReview,
   updateReviewComment,
   type CommentCategory,
   type CommentStatus,
   type Review,
   type ReviewComment,
+  type ReviewList,
   type WbsElement,
 } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
+import Pager from "../../components/Pager";
 import { formatDateTime } from "../../lib/format";
 import {
   COMMENT_CATEGORY_LABELS,
@@ -27,6 +31,8 @@ import {
 } from "./labels";
 
 const WHOLE = "";
+
+export const REVIEWS_PAGE_SIZE = 50;
 
 export interface ReviewPanelProps {
   projectId: number;
@@ -38,7 +44,9 @@ export interface ReviewPanelProps {
   names: ReadonlyMap<number, string>;
   canEdit: boolean;
   canReview: boolean;
-  /** レビューを始めた・指摘を変えた後（WBS の状態・検査の件数を読み直す） */
+  /** 画面が読み直すたびに増える（承認の申請でレビューが終わる など。一覧と開いているレビューを読み直す） */
+  reloadKey: number;
+  /** レビューを始めた・閉じた・指摘を変えた後（WBS の状態・検査の件数を読み直す） */
   onChanged: () => void;
 }
 
@@ -118,17 +126,38 @@ export default function ReviewPanel({
   names,
   canEdit,
   canReview,
+  reloadKey,
   onChanged,
 }: ReviewPanelProps) {
+  const [list, setList] = useState<ReviewList | null>(null);
+  const [listOffset, setListOffset] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [reviewKey, setReviewKey] = useState(0);
   const [reviewers, setReviewers] = useState<Set<number>>(new Set());
-  const [openNumber, setOpenNumber] = useState("");
   const [target, setTarget] = useState(WHOLE);
   const [category, setCategory] = useState<CommentCategory>("OMISSION");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorView | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listReviews(projectId, { limit: REVIEWS_PAGE_SIZE, offset: listOffset }).then(
+      (result) => {
+        if (!cancelled) {
+          setList(result);
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, listOffset, reloadKey]);
 
   useEffect(() => {
     if (reviewId === null) {
@@ -152,7 +181,7 @@ export default function ReviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [projectId, reviewId, reloadKey]);
+  }, [projectId, reviewId, reviewKey, reloadKey]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -183,15 +212,20 @@ export default function ReviewPanel({
     });
   }
 
-  function handleOpen(event: FormEvent) {
-    event.preventDefault();
-    const trimmed = openNumber.trim();
-    if (!/^[1-9]\d*$/.test(trimmed)) {
-      setError({ message: "レビューの番号を入力してください", details: [] });
+  function handleOpen(id: number) {
+    setError(null);
+    onOpen(id);
+  }
+
+  function handleClose() {
+    if (review === null) {
       return;
     }
-    setError(null);
-    onOpen(Number(trimmed));
+    const closing = review.id;
+    void run(async () => {
+      setReview(await closeReview(projectId, closing));
+      onChanged();
+    });
   }
 
   function handleComment(event: FormEvent) {
@@ -210,7 +244,7 @@ export default function ReviewPanel({
         body: body.trim(),
       });
       setBody("");
-      setReloadKey((k) => k + 1);
+      setReviewKey((k) => k + 1);
       onChanged();
     });
   }
@@ -233,13 +267,14 @@ export default function ReviewPanel({
     }
     await run(async () => {
       await updateReviewComment(projectId, review.id, comment.id, input);
-      setReloadKey((k) => k + 1);
+      setReviewKey((k) => k + 1);
       onChanged();
     });
   }
 
   const elementLabel = new Map(elements.map((e) => [e.id, `${e.wbs_code} ${e.name}`]));
   const isOpen = review !== null && review.status === "OPEN";
+  const personName = (id: number) => names.get(id) ?? `#${id}`;
 
   return (
     <section aria-labelledby="review-heading" className="review-panel">
@@ -277,25 +312,62 @@ export default function ReviewPanel({
         </form>
       )}
 
-      <form aria-label="レビューを番号で開く" onSubmit={handleOpen}>
-        <label>
-          レビューの番号
-          <input inputMode="numeric" value={openNumber} onChange={(e) => setOpenNumber(e.target.value)} />
-        </label>
-        <button type="submit">開く</button>
-      </form>
+      {list !== null && list.items.length === 0 && <p>レビューはまだありません</p>}
+      {list !== null && list.items.length > 0 && (
+        <>
+          <table aria-label="レビューの一覧">
+            <thead>
+              <tr>
+                <th scope="col">レビュー</th>
+                <th scope="col">状態</th>
+                <th scope="col">依頼した人</th>
+                <th scope="col">依頼した日時</th>
+                <th scope="col">レビューする人</th>
+                <th scope="col">終了した日時</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.items.map((r) => (
+                <tr key={r.id} data-status={r.status} className={r.id === reviewId ? "selected" : undefined}>
+                  <td>#{r.id}</td>
+                  <td>{labelOf(REVIEW_STATUS_LABELS, r.status)}</td>
+                  <td>{personName(r.requested_by)}</td>
+                  <td>{formatDateTime(r.requested_at)}</td>
+                  <td>{r.reviewer_ids.map(personName).join("、")}</td>
+                  <td>{r.closed_at === null ? "—" : formatDateTime(r.closed_at)}</td>
+                  <td>
+                    <button type="button" aria-label={`レビュー #${r.id} を開く`} onClick={() => handleOpen(r.id)}>
+                      開く
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pager total={list.total} limit={list.limit} offset={list.offset} onChange={setListOffset} />
+        </>
+      )}
 
-      {review === null && reviewId === null && <p>開いているレビューはありません（始めるか、番号で開く）</p>}
+      {review === null && reviewId === null && <p>開いているレビューはありません（一覧から開くか、始める）</p>}
       {review !== null && (
         <>
           <h4>
             レビュー #{review.id}（{labelOf(REVIEW_STATUS_LABELS, review.status)}）
           </h4>
           <p>
-            依頼：{names.get(review.requested_by) ?? `#${review.requested_by}`}・{formatDateTime(review.requested_at)}
+            依頼：{personName(review.requested_by)}・{formatDateTime(review.requested_at)}
             {review.closed_at !== null && `・終了 ${formatDateTime(review.closed_at)}`}
           </p>
-          <p>レビューする人：{review.reviewer_ids.map((id) => names.get(id) ?? `#${id}`).join("、")}</p>
+          <p>レビューする人：{review.reviewer_ids.map(personName).join("、")}</p>
+          {canEdit && isOpen && (
+            <p>
+              <button type="button" disabled={busy} onClick={handleClose}>
+                レビューを閉じる
+              </button>{" "}
+              閉じると WBS はレビュー中から作成中に戻る（指摘は残る）。
+            </p>
+          )}
           {review.comments.length === 0 && <p>指摘はまだありません</p>}
           {review.comments.length > 0 && (
             <table aria-label="指摘">

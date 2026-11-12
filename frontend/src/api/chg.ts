@@ -1,10 +1,10 @@
-// 変更管理の API の型と呼び出し（設計書 6.2 の API-CHG-001〜010）。
+// 変更管理の API の型と呼び出し（設計書 6.2 の API-CHG-001〜011）。
 // 形はサーバの schemas（backend/app/schemas/change.py）に合わせる。日付は YYYY-MM-DD、日時は ISO 8601
 import { apiFetch } from "./client";
 import type { Page, PageQuery } from "./cmn";
 
 // ---------------------------------------------------------------------------
-// 変更要求（API-CHG-001〜006）
+// 変更要求（API-CHG-001〜006・011）
 // ---------------------------------------------------------------------------
 
 /** 変更要求の状態（5.10。RULE-CHG-003） */
@@ -133,6 +133,13 @@ export function analyzeChangeRequest(projectId: number, changeRequestId: number)
 
 export function submitChangeRequest(projectId: number, changeRequestId: number): Promise<ChangeRequest> {
   return apiFetch<ChangeRequest>(`/projects/${projectId}/change-requests/${changeRequestId}/submit`, {
+    method: "POST",
+  });
+}
+
+/** 提出を取り下げる（API-CHG-011。提出済みを下書きに戻し、保留中の承認申請を消す。影響分析は残る） */
+export function withdrawChangeRequest(projectId: number, changeRequestId: number): Promise<ChangeRequest> {
+  return apiFetch<ChangeRequest>(`/projects/${projectId}/change-requests/${changeRequestId}/withdraw`, {
     method: "POST",
   });
 }

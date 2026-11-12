@@ -1,10 +1,13 @@
-// 試験用のデータ：レポート・共有の応答の形（backend/app/schemas/report.py の MeetingReportOut・ShareLinkCreated・SharedViewOut）
+// 試験用のデータ：レポート・共有の応答の形（backend/app/schemas/report.py の MeetingReportOut・ShareLinkOut・ShareLinkList・
+// ShareLinkCreated・SharedViewOut）
 import type {
   MeetingReport,
   ReportDelay,
   ReportKpi,
   ReportMilestone,
+  ShareLink,
   ShareLinkCreated,
+  ShareLinkList,
   SharedView,
 } from "../api/rpt";
 import { makeBar, makeGantt, makeGanttRow, point } from "./schFixtures";
@@ -114,6 +117,16 @@ export function makeMeetingReport(overrides: Partial<MeetingReport> = {}): Meeti
     restricted: false,
     ...overrides,
   };
+}
+
+/** 共有リンク 1 件（一覧の形。トークンは無い） */
+export function makeShareLink(overrides: Partial<ShareLink> = {}): ShareLink {
+  const { token: _token, ...link } = makeShareLinkCreated();
+  return { ...link, ...overrides };
+}
+
+export function shareLinkList(items: ShareLink[]): ShareLinkList {
+  return { project_id: 3, items, total: items.length, limit: 100, offset: 0 };
 }
 
 export function makeShareLinkCreated(overrides: Partial<ShareLinkCreated> = {}): ShareLinkCreated {

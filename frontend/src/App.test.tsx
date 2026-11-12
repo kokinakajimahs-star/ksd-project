@@ -160,6 +160,7 @@ describe("App（WBS のルート。7.1）", () => {
       "GET /api/v1/projects/3/wbs": () => jsonResponse(200, makeTree()),
       "GET /api/v1/projects/3/wbs/validation": () => jsonResponse(200, makeValidation()),
       "GET /api/v1/projects/3/scope-baselines": () => jsonResponse(200, emptyPage),
+      "GET /api/v1/projects/3/wbs/reviews": () => jsonResponse(200, emptyPage),
     });
     const { container } = renderAt("/projects/3/wbs-review");
     expect(await screen.findByRole("table", { name: "100% ルールの検査の結果" })).toBeInTheDocument();

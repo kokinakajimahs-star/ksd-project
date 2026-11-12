@@ -1,10 +1,13 @@
 // 試験用のデータ：WBS・見積の応答の形（backend/app/schemas/wbs.py の WbsTree・ElementOut・DictionaryOut・ValidationOut・
-// ReviewOut・CommentOut・BaselineSummary・BaselineOut・ResponsibilityMatrixOut・WbsTraceOut、estimate.py の EstimateRecordOut・EstimateHistoryOut）
+// ReviewOut・ReviewSummary・ReviewList・CommentOut・BaselineSummary・BaselineOut・ResponsibilityMatrixOut・WbsTraceOut、
+// estimate.py の EstimateRecordOut・EstimateHistoryOut）
 import type { EstimateHistory, EstimateRecord } from "../api/est";
 import type {
   Dictionary,
   Review,
   ReviewComment,
+  ReviewList,
+  ReviewSummary,
   ResponsibilityMatrix,
   ScopeBaselineSummary,
   Validation,
@@ -155,6 +158,17 @@ export function makeReview(overrides: Partial<Review> = {}): Review {
     comments: [makeComment()],
     ...overrides,
   };
+}
+
+/** レビューの一覧の 1 行（makeReview から指摘を除いた形） */
+export function makeReviewSummary(overrides: Partial<ReviewSummary> = {}): ReviewSummary {
+  const { comments: _comments, ...summary } = makeReview();
+  return { ...summary, ...overrides };
+}
+
+/** レビューの一覧（新しい順に並べて渡す） */
+export function reviewList(items: ReviewSummary[], overrides: Partial<ReviewList> = {}): ReviewList {
+  return { project_id: 3, items, total: items.length, limit: 50, offset: 0, ...overrides };
 }
 
 export function makeScopeBaselineSummary(overrides: Partial<ScopeBaselineSummary> = {}): ScopeBaselineSummary {

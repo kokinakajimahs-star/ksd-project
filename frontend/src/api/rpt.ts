@@ -1,7 +1,8 @@
-// レポート・共有の API の型と呼び出し（設計書 6.2 の API-RPT-001〜004）。
-// 定例会議レポート（UI-RPT-001）が 001〜003 を、共有ビュー（UI-RPT-002）が 004 を使う。
+// レポート・共有の API の型と呼び出し（設計書 6.2 の API-RPT-001〜005）。
+// 定例会議レポート（UI-RPT-001）が 001〜003・005 を、共有ビュー（UI-RPT-002）が 004 を使う。
 // 形はサーバの schemas（backend/app/schemas/report.py）に合わせる。日付は YYYY-MM-DD、時刻は ISO 8601（UTC）、工数は人時の数
 import { apiFetch } from "./client";
+import type { Page, PageQuery } from "./cmn";
 import type { OverlaidVertex, StatusReportStatus } from "./prg";
 import type { AxisPoint, Gantt } from "./sch";
 
@@ -95,6 +96,11 @@ export interface ShareLink {
   created_at: string;
 }
 
+/** 共有リンクの一覧（API-RPT-005。新しい順。失効・期限切れも含む。トークンは含まない） */
+export interface ShareLinkList extends Page<ShareLink> {
+  project_id: number;
+}
+
 /** 作った共有リンク。token は作った応答でだけ返る（サーバはハッシュだけを持つ） */
 export interface ShareLinkCreated extends ShareLink {
   token: string;
@@ -124,6 +130,12 @@ export function getMeetingReport(projectId: number, reportId: number): Promise<M
 
 export function createShareLink(projectId: number, input: ShareLinkInput): Promise<ShareLinkCreated> {
   return apiFetch<ShareLinkCreated>(`/projects/${projectId}/share-links`, { method: "POST", body: input });
+}
+
+export function listShareLinks(projectId: number, query: PageQuery = {}): Promise<ShareLinkList> {
+  return apiFetch<ShareLinkList>(`/projects/${projectId}/share-links`, {
+    query: { limit: query.limit, offset: query.offset },
+  });
 }
 
 export async function revokeShareLink(projectId: number, linkId: number): Promise<void> {
