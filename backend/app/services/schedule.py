@@ -63,6 +63,7 @@ from app.domain.scheduling import (
 from app.domain.wbs_code import CodedElement, display_preorder
 from app.domain.wbs_rules import ActivityRef, AssignmentRef, WbsRuleError, ensure_hierarchy
 from app.errors import AppError
+from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
 from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshotItem, StatusReport
@@ -681,12 +682,15 @@ def remove_activity(
     依存の行と割当を消し、ベースラインの写しは活動の紐付けだけを空にして残す（SCH-18 の「削除された活動」。A-19）。
     進捗の算定項目・入力も消し、スナップショットの写しは紐付けだけを空にして残す（A-26）。
     実績工数（``time_entries``）のある活動は消さずに 409 ``INVALID_STATE``（実績を黙って消すと EFF-02 の集計が変わる。OQ-26 (2)・A-30）。
+    是正措置が指す活動は 422 ``ACTIVITY_REFERENCED``（変更要求の反映と同じ。外部キー違反の 500 にしない。A-47）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
     activity = _activity_of(session, project_id, activity_id)
     if session.scalar(select(TimeEntry.id).where(TimeEntry.activity_id == activity_id).limit(1)) is not None:
         raise AppError(409, "INVALID_STATE", "実績工数のある活動は消せません",
                        details=[{"activity_id": activity_id, "reason": "HAS_TIME_ENTRIES"}])
+    if session.scalar(select(CorrectiveAction.id).where(CorrectiveAction.activity_id == activity_id).limit(1)) is not None:
+        raise AppError(422, "ACTIVITY_REFERENCED", "是正措置が指す活動は消せません", details=[{"activity_ids": [activity_id]}])
     session.execute(
         delete(ActivityDependency).where(
             or_(ActivityDependency.predecessor_id == activity_id, ActivityDependency.successor_id == activity_id)

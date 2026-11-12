@@ -51,7 +51,16 @@ export function missingCompletion(dictionary: Dictionary): string[] {
   return missing;
 }
 
+/**
+ * 要素を移るたび（横断照会の要素の一覧のリンクなど、同じルートの別の要素）に画面を作り直す。
+ * 前の要素のスコープ紐付けの選択・保存の結果・履歴の頁を次の要素へ持ち越さない（持ち越すと別の要素の紐付けを置き換える。A-47）
+ */
 export default function WbsElementPage() {
+  const params = useParams<{ projectId: string; elementId: string }>();
+  return <WbsElementView key={`${params.projectId ?? ""}/${params.elementId ?? ""}`} />;
+}
+
+function WbsElementView() {
   const params = useParams<{ projectId: string; elementId: string }>();
   const projectId = parseProjectId(params.projectId);
   const elementId = parseProjectId(params.elementId);

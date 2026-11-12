@@ -430,6 +430,35 @@ def test_summary_every_axis_sums_to_project_total(world: World, client: TestClie
     assert client.get(f"/api/v1/projects/{MISSING}/effort/summary", headers=world.admin_h).status_code == 404
 
 
+def test_summary_for_finalized_report_keeps_percent_of_finalization(world: World, client: TestClient) -> None:
+    """API-EFF-005 多軸集計：確定済みの報告日を指定すると、進捗率は確定時の値（5.8・BR-13）。後で算定項目を変えても動かない。"""
+    world.estimate(world.a, "40")
+    method = client.put(world.url(f"/activities/{world.a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                        headers=world.h["pm"])
+    assert method.status_code == 200, method.text
+    items_url = world.url(f"/activities/{world.a}/progress-items")
+    half = client.put(items_url, json={"items": [{"item_type": "CHECK", "title": "単体試験", "done": True},
+                                                 {"item_type": "CHECK", "title": "結合試験"}]}, headers=world.h["pm"])
+    assert half.status_code == 200 and half.json()["percent_complete"] == 50.0, half.text
+    report = world.report("2026-12-01")
+    finalized = client.post(world.url(f"/status-reports/{report}/finalize"), headers=world.h["pm"])
+    assert finalized.status_code == 200, finalized.text
+
+    def etc_of_a() -> float:
+        response = client.get(world.url("/effort/summary"), params={"axis": "wbs", "report_id": report},
+                              headers=world.h["pm"])
+        assert response.status_code == 200, response.text
+        return float(response.json()["total"]["etc"])
+
+    # A は 40×(1−0.5)=20、B は見積なしで 0
+    assert etc_of_a() == 20.0
+    done = client.put(items_url, json={"items": [{"item_type": "CHECK", "title": "単体試験", "done": True},
+                                                 {"item_type": "CHECK", "title": "結合試験", "done": True}]},
+                      headers=world.h["pm"])
+    assert done.status_code == 200 and done.json()["percent_complete"] == 100.0, done.text
+    assert etc_of_a() == 20.0  # 確定時の 50% のまま（今の項目の 100% で求め直さない）
+
+
 def test_summary_without_baseline_keeps_baseline_empty(world: World, client: TestClient) -> None:
     world.estimate(world.a, "10")
     body = client.get(world.url("/effort/summary"), headers=world.h["pm"]).json()

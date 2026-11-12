@@ -61,7 +61,7 @@ from app.models.prj import Project, ProjectMember
 from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of, project_not_found
-from app.services.progress import entries_of_report, project_settings, report_percents
+from app.services.progress import entries_of_report, percents_at_report, project_settings, report_percents
 from app.services.project_access import ProjectAccess
 from app.services.schedule import Plan, load_plan
 
@@ -571,7 +571,8 @@ def load_basis(session: Session, project_id: int, *, report_id: int | None = Non
                 element_base[item.element_id] = _ZERO if item.estimate_hours is None else _decimal(item.estimate_hours)
 
     entries_of = entries_of_report(session, report.id) if report is not None else {}
-    percents = report_percents(session, plan.project, plan.activities, entries_of)
+    percents = (percents_at_report(session, plan.project, plan.activities, report, entries_of) if report is not None
+                else report_percents(session, plan.project, plan.activities, entries_of))
     limit_date = report.report_date if report_id is not None and report is not None else None
     query = (select(TimeEntry).join(Activity, Activity.id == TimeEntry.activity_id)
              .where(Activity.project_id == project_id).order_by(TimeEntry.id))

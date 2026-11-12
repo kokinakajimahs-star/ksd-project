@@ -381,10 +381,17 @@ def analyze_change_request(
     """影響分析を流す（project.view。RULE-CHG-002。CHG-02）。**本計画にも変更要求にも書き込まない。**
 
     今の計画の写しに保存した変更内容を当て、5.9 の形（終了日・マイルストーン・クリティカルパス・総工数・要素）を返す。
-    反映済み（APPLIED）・却下（REJECTED）の変更要求は当てる先が無いので 409 ``INVALID_STATE``（A-37）。
+    反映済み（APPLIED）・却下（REJECTED）の変更要求は当てる先が無いので 404 ではなく 409 ``INVALID_STATE``（A-37）。
+    委託先だけで読む利用者には、一覧に出ない変更要求（対象が自分の割当の WBS の経路に入らないもの）を見つからないものとして
+    扱う（9.2 の注記。一覧と同じ 404。A-47）。
     """
-    authorize_project(session, access, actor, project_id, "project.view")
+    table = authorize_project(session, access, actor, project_id, "project.view")
     change_request = _change_request_of(session, project_id, change_request_id)
+    visible = _visible(session, access, actor, project_id, table)
+    if visible is not None and not _visible_change_request(
+        change_request, visible, _coded(_elements(session, project_id)), _code_history(session, project_id)
+    ):
+        raise AppError(404, "NOT_FOUND", "変更要求が見つかりません", details=[{"change_request_id": change_request_id}])
     if change_request.status in _IMPACT_CLOSED:
         raise AppError(409, "INVALID_STATE", f"変更要求が {change_request.status} のときは影響分析を流せません",
                        details=[{"change_request_id": change_request.id, "status": change_request.status}])
@@ -664,10 +671,12 @@ def apply_change_request(
 ) -> AppliedView:
     """承認済みの変更を反映して再基準化する（change.apply。CHG-04）。
 
-    1. RULE-CHG-003 の APPLY（APPROVED → APPLIED。それ以外は 409 ``INVALID_STATE``）。WBS の承認待ちの間も 409
+    1. RULE-CHG-003 の APPLY（APPROVED → APPLIED。それ以外は 409 ``INVALID_STATE``）。WBS が ``BASELINED`` でなければ
+       （承認を経ていない・承認待ち・基準の後に直接変えた）409 ``INVALID_STATE``。5.10 で ``BASELINED`` へ入るのは承認だけで、
+       反映で承認を飛ばさない（A-47）
     2. RULE-CHG-001 で今の計画へ当て（当てられなければ 400・422）、本計画へ書く。日程を計算し直す（RULE-SCH-001〜003）
     3. RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る。旧版は残す（BR-12）
-    4. 新しいスコープの版ができたので、WBS の状態は BASELINED（A-37）
+    4. 計画は新しい版と一致するので、計画を書いて ``DRAFT`` に戻った WBS の状態を ``BASELINED`` に保つ
 
     基準の写しが指す要素は消せない（422 ``ELEMENT_IN_BASELINE``。CR-002 の暫定）。どこかで止まれば何も書かない。
     """
@@ -679,8 +688,8 @@ def apply_change_request(
         raise _workflow_error(exc, [{"change_request_id": change_request.id, "status": change_request.status}]) from exc
     project = session.get(Project, project_id)
     assert project is not None
-    if project.wbs_status == WbsStatus.PENDING_APPROVAL.value:
-        raise AppError(409, "INVALID_STATE", "WBS の承認待ちの間は変更を反映できません",
+    if project.wbs_status != WbsStatus.BASELINED.value:
+        raise AppError(409, "INVALID_STATE", "WBS が承認済み（BASELINED）のときだけ変更を反映できます",
                        details=[{"wbs_status": project.wbs_status}])
     applied = _apply(_plan_model(session, project_id), change_request.operations or [])
     try:

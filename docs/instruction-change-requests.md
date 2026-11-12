@@ -169,3 +169,174 @@
 承認までは、第 1 階層の順番を今ある第 1 階層の要素の `sibling_seq` の最大＋1 にする（`_top_last_child_seq` に閉じ込めた）。
 第 2 階層以下は 5.2 どおり親の `last_child_seq`（再利用しない）。
 
+
+## CR-004 : 5.10 の遷移と 7 章の画面に要る API が 6.2 に無い（取り下げ・レビューを閉じる・置き換えだけで読めない資源）
+
+### 対象箇所
+設計書 §5.10（変更要求の状態遷移 `SUBMITTED --> DRAFT: 取り下げ`、WBS の状態遷移 `IN_REVIEW --> DRAFT: レビューを閉じる`）・§6.2・§7.1
+
+### 現行の記載
+- §5.10 に取り下げとレビューを閉じる遷移がある。§6.2 にはその遷移を呼ぶ API が無い
+- §6.2 の API-PRG-004（算定項目）・API-WBS-013（スコープの紐付け）は置き換えの PUT だけで、今の値を読む API が無い。
+  WBS レビュー（API-WBS-014・015）と共有リンク（API-RPT-002・003）にも一覧の API が無い
+
+### 問題
+- 提出した変更要求を直すには、却下を経て起票し直すしかない（5.10 の遷移を使えない）
+- 置き換えだけの資源は、画面が今の値を出せない。保存すると、並べなかった既存の項目・紐付けが消える
+  （独立レビューで、算定項目 A・B のある活動に C だけ足して保存すると A・B が消えることを確かめた）
+
+### 根拠
+docs/open-questions.md OQ-18・OQ-37 (1)・OQ-38 (1)・OQ-40 (3)・OQ-41 (1)(2)、docs/decisions/ASSUMPTIONS.md A-47
+
+### 提案する変更後の記載
+§6.2 に次を足す（権限は対の書く API と同じ）。
+- `POST …/change-requests/{id}/withdraw`（change.create。SUBMITTED → DRAFT。承認申請は取り下げる）
+- `POST …/wbs/reviews/{id}/close`（wbs.edit。IN_REVIEW → DRAFT）
+- `GET …/activities/{id}/progress-items`（project.view）
+- `GET …/wbs/elements/{id}/scope-links`（project.view）
+- `GET …/wbs/reviews`（project.view）
+- `GET …/share-links`（share.manage）
+
+### 影響範囲
+- 設計 ID の追加（API が 6 つ）。`spec-ids.toml`・`trace.toml` の数が変わる
+- 実装：`backend/app/api/`・`services/`・画面の UI-CHG-001・UI-PRG-002・UI-WBS-002・UI-WBS-003・UI-RPT-001
+
+### 暫定対応
+画面に「保存すると丸ごと置き換える」と書いて置き換えの PUT だけを呼ぶ。レビューは URL の番号で開き、申請の時に閉じる（OQ-18）
+
+## CR-005 : 実績工数を締める境界（RULE-EFF-005）と、写し・集計の実績の範囲（5.8）が 1 日ずれる
+
+### 対象箇所
+設計書 §5.1 の RULE-EFF-005・§5.8（実績工数）・RULE-PRG-007（確定の写し）
+
+### 現行の記載
+- RULE-EFF-005「確定した報告日より前の日は変えない」
+- §5.8「実績工数：活動の `time_entries` の合計（報告日を指定したときは報告日以前の分）」
+
+### 問題
+報告日の当日の工数は、確定の後も入力・変更できる。一方で、写しと報告日を指定した集計は当日の分を含む。
+そのため、確定の後に当日の工数を直すと、写しの `actual_hours` と、同じ報告日を指定した集計が食い違う（両立しない記載）
+
+### 根拠
+`backend/app/domain/effort.py` の `check_time_entries`（`work_date < locked_before`）・`services/effort.py` の `load_basis`（`work_date <= report_date`）。docs/decisions/ASSUMPTIONS.md A-28・OQ-27 (7)
+
+### 提案する変更後の記載
+RULE-EFF-005 を「確定した報告日**以前**の日は変えない」にする（集計の範囲に合わせる）。報告日の当日の入力を許すなら、§5.8 の範囲を「報告日より前」にする
+
+### 影響範囲
+設計 ID の変更は無い（文言）。実装は `check_time_entries` の比較 1 か所と、その試験
+
+### 暫定対応
+字義どおり（当日は変えられる）のまま。食い違いは OQ-27 (7) に記録した
+
+## CR-006 : 取込（API-INT-002）の権限が data.import だけで、wbs.edit・schedule.edit・estimate.edit を迂回できる
+
+### 対象箇所
+設計書 §6.2 の API-INT-002・§9.1（ロール×権限の表）
+
+### 現行の記載
+API-INT-002 の権限は data.import だけ。既定の表で data.import を持つのは PM・PLANNER
+
+### 問題
+取込は WBS・日程・見積・担当を書く。プロジェクトごとに表を変えられる（API-CMN-007）ので、data.import だけを付けたロールの利用者は、
+wbs.edit・schedule.edit・estimate.edit を持たなくても、取込でそれらを書ける（権限の迂回。起票の条件 4）
+
+### 根拠
+`backend/app/services/io.py`（data.import だけを確かめる）。独立レビューで、data.import だけのロールで WBS の CSV を取り込むと要素が書かれることを読んで確かめた
+
+### 提案する変更後の記載
+API-INT-002 の権限を「data.import に加えて、対象の書く権限（`wbs` は wbs.edit（見積の列を変えるなら estimate.edit も）、`activities` は schedule.edit（見積の列を変えるなら estimate.edit も））」にする。`time-entries` は他人の行を書く権限が 9.1 に無いので、data.import で許すか、本人の行だけ（effort.enter_own）にするかを決める
+
+### 影響範囲
+設計 ID の変更は無い（§6.2 の権限の欄）。実装は `services/io.py` の権限の検査と試験
+
+### 暫定対応
+data.import だけを確かめる（記載どおり）。既定の表では data.import を持つロールは書く権限も持つので、表を変えない限り迂回は起きない
+
+## CR-007 : 5.8 の基準の値の数え方が、基準の後に消した・足した活動と、非 WP の葉を定めていない（BR-11 の「追加」を誤る）
+
+### 対象箇所
+設計書 §5.8（基準の値）・BR-11（差異の抽出と「追加された要素」）・§4.1 の DB-SCH-004 `schedule_baseline_items`
+
+### 現行の記載
+「基準の値＝選んだスケジュールベースライン（既定は最新の版）の見積」。上位は下位の合計
+
+### 問題
+基準を活動の値の和で数えると（どの軸でも合計が一致する。EFF-09）、次のことが起きる。
+- 基準の後に活動を消すと、その基準の値が WP から消えて差異が隠れる
+- 基準の時点で活動の無かった WP に活動を足すと、基準にあった WP が「追加された要素」になる
+- 子の無い非 WP の要素は、スケジュールベースラインに項目が無いので、いつも「追加」になる
+
+WP の基準の項目（WORK_PACKAGE の行）を使うと、担当・期間の軸の合計が WBS の軸と合わなくなる（EFF-09）。設計書の記載だけでは両方を満たせない
+
+### 根拠
+`backend/app/domain/effort.py` の `rollup_effort`・docs/decisions/ASSUMPTIONS.md A-28・OQ-27 (5)。独立レビューで純粋関数を直接呼んで再現した
+
+### 提案する変更後の記載
+§5.8 に「WBS の軸の基準の値は、WP は版の WORK_PACKAGE の項目、上位は版にある下位の合計。担当・期間の軸は活動の項目だけを配り、
+消した活動の基準は『基準にあって今は無い』の桶に置く」を足す。BR-11 の「追加」は「版に WORK_PACKAGE の項目も活動の項目も無い要素」とする
+
+### 影響範囲
+設計 ID の変更は無い（文言）。実装は `domain/effort.py` の `rollup_effort`・`aggregate_effort` と試験（`test_effort.py`）、`services/effort.py` の `load_basis`
+
+### 暫定対応
+A-28 のまま（基準は集計の葉＝活動と活動の無い WP で持つ）
+
+## CR-008 : 画面の入口と表示範囲の欠け（活動の見積・最初の報告日・ガントの非稼働日）
+
+### 対象箇所
+設計書 §7.1・§7.2・§7.3・§6.2（API-SCH-010 の `non_working_days`）・11 章（EST-01 の画面）
+
+### 現行の記載
+- 11 章で EST-01（WP・活動の見積）に当たる画面は UI-WBS-001 だけ。7.1 の UI-SCH-001 は EST-01 を挙げない
+- 7.2 の進捗の遷移はガント → 進捗入力だけ。UI-PRG-001 のルートは `:reportId` を要する
+- 7.3「非稼働日を灰色にする」。API-SCH-010 の `non_working_days` の範囲は定めが無い。会議レポート（7.4）の表示範囲は報告日の前後 4 週
+
+### 問題
+- 活動の見積（人時・人日、手法・前提・参照資料）を書ける画面が無い。活動を足した WP の集計見積は活動の見積の和（A-13）なので、画面だけでは見積を戻せない（EST-01・EST-08 を満たせない）
+- 報告日が 1 件も無いプロジェクトでは、画面から最初の報告日を作れない（PRG の一連の流れの入口が無い）
+- 表示範囲がバーの範囲より広いとき（会議レポートの前後 4 週、報告日・過去の線で広げたガント）、広がった部分の非稼働日が灰色にならない。
+  画面は祝日などの例外を知らないので、自分では足せない
+
+### 根拠
+docs/open-questions.md OQ-22 (1)・OQ-37 (2)・OQ-42 (21)。`frontend/src/pages/wbs/EstimateForm.tsx`（ELEMENT だけ）・`backend/app/domain/gantt.py`（`non_working_days` はバーの範囲）
+
+### 提案する変更後の記載
+- 7.1 の UI-SCH-001 に EST-01（活動の見積。API-EST-001 の ACTIVITY）を足す
+- 7.2 に「ガント（UI-SCH-002）から報告日を作る（API-PRG-001。status_report.manage）」を足す
+- 6.2 の API-SCH-010 に `range_start`・`range_end`（省けばバーの範囲）を足し、その範囲の `non_working_days` を返す。7.4 の会議レポートは自分の表示範囲を渡す
+
+### 影響範囲
+設計 ID の追加は無い（既存の UI・API の項目）。実装は `ActivityListPage.tsx`・`GanttPage.tsx`・`GanttChart.tsx`・`backend/app/domain/gantt.py`・`report.py`
+
+### 暫定対応
+活動の見積は CSV の取込か変更要求で書く。最初の報告日は存在しない番号の URL で開いた画面の作成の部品から作れる。非稼働日はバーの範囲だけ灰色にする
+
+## CR-009 : 設計書の中の食い違い（5.7 の見込みの終了と BR-04、5.6 と 7.3 の表示、進捗率の精度と BR-07）
+
+### 対象箇所
+設計書 §5.7 の 2・BR-04・§5.6・§7.3・§4.1（`progress_entries.percent_complete` などの型）・BR-07
+
+### 現行の記載
+- §5.7 の 2「完了見込み日があれば `index(完了見込み日) + 1`」。BR-04 は非稼働日を前の稼働日へ寄せる
+- §5.6 は完了・未着手（予定内）を「表示で区別する」。§7.3 は頂点の色を 4 色だけ定める
+- 4.1 は進捗率の精度を定めない。BR-07 は位置の境目を前の稼働日にする
+
+### 問題
+- 完了見込み日が非稼働日のとき、式どおりなら次の稼働日の終業、BR-04 の寄せなら前の稼働日の終業になる（例：土日休み・原点 12/01・見込み 12/05（土）で 5 と 4）
+- 5.6 の区別を 7.3 の 4 色では表せない（完了と未着手（予定内）がどちらも予定どおりの色）
+- 進捗率を小数 2 桁で持つと、3 項目中 2 完了（66.67%）の P が 2.0001 になり、BR-07 の境目の日付と判定がずれる（独立レビューで再現した）
+
+### 根拠
+`backend/app/domain/delay.py`（A-23 の寄せ）・`frontend/src/components/gantt/scale.ts`・`backend/app/models/prg.py`（`Numeric(5,2)`）・`domain/progress.py`（0.01 への丸め）
+
+### 提案する変更後の記載
+- §5.7 の 2 に「完了見込み日は BR-04 で稼働日へ寄せてから `index + 1`」を足す
+- §7.3 に「完了・未着手（予定内）は予定どおりの色に印（形）を重ねる」を足す
+- §4.1 に進捗率の精度（小数 2 桁）を書き、§5.4 に「P は丸める前の進捗率から求める」を足す
+
+### 影響範囲
+設計 ID の変更は無い（文言）。実装は `domain/delay.py`・`domain/progress.py`・`domain/lightning.py`・`scale.ts` と試験
+
+### 暫定対応
+見込みは BR-04 の寄せ（A-23）、頂点は 4 色とツールチップの文言、進捗率は小数 2 桁で丸めた値から P を求める（OQ-42 (7)）

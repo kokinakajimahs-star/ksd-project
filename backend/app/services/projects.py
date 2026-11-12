@@ -47,6 +47,7 @@ from app.models.prj import (
 from app.models.sch import Activity
 from app.models.wbs import WbsNumberingRule
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of
+from app.services.progress import refresh_open_entries_of_project
 from app.services.project_access import ProjectAccess
 
 # PATCH で変えられる列と、そのうち空（null）にできない列（API-PRJ-004）
@@ -339,6 +340,8 @@ def update_project(
         raise _duplicate_code(code)
 
     start_changed = start_date != project.start_date
+    method_changed = ("progress_method_default" in settings_changes
+                      and settings_changes["progress_method_default"] != project.settings.get("progress_method_default"))
     for name, value in changes.items():
         if name == "settings":
             # JSON の列は中身の書き換えを追跡しないので、新しい辞書を代入する（A-11）
@@ -349,6 +352,9 @@ def update_project(
         session.flush()
         if start_changed:
             recalculator.recalculate(session, project.id)
+        if method_changed:
+            # 既定に従う活動の OPEN の報告日の進捗率を新しい既定で求め直す（活動ごとに方式を変えたときと同じ。A-47）
+            refresh_open_entries_of_project(session, project)
         session.commit()
     except IntegrityError as exc:  # 同時に同じコードへ変えられた
         session.rollback()

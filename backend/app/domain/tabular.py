@@ -96,6 +96,8 @@ ACTIVITY_COLUMNS: Final = (
     "担当者のログインID（; 区切り）",
 )
 TIME_ENTRY_COLUMNS: Final = ("ログインID", "活動ID", "作業日", "工数（人時）", "備考")
+# WBS ID の列。xlsx の数のセルは表記を失う（1.10 → 1.1、1.0 → 1）ので、文字のセルだけを受ける（A-47）
+CODE_COLUMNS: Final = frozenset({"WBS ID", "親のWBS ID", "WPのWBS ID"})
 
 COLUMNS: Final[Mapping[TabularTarget, tuple[str, ...]]] = MappingProxyType(
     {
@@ -523,6 +525,7 @@ def _data_rows(
     """見出しを照らし、データの行（行番号, 列の数にそろえたセル）を返す。見出しが違えば ``None``（行は読まない）。
 
     全てのセルが空の行は読み飛ばす（表計算ソフトが末尾に残す空の行）。見出しより右のセルに値があれば ``TOO_MANY_COLUMNS``。
+    WBS ID の列（``CODE_COLUMNS``）が数のセルなら ``INVALID_VALUE`` でその行を読まない（BR-02 の照合を誤らせない）。
     """
     columns = COLUMNS[target]
     if not grid:
@@ -548,6 +551,14 @@ def _data_rows(
         extra = [cell for cell in cells[len(columns) :] if cell.strip() != ""]
         if extra:
             issues.add(line, None, ImportIssueCode.TOO_MANY_COLUMNS, f"見出しの {len(columns)} 列より右に値がある: {extra}")
+            continue
+        numeric = [(column, cell) for column, cell in zip(columns, raw, strict=False)
+                   if column in CODE_COLUMNS and isinstance(cell, int | float | Decimal)]
+        if numeric:
+            # 数のセルの WBS ID は別の要素に当たりうる（1.10 が 1.1 になる）ので、照合せずにこの行を誤りにする
+            for column, cell in numeric:
+                issues.add(line, column, ImportIssueCode.INVALID_VALUE,
+                           f"{column} が数のセル（{cell!r}）。表記が変わるので、文字の書式のセルで入れる（例 '1.10'）")
             continue
         rows.append((line, (cells + [""] * len(columns))[: len(columns)]))
     return rows

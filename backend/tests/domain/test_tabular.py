@@ -236,6 +236,22 @@ def test_spreadsheet_typed_cells_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_numeric_cells_in_wbs_id_columns_are_rejected() -> None:
+    """RULE-INT-001：WBS ID の列が数のセル（xlsx の General 書式）なら INVALID_VALUE。1.10 が 1.1 として別の要素に当たらない。"""
+    row: list[object] = list(wbs_row(name="基本設計（改）"))
+    row[0] = 1.1  # 利用者は 1.1 か 1.10 を打った。数の表記からはどちらか分からない
+    plan = wbs_plan([list(WBS_COLUMNS), row])
+    assert plan.changes == () and codes(plan) == [(2, "WBS ID", ImportIssueCode.INVALID_VALUE)]
+    parent_row: list[object] = list(wbs_row(name="基本設計（改）"))
+    parent_row[1] = 1  # 1.0 が 1 になる
+    assert codes(wbs_plan([list(WBS_COLUMNS), parent_row])) == [(2, "親のWBS ID", ImportIssueCode.INVALID_VALUE)]
+    activity: list[object] = list(ACTIVITY_COLUMNS)
+    numeric_wp: list[object] = ["", 1.1, "設計レビュー", "", "1", "0", "", "", ""]
+    assert codes(activity_plan([activity, numeric_wp])) == [(2, "WPのWBS ID", ImportIssueCode.INVALID_VALUE)]
+    # 文字のセルの WBS ID はそのまま照合する
+    assert wbs_plan(wbs_grid(wbs_row(name="基本設計（改）"))).ok
+
+
 def test_header_mismatch_reads_no_rows() -> None:
     """RULE-INT-001：見出しが 6.3 の列（この順）と違う・見出しが無いときは、1 行目の誤りだけを返し行を読まない。"""
     swapped = [["活動ID", "ログインID", "作業日", "工数（人時）", "備考"], ["x", "y", "z", "w", ""]]

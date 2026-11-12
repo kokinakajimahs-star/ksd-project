@@ -90,10 +90,10 @@ from app.domain.workflow import (
 from app.errors import AppError
 from app.models.chg import ChangeRequest, CorrectiveAction
 from app.models.cmn import User
-from app.models.eff import TimeEntry
+from app.models.eff import TimeEntry, VarianceNote
 from app.models.est import EstimateRecord
 from app.models.prj import Project, ProjectMember, ScopeItem
-from app.models.sch import Activity
+from app.models.sch import Activity, ScheduleBaselineItem
 from app.models.wbs import (
     COMMENT_STATUS_INITIAL,
     REVIEW_STATUS_INITIAL,
@@ -758,6 +758,8 @@ def remove_element(
     - 配下の辞書・スコープの紐付け・新旧対応を消し、指摘は ``element_id`` を空にして残す（A-15）
     - スコープベースラインの版に入った要素を含むなら 422 ``ELEMENT_IN_BASELINE``（CR-002 の暫定。版の写しを変えない）
     - 配下の WP に活動があれば 422 ``ELEMENT_HAS_ACTIVITIES``（活動の削除は SCH の群の担当。OQ-18）
+    - 是正措置・差異の理由が指す要素を含むなら 422 ``ELEMENT_REFERENCED``（変更要求の反映と同じ。外部キー違反の 500 にしない。A-47）
+    - スケジュールベースラインの写しは要素の紐付けだけを空にして残す（活動を消すときと同じ。DB-SCH-004 の注記・A-19）
     """
     context = _editing(session, access, actor, activities, project_id)
     _element_of(context, element_id)
@@ -774,6 +776,16 @@ def remove_element(
     if with_activities:
         raise AppError(422, "ELEMENT_HAS_ACTIVITIES", "活動のある WP は消せません（先に活動を消します）",
                        details=[{"element_ids": with_activities}])
+    referenced = sorted(
+        {i for i in session.scalars(select(CorrectiveAction.element_id).where(CorrectiveAction.element_id.in_(ids)))
+         if i is not None}
+        | {i for i in session.scalars(select(VarianceNote.element_id).where(VarianceNote.element_id.in_(ids)))
+           if i is not None}
+    )
+    if referenced:
+        raise AppError(422, "ELEMENT_REFERENCED", "是正措置・差異の理由が指す要素は消せません",
+                       details=[{"element_ids": referenced}])
+    session.execute(update(ScheduleBaselineItem).where(ScheduleBaselineItem.element_id.in_(ids)).values(element_id=None))
     session.execute(update(WbsReviewComment).where(WbsReviewComment.element_id.in_(ids)).values(element_id=None))
     session.execute(delete(WbsScopeLink).where(WbsScopeLink.element_id.in_(ids)))
     session.execute(delete(WbsDictionaryEntry).where(WbsDictionaryEntry.element_id.in_(ids)))

@@ -368,6 +368,40 @@ def test_delete_removes_subtree_and_related_rows(world: World, db_session: Sessi
     assert world.client.delete(world.url(f"/elements/{keep['id']}"), headers=world.headers["viewer"]).status_code == 403
 
 
+def test_delete_records_audit_logs_for_bulk_statements(world: World, db_session: Session) -> None:
+    """API-WBS-005 の削除も変更履歴に残る（6.1・NFR-05）：一括の DELETE・UPDATE で消した要素・紐付け・指摘の行ごとに記録する。"""
+    from app.models.chg import AuditLog
+
+    parent = world.add("消す")
+    child = world.add("子", parent["id"], kind="WORK_PACKAGE")
+    review = WbsReview(project_id=world.pid, requested_by=world.users["planner"].id)
+    db_session.add(review)
+    db_session.flush()
+    comment = WbsReviewComment(review_id=review.id, element_id=child["id"], category="OTHER", body="b",
+                               author_id=world.users["pm"].id)
+    db_session.add(comment)
+    db_session.commit()
+
+    response = world.client.delete(world.url(f"/elements/{parent['id']}"), headers=world.headers["planner"])
+    assert response.status_code == 204, response.text
+    db_session.expire_all()
+    deleted = db_session.scalars(
+        select(AuditLog).where(AuditLog.entity_type == "wbs_elements", AuditLog.action == "DELETE")
+    ).all()
+    assert sorted(r.entity_id for r in deleted) == sorted([parent["id"], child["id"]])
+    by_id = {r.entity_id: r for r in deleted}
+    assert by_id[child["id"]].before is not None and by_id[child["id"]].before["name"] == "子"
+    assert by_id[child["id"]].after is None
+    assert by_id[child["id"]].wbs_code == child["wbs_code"]
+    assert all(r.user_id == world.users["planner"].id and r.project_id == world.pid for r in deleted)
+    nulled = db_session.scalars(
+        select(AuditLog).where(AuditLog.entity_type == "wbs_review_comments", AuditLog.entity_id == comment.id,
+                               AuditLog.action == "UPDATE")
+    ).one()
+    assert nulled.before is not None and nulled.after is not None
+    assert (nulled.before["element_id"], nulled.after["element_id"]) == (child["id"], None)
+
+
 def test_delete_baselined_element_is_422(world: World, db_session: Session) -> None:
     """API-WBS-005：スコープベースラインの版に入った要素は 422 ELEMENT_IN_BASELINE（CR-002 の暫定。版の写しを変えない）。"""
     element = world.add("基準の要素")

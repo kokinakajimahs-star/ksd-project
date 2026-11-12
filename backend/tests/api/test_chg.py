@@ -138,6 +138,20 @@ class World:
         self.decide(submitted["approval_request_id"], "APPROVE")
         return created
 
+    def baseline_wbs(self) -> Any:
+        """WBS を承認して BASELINED にする（5.10：完了条件を書き、申請し、承認する。スコープの版 1 ＝ INITIAL_APPROVAL）。"""
+        for element_id in (self.d, self.wp1, self.wp2):
+            put = self.client.put(self.url(f"/wbs/elements/{element_id}/dictionary"),
+                                  json={"deliverable": "成果物", "completion_criteria": "承認済み"},
+                                  headers=self.h["planner"])
+            assert put.status_code == 200, put.text
+        submitted = self.client.post(self.url("/wbs/approval-requests"), headers=self.h["planner"])
+        assert submitted.status_code == 201, submitted.text
+        decided = self.decide(submitted.json()["id"], "APPROVE")
+        assert decided["wbs_status"] == "BASELINED"
+        assert (decided["scope_baseline"]["version"], decided["scope_baseline"]["reason"]) == (1, "INITIAL_APPROVAL")
+        return decided
+
     def apply(self, cr_id: int, who: str = "pm", expect: int = 200) -> Any:
         response = self.client.post(self.url(f"/change-requests/{cr_id}/apply"), headers=self.h[who])
         assert response.status_code == expect, response.text
@@ -310,6 +324,24 @@ def test_impact_analysis_reports_differences_without_writing(world: World) -> No
                              headers=world.h["viewer"]).status_code == 404
 
 
+def test_impact_analysis_hides_change_requests_outside_contractor_scope(world: World) -> None:
+    """API-CHG-004 影響分析を流す：委託先には、一覧に出ない変更要求（自分の WBS の経路の外が対象）を 404 で返す（9.2）。"""
+    inside = world.create()  # 対象は WP1（活動 A の WP）
+    outside = world.create(target_codes=[world.wp2_code], operations=[])
+    assign = world.client.put(world.url(f"/activities/{world.a}/assignments"),
+                              json={"assignments": [{"user_id": world.uid("contractor"), "planned_hours": 8}]},
+                              headers=world.h["planner"])
+    assert assign.status_code == 200, assign.text
+    hidden = world.client.post(world.url(f"/change-requests/{outside['id']}/impact"), headers=world.h["contractor"])
+    assert hidden.status_code == 404, hidden.text
+    assert hidden.json()["error"]["code"] == "NOT_FOUND"
+    seen = world.client.post(world.url(f"/change-requests/{inside['id']}/impact"), headers=world.h["contractor"])
+    assert seen.status_code == 200, seen.text
+    # 全て読めるロールには、同じ変更要求の影響分析を返す
+    assert world.client.post(world.url(f"/change-requests/{outside['id']}/impact"),
+                             headers=world.h["viewer"]).status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # API-CHG-005 提出・承認（API-WBS-019 と RULE-CHG-003）
 # ---------------------------------------------------------------------------
@@ -363,6 +395,7 @@ def test_approval_decision_moves_change_request_and_forbids_self_approval(world:
 
 def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     """API-CHG-006 承認済みの変更を反映して再基準化する：計画へ当て、日程を計算し直し、新しい版を作る（旧版は残す。BR-12）。"""
+    world.baseline_wbs()
     manual = world.client.post(world.url("/schedule-baselines"), json={"name": "初版"}, headers=world.h["pm"])
     assert manual.status_code == 201, manual.text
     draft = world.create()
@@ -379,7 +412,7 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert applied["change_request"]["status"] == "APPLIED"
     assert applied["change_request"]["applied_by"] == world.uid("pm")
     assert applied["schedule_baseline"]["version"] == 2 and applied["schedule_baseline"]["reason"] == "CHANGE_REQUEST"
-    assert applied["scope_baseline"]["version"] == 1 and applied["scope_baseline"]["reason"] == "CHANGE_REQUEST"
+    assert applied["scope_baseline"]["version"] == 2 and applied["scope_baseline"]["reason"] == "CHANGE_REQUEST"
 
     world.session.expire_all()
     c = world.session.scalar(select(Activity).where(Activity.project_id == world.pid, Activity.name == "C"))
@@ -408,8 +441,34 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert again["error"]["code"] == "INVALID_STATE"
 
 
+def test_apply_requires_baselined_wbs(world: World) -> None:
+    """API-CHG-006：WBS が BASELINED（承認済みの版がある）でなければ 409 INVALID_STATE、何も書かない。
+
+    5.10 で BASELINED へ入るのは承認だけ。承認を経ていない WBS（DRAFT・IN_REVIEW）や基準の後に直接変えた WBS（DRAFT）を、
+    反映で BASELINED にしない（レビューの指摘。A-47）。
+    """
+    approved = world.approved()
+    activities_before = world.count(Activity)
+    refused = world.apply(approved["id"], expect=409)
+    assert refused["error"]["code"] == "INVALID_STATE"
+    assert refused["error"]["details"] == [{"wbs_status": "DRAFT"}]
+    world.session.expire_all()
+    assert world.count(Activity) == activities_before
+    assert world.count(ScopeBaseline) == 0
+    assert world.client.get(world.url(""), headers=world.h["viewer"]).json()["wbs_status"] == "DRAFT"
+
+    world.baseline_wbs()
+    renamed = world.client.patch(world.url(f"/wbs/elements/{world.wp2}"), json={"name": "直接変えた"},
+                                 headers=world.h["planner"])
+    assert renamed.status_code == 200, renamed.text
+    assert world.client.get(world.url(""), headers=world.h["viewer"]).json()["wbs_status"] == "DRAFT"
+    assert world.apply(approved["id"], expect=409)["error"]["details"] == [{"wbs_status": "DRAFT"}]
+    assert world.count(ScopeBaseline) == 1
+
+
 def test_apply_refuses_removing_baselined_element_and_writes_nothing(world: World) -> None:
     """API-CHG-006 承認済みの変更を反映して再基準化する：版に入った要素の削除は 422 ELEMENT_IN_BASELINE（CR-002）、何も書かない。"""
+    world.baseline_wbs()
     first = world.approved()
     world.apply(first["id"])  # 全ての要素がスコープの版に入る
     removing = world.approved(target_codes=[world.wp2_code],
@@ -425,6 +484,7 @@ def test_apply_refuses_removing_baselined_element_and_writes_nothing(world: Worl
 
 def test_apply_removes_activity_and_updates_values(world: World) -> None:
     """API-CHG-006 承認済みの変更を反映して再基準化する：活動の削除（依存も消える）と活動の値の変更を本計画へ書く。"""
+    world.baseline_wbs()
     approved = world.approved(operations=[
         {"op": "remove_activity", "activity_id": world.a},
         {"op": "update_activity", "activity_id": world.b, "fields": {"duration_days": 4, "estimate_hours": 32}},
@@ -441,6 +501,34 @@ def test_apply_removes_activity_and_updates_values(world: World) -> None:
 # ---------------------------------------------------------------------------
 # API-CHG-007〜009 是正措置
 # ---------------------------------------------------------------------------
+
+
+def test_direct_delete_refuses_rows_referenced_by_corrective_actions(world: World) -> None:
+    """API-SCH-005・API-WBS-005 の直接の削除も、是正措置が指す活動・要素は 422（変更要求の反映と同じ。500 にしない）。
+
+    スケジュールベースラインの写しだけが指す要素は、写しの紐付けを空にして消せる（活動を消すときと同じ。A-19）。
+    """
+    world.action(activity_id=world.b)
+    refused = world.client.delete(world.url(f"/activities/{world.b}"), headers=world.h["planner"])
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["error"]["code"] == "ACTIVITY_REFERENCED"
+    assert world.session.get(Activity, world.b) is not None
+    world.action(element_id=world.wp2)
+    element_refused = world.client.delete(world.url(f"/wbs/elements/{world.wp2}"), headers=world.h["planner"])
+    assert element_refused.status_code == 422, element_refused.text
+    assert element_refused.json()["error"]["code"] == "ELEMENT_REFERENCED"
+
+    wp3, _ = world.element("WP3", world.d, "WORK_PACKAGE")
+    saved = world.client.post(world.url("/schedule-baselines"), json={"name": "基準"}, headers=world.h["pm"])
+    assert saved.status_code == 201, saved.text
+    world.session.expire_all()
+    item = world.session.scalar(select(ScheduleBaselineItem).where(ScheduleBaselineItem.element_id == wp3))
+    assert item is not None
+    removed = world.client.delete(world.url(f"/wbs/elements/{wp3}"), headers=world.h["planner"])
+    assert removed.status_code == 204, removed.text
+    world.session.expire_all()
+    kept = world.session.get(ScheduleBaselineItem, item.id)
+    assert kept is not None and kept.element_id is None
 
 
 def test_create_corrective_action(world: World) -> None:

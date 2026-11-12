@@ -335,6 +335,25 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
     assert world.line(report)["rows"][0]["percent_complete"] == 100.0
 
 
+def test_project_default_method_change_refreshes_open_entries(world: World, client: TestClient,
+                                                              db_session: Session) -> None:
+    """API-PRJ-004 で算定方式の既定を変えると、既定に従う活動の OPEN の報告日の進捗率を求め直す（ガントとイナズマ線を揃える）。"""
+    a = world.add("A", duration_days=4)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, percent_complete=30)
+    items = [{"item_type": "CHECK", "title": "単体試験", "done": True}, {"item_type": "CHECK", "title": "結合試験", "done": True}]
+    assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": items},
+                      headers=world.h["pm"]).status_code == 200
+    changed = client.patch(f"/api/v1/projects/{world.pid}", json={"settings": {"progress_method_default": "CHECK_ITEM_RATIO"}},
+                           headers=world.h["pm"])
+    assert changed.status_code == 200, changed.text
+    db_session.expire_all()
+    entry = db_session.scalar(select(ProgressEntry).where(ProgressEntry.status_report_id == report,
+                                                          ProgressEntry.activity_id == a))
+    assert entry is not None and entry.percent_complete == Decimal("100")  # ガントが読む保存値
+    assert world.line(report)["rows"][0]["percent_complete"] == 100.0  # イナズマ線が求め直す値
+
+
 # ---------------------------------------------------------------------------
 # API-PRG-006 イナズマ線（PRG-08〜13。5.4・5.6）
 # ---------------------------------------------------------------------------

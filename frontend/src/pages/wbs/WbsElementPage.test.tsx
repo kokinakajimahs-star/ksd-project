@@ -181,6 +181,39 @@ describe("UI-WBS-002 WBS辞書・横断照会", () => {
     ]);
   });
 
+  it("横断照会から別の要素へ移ると、前の要素の紐付けの選択を持ち越さない（別の要素の紐付けを置き換えない）", async () => {
+    const child = { id: 102, parent_id: 101, kind: "WORK_PACKAGE" as const, name: "聞き取り", wbs_code: "1.1.1" };
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/wbs-codes/1.1/trace`]: () =>
+          jsonResponse(200, makeTrace({ elements: [makeTrace().elements[0]!, child] })),
+        [`GET ${BASE}/wbs/elements/102/dictionary`]: () =>
+          jsonResponse(200, makeDictionary({ element_id: 102, wbs_code: "1.1.1", name: "聞き取り" })),
+        [`GET ${BASE}/estimates/ELEMENT/102/history`]: () =>
+          jsonResponse(200, estimateHistory([], { target_id: 102 })),
+        [`GET ${BASE}/wbs-codes/1.1.1/trace`]: () =>
+          jsonResponse(200, makeTrace({ query: "1.1.1", element_id: 102, elements: [child] })),
+        [`PUT ${BASE}/wbs/elements/101/scope-links`]: () => jsonResponse(200, { element_id: 101, scope_item_ids: [31] }),
+        [`PUT ${BASE}/wbs/elements/102/scope-links`]: () => jsonResponse(200, { element_id: 102, scope_item_ids: [] }),
+      }),
+    );
+    renderAt();
+    const form = await screen.findByRole("form", { name: "スコープ項目を紐付ける" });
+    fireEvent.click(within(form).getByLabelText("対象内：受注業務"));
+    fireEvent.click(within(form).getByRole("button", { name: "紐付けを保存する" }));
+    expect(await screen.findByText(/紐付けた項目：/)).toHaveTextContent("受注業務");
+
+    const result = await screen.findByLabelText("横断照会の結果");
+    fireEvent.click(within(result).getByRole("link", { name: "1.1.1 聞き取り" }));
+    expect(await screen.findByText("聞き取り", { selector: "dd" })).toBeInTheDocument();
+    const next = await screen.findByRole("form", { name: "スコープ項目を紐付ける" });
+    expect(within(next).getByLabelText("対象内：受注業務")).not.toBeChecked();
+    expect(screen.queryByText(/紐付けた項目：/)).toBeNull();
+    fireEvent.click(within(next).getByRole("button", { name: "紐付けを保存する" }));
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/wbs/elements/102/scope-links`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/wbs/elements/102/scope-links`)[0]!.body).toEqual({ scope_item_ids: [] });
+  });
+
   it("開いた要素の WBS ID で横断照会し、旧 ID でも照会できる（API-WBS-023・WBS-07）", async () => {
     const { calls } = mockApi(
       routes(meWith(["project.view"]), {

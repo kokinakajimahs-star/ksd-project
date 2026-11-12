@@ -8,8 +8,10 @@ RULE-CHG-006（``make_audit_diff``）の差分にして ``audit_logs`` へ追記
   載っていなければ変更者は空、時刻はその時の UTC
 - プロジェクト・WBS ID：行の ``project_id``（プロジェクト自身は ``id``）、無ければ親の行（要素・活動・報告日・カレンダー・
   レビュー・版）からたどる。WBS ID は要素ならその ID、要素・活動・WP を指す行ならその要素（活動は WP）の ID
-- **限界**：``session.execute(update(...))``・``delete(...)`` のような一括の文は ORM の単位作業を通らないので記録しない
-  （docs/decisions/ASSUMPTIONS.md A-37）
+- 一括の文（``session.execute(update(...))``・``delete(...)``）は ORM の単位作業を通らないので、``do_orm_execute`` で
+  捕まえる（``_record_bulk``）。文の条件に当たる行を流す前に読み、削除はその値を、更新は流した後に読み直して変わった列を
+  記録する（NFR-05「全てのモデルの追加・更新・削除」。docs/decisions/ASSUMPTIONS.md A-47）
+- **限界**：``Session`` を通らない書き込み（``engine``・``connection`` へ直接流す文）は記録しない。サービス層はセッションだけで書く
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Connection, Table, insert, inspect, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.engine import Result
+from sqlalchemy.orm import ORMExecuteState, Session, sessionmaker
 
 from app.domain.audit import make_audit_diff
 from app.infra.db import Base
@@ -103,8 +106,7 @@ def _changes(obj: Any) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def _record(session: Session, _flush_context: Any) -> None:
     connection = session.connection()
-    user_id = session.info.get(AUDIT_USER_KEY)
-    occurred_at = session.info.get(AUDIT_NOW_KEY) or utc_now()
+    actor = _actor(session)
     rows: list[dict[str, Any]] = []
     changes: list[tuple[Any, str]] = [
         *((o, "CREATE") for o in session.new),
@@ -135,16 +137,30 @@ def _record(session: Session, _flush_context: Any) -> None:
         diff = make_audit_diff(table_name, entity_id, before, after, wbs_code=wbs_code)
         if diff is None:
             continue
-        rows.append({
-            "occurred_at": occurred_at, "user_id": user_id, "project_id": project_id,
-            "entity_type": diff.entity_type, "entity_id": diff.entity_id, "wbs_code": diff.wbs_code,
-            "action": diff.action.value,
-            "before": None if diff.before is None else dict(diff.before),
-            "after": None if diff.after is None else dict(diff.after),
-        })
+        rows.append(_audit_row(actor, diff, project_id))
+    _write(connection, rows)
+
+
+def _actor(session: Session) -> tuple[int | None, datetime]:
+    """変更者と時刻（``bind_actor`` で載せた値。無ければ変更者は空、時刻はその時の UTC）。"""
+    return session.info.get(AUDIT_USER_KEY), session.info.get(AUDIT_NOW_KEY) or utc_now()
+
+
+def _audit_row(actor: tuple[int | None, datetime], diff: Any, project_id: int | None) -> dict[str, Any]:
+    user_id, occurred_at = actor
+    return {
+        "occurred_at": occurred_at, "user_id": user_id, "project_id": project_id,
+        "entity_type": diff.entity_type, "entity_id": diff.entity_id, "wbs_code": diff.wbs_code,
+        "action": diff.action.value,
+        "before": None if diff.before is None else dict(diff.before),
+        "after": None if diff.after is None else dict(diff.after),
+    }
+
+
+def _write(connection: Connection, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    # 同じフラッシュで消えたプロジェクトを指さない（外部キー）
+    # 同じ書き込みで消えたプロジェクトを指さない（外部キー）
     project_ids = {r["project_id"] for r in rows if r["project_id"] is not None}
     if project_ids:
         projects = _table("projects")
@@ -155,8 +171,63 @@ def _record(session: Session, _flush_context: Any) -> None:
     connection.execute(insert(AuditLog.__table__), rows)
 
 
+def _bulk_target(state: ORMExecuteState) -> Table | None:
+    """一括の UPDATE・DELETE の対象の表（記録するものだけ）。それ以外の文は None。"""
+    if not (state.is_update or state.is_delete):
+        return None
+    name = getattr(getattr(state.statement, "table", None), "name", None)
+    if not isinstance(name, str) or name == AuditLog.__tablename__ or name not in Base.metadata.tables:
+        return None
+    table = _table(name)
+    return table if "id" in table.c else None
+
+
+def _record_bulk(state: ORMExecuteState) -> Result[Any] | None:
+    """一括の UPDATE・DELETE を流し、当たった行ごとに変更履歴を追記する（``do_orm_execute``）。"""
+    table = _bulk_target(state)
+    if table is None:
+        return None
+    session = state.session
+    connection = session.connection()
+    query = select(table)
+    whereclause = getattr(state.statement, "whereclause", None)
+    if whereclause is not None:
+        query = query.where(whereclause)
+    before_rows = {row["id"]: dict(row) for row in connection.execute(query).mappings()}
+    # 文を流す前に、行が属するプロジェクト・WBS ID を求める（消す行・親の行を読めるうちに）
+    located = {row_id: _locate(connection, table.name, values) for row_id, values in before_rows.items()}
+    result = state.invoke_statement()
+    if not before_rows:
+        return result
+    after_rows: dict[int, dict[str, Any]] = {}
+    if state.is_update:
+        reread = select(table).where(table.c.id.in_(list(before_rows)))
+        after_rows = {row["id"]: dict(row) for row in connection.execute(reread).mappings()}
+    actor = _actor(session)
+    rows: list[dict[str, Any]] = []
+    for row_id, values in before_rows.items():
+        project_id, wbs_code = located[row_id]
+        if state.is_delete:
+            before, after = values, None
+            if table.name == "projects":
+                project_id = None  # 消えた行を外部キーで指さない
+        else:
+            new = after_rows.get(row_id, values)
+            changed = [key for key in values if new.get(key) != values[key]]
+            if not changed:
+                continue
+            before = {key: values[key] for key in changed}
+            after = {key: new.get(key) for key in changed}
+        diff = make_audit_diff(table.name, row_id, before, after, wbs_code=wbs_code)
+        if diff is not None:
+            rows.append(_audit_row(actor, diff, project_id))
+    _write(connection, rows)
+    return result
+
+
 def register_audit_listener(factory: sessionmaker[Session]) -> None:
     """セッションの生成器に変更履歴の記録を載せる（アプリを作るときに 1 度）。"""
     from sqlalchemy import event
 
     event.listen(factory, "after_flush", _record)
+    event.listen(factory, "do_orm_execute", _record_bulk)

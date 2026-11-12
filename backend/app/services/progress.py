@@ -332,6 +332,30 @@ def report_percents(
     return {a.id: _entry_percent(project, a, entries.get(a.id), items[a.id]) for a in acts}
 
 
+def percents_at_report(
+    session: Session, project: Project, activities: Iterable[Activity], report: StatusReport,
+    entries: Mapping[int, ProgressEntry],
+) -> dict[int, Decimal | None]:
+    """報告日の時点の活動ごとの進捗率（5.8 の「対象の報告日の progress_entries を使う」）。
+
+    OPEN の報告日は入力から求め直す（``report_percents``）。確定済み（FINALIZED）の報告日は、確定の後に算定項目・算定方式を
+    変えても値を動かさないよう、確定時に求めた写しの値を使う（BR-13。イナズマ線・会議レポートと同じ値。A-47）。
+    確定の後に足した活動は写しに無く、その報告日に入力も無いので未算定（``None``）。
+    """
+    acts = list(activities)
+    if report.status != StatusReportStatus.FINALIZED.value:
+        return report_percents(session, project, acts, entries)
+    snapshot = session.scalar(select(ProgressSnapshot).where(ProgressSnapshot.status_report_id == report.id))
+    if snapshot is None:  # 確定と同じトランザクションで作るので、確定済みなら必ずある
+        raise RuntimeError(f"確定済みの報告日 {report.id} にスナップショットが無い")
+    frozen = {
+        i.activity_id: i.percent_complete
+        for i in session.scalars(select(ProgressSnapshotItem).where(ProgressSnapshotItem.snapshot_id == snapshot.id))
+        if i.activity_id is not None
+    }
+    return {a.id: frozen.get(a.id) for a in acts}
+
+
 def entries_of_report(session: Session, report_id: int) -> dict[int, ProgressEntry]:
     """報告日の進捗の入力（活動の ID → 行）。"""
     return _entries_of(session, report_id)
@@ -347,6 +371,19 @@ def _refresh_open_entries(session: Session, project: Project, activity: Activity
     ).all()
     for entry in entries:
         entry.percent_complete = _entry_percent(project, activity, entry, items)
+
+
+def refresh_open_entries_of_project(session: Session, project: Project) -> None:
+    """プロジェクトの既定の算定方式を変えたとき、既定に従う活動（自分の方式が空）の OPEN の報告日の入力の進捗率を求め直す。
+
+    活動ごとに方式を変えたとき（``set_progress_method``）と同じ扱い。ガント（保存値を読む）とイナズマ線（求め直す）の値を
+    揃える（確定済みの入力は変えない。BR-13。A-47）。
+    """
+    activities = session.scalars(
+        select(Activity).where(Activity.project_id == project.id, Activity.progress_method.is_(None)).order_by(Activity.id)
+    ).all()
+    for activity in activities:
+        _refresh_open_entries(session, project, activity)
 
 
 def _entries_of(session: Session, report_id: int) -> dict[int, ProgressEntry]:

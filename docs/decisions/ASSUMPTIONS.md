@@ -836,7 +836,7 @@
   変更履歴の更新・削除を ORM で許す（保守の手段が要る）なら `_refuse_audit_log_change` のイベントを外し、試験 `test_audit_logs_are_append_only` を直す
 - **限界:** 移行は SQLite でだけ流した（upgrade・downgrade・upgrade）。PostgreSQL では流していない。追記だけの歯止めは ORM の単位の操作だけで、
   `update(AuditLog)`・`delete(AuditLog)` の一括の文や SQL の直接の実行は止めない（DB の権限・トリガは R1 で扱わない）。
-  **是正措置の紐付いた要素・活動を消す（API-WBS-005・API-SCH-005）と外部キーで止まる（500）**。今は是正措置を作る API が無いので起きない（OQ-29 (2)。api:CHG が決める）。
+  ~~是正措置の紐付いた要素・活動を消す（API-WBS-005・API-SCH-005）と外部キーで止まる（500）~~ → A-47 で 422 `ELEMENT_REFERENCED`・`ACTIVITY_REFERENCED` にした（変更要求の反映と同じ）。
   変更履歴は**まだ 1 行も記録されない**（記録の仕組みは OQ-08・RULE-CHG-006 のスコープ）。変更要求・是正措置がプロジェクトの WBS・活動・報告日と同じプロジェクトを指すことは DB では見ていない（サービス層の担当）
 
 ## A-32: 見積（EST）のテーブル（db:EST）で決めたこと
@@ -1029,8 +1029,8 @@
     （要素・活動・報告日・カレンダー・レビュー・版）からたどる。検索の期間は `date_from`・`date_to`（UTC の日付で両端を含む。OQ-33 (2)）、新しい順
 - **覆す場合:** 起票の時点の検査は `create_change_request`・`update_change_request` の `_apply`、影響分析の状態の制限は `_IMPACT_CLOSED`、
   反映の後の WBS の状態は `apply_change_request`、是正措置の必須の紐付けは `create_corrective_action`、「今日」は `backend/app/api/change.py` の `get_today`
-- **限界:** 変更履歴は ORM の単位作業を通る書き込みだけを記録する。`session.execute(update(...))`・`delete(...)` のような一括の文
-  （WBS の要素の削除の後始末、活動の削除の後始末、レビューを閉じる処理など）は記録しない（OQ-33 (7)）。ログインで作る認証セッションは変更者が空。
+- **限界:** ~~変更履歴は ORM の単位作業を通る書き込みだけを記録する。一括の文は記録しない~~ → **A-47 で一括の文（`session.execute(update(...))`・`delete(...)`）も記録するよう改めた**
+  （OQ-33 (7)）。記録しないのは `Session` を通らない書き込みだけ。ログインで作る認証セッションは変更者が空。
   反映は要素の移動（5.9 に操作が無い）を扱わない。試験は SQLite の TestClient だけで、PostgreSQL では流していない
 
 ## A-38: 見積（EST）の API（api:EST）の API-EST-001〜003 で決めたこと
@@ -1094,7 +1094,7 @@
   取込で見積の記録を足さないなら `_add_estimate_record` の呼び出しを外し、試験 `test_import_wbs_creates_updates_and_moves` の記録の確かめを直す
 - **限界:** 実績工数の出力は data.export だけで他人の行も出す（6.2 の権限どおり。VIEWER は API-EFF-004 では他人の行を読めないが、出力では読める。OQ-35 (3)）。
   委託先だけで読む利用者に data.import を許したとき、取込は見える範囲に絞らない（OQ-35 (4)）。本体の大きさの上限は置いていない（OQ-35 (5)）。
-  担当の置き換えは一括 DELETE なので変更履歴に残らない（A-37 の限界）。CSV の式の解釈（CSV インジェクション）は未対策のまま（OQ-31 (8)）。
+  担当の置き換えの一括 DELETE も変更履歴に残る（A-47 で A-37 の限界を外した）。CSV の式の解釈（CSV インジェクション）は未対策のまま（OQ-31 (8)）。
   試験は SQLite の TestClient だけで、PostgreSQL では流していない。画面（UI-INT-001）は ui:INT の範囲
 
 ## A-40: レポート・共有（RPT）の API（api:RPT）の API-RPT-001〜004 で決めたこと
@@ -1288,3 +1288,36 @@
   ツリー図を箱と線の図にするなら `WbsPage.tsx` の `TreeBranch` を描き替える（`buildTree` はそのまま使える）。見積を API-WBS-003 で書くなら `ElementEditor.tsx` の `EstimateForm` を外す
 - **限界:** 試験は fetch・`window.confirm` を差し替えた画面の試験だけで、実際のサーバとは繋いでいない。見た目（CSS）は付けていない（ツリー図は入れ子の一覧のまま）。
   前に始めたレビューを開くには番号が要り、今の紐付けは画面に出ない（OQ-41）。木の要素が多いときの描画の速さは計っていない（仮想化していない）
+
+
+## A-47: 独立レビュー（2026-11-12）で見つけた欠陥のうち直したもの
+
+- **経緯:** run_20261110T094851_c358e7 の review ノードは max_turns（40）で止まった（途中までの指摘は `.kloop/runs/…/nodes/review/findings.md`）。
+  残りを 4 つの観点（画面・ドメイン・API の権限と遷移・テーブルと移行）で読み直した。設計書から外れて誤ったデータを書く・漏らす・500 になるもので、
+  設計書の記載だけで直し方が決まるものを直した。直し方が設計書で決まらないものは Change Request（CR-004〜009）と OQ-42 に残した
+- **選択:**
+  1. **一括の文も変更履歴に残す**（NFR-05・6.1「全てのモデルの追加・更新・削除」）：`backend/app/infra/audit_listener.py` に `do_orm_execute` を足し、
+     `session.execute(update(...))`・`delete(...)` は文の条件に当たる行を流す前に読み、削除はその値、更新は流した後に読み直して変わった列を記録する（`_record_bulk`）。
+     要素・活動の削除の後始末、担当の置き換え、レビューを閉じる処理が履歴に残る。A-37 の限界と OQ-33 (7) を改めた
+  2. **変更要求の反映（API-CHG-006）は WBS が BASELINED のときだけ**（5.10 の「BASELINED へは承認（PENDING_APPROVAL → BASELINED）でだけ」）。
+     DRAFT・IN_REVIEW・PENDING_APPROVAL では 409 `INVALID_STATE`（`details` に `wbs_status`）で何も書かない。反映した後は計画と新しい版が一致するので BASELINED のまま。OQ-33 (5) を改めた
+  3. **影響分析（API-CHG-004）も委託先の見える範囲に絞る**（9.2 の注記）：一覧（API-CHG-002）に出ない変更要求は、委託先には見つからないもの（404 `NOT_FOUND`）として扱う
+  4. **確定済みの報告日を指定した工数の集計は、確定時の進捗率を使う**（5.8「対象の報告日の progress_entries を使う」・BR-13）：`app/services/progress.py` の `percents_at_report`。
+     OPEN は今までどおり入力から求め直し、FINALIZED は写し（`progress_snapshot_items`）の値。確定の後に足した活動は未算定。API-EFF-005・006 と会議レポートの KPI がこの値を読む
+  5. **プロジェクトの既定の算定方式を変えたら、既定に従う活動の OPEN の報告日の進捗率を求め直す**（活動ごとに方式を変えたときと同じ。ガントの保存値とイナズマ線を揃える）：
+     `refresh_open_entries_of_project`（`update_project` が `progress_method_default` を変えたときに呼ぶ）
+  6. **xlsx の WBS ID の列（WBS ID・親のWBS ID・WPのWBS ID）が数のセルなら、その行を `INVALID_VALUE` にする**（RULE-INT-001・BR-02）。
+     数のセルは表記を失う（`1.10` → `1.1`、`1.0` → `1`）ので、照合すると別の要素を黙って更新する。出力の xlsx は WBS ID を文字のセルで置くので、往復は今までどおり 0 件の変更
+  7. **UI-WBS-002 は要素ごとに画面を作り直す**（ルートの `elementId` を `key` にした）。横断照会から別の要素へ移ったとき、前の要素のスコープ紐付けの選択・履歴の頁を持ち越して
+     別の要素の紐付けを置き換えていた
+  8. **活動・要素の直接の削除（API-SCH-005・API-WBS-005）も、是正措置・差異の理由が指す行は 422**（`ACTIVITY_REFERENCED`・`ELEMENT_REFERENCED`。変更要求の反映と同じ）。
+     外部キー違反の 500 になっていた。スケジュールベースラインの写しだけが指す要素は、写しの要素の紐付けを空にして消す（活動を消すときと同じ。DB-SCH-004 の注記・A-19）
+- **理由:** 設計書 5.8・5.10・6.1・6.3・9.2・NFR-05・BR-02・BR-13。どれも設計書の記載どおりにするだけで直し方が決まる
+- **影響範囲:** `backend/app/infra/audit_listener.py`・`backend/app/services/{change,progress,effort,projects,wbs,schedule}.py`・`backend/app/domain/tabular.py`・
+  `frontend/src/pages/wbs/WbsElementPage.tsx`、試験は `backend/tests/api/test_{chg,wbs,eff,prg}.py`・`backend/tests/domain/test_tabular.py`・`frontend/src/pages/wbs/WbsElementPage.test.tsx`
+- **覆す場合:** 一括の文を記録しないなら `register_audit_listener` の `do_orm_execute` を外す。反映を DRAFT でも許すなら `apply_change_request` の状態の検査を外し、
+  試験 `test_apply_requires_baselined_wbs` を直す。確定済みの報告日でも今の値で求め直すなら `load_basis` を `report_percents` に戻す。
+  数のセルの WBS ID を受けるなら `CODE_COLUMNS` の検査を外す（表記の復元はできない）
+- **限界:** 試験は SQLite の TestClient と画面の試験（fetch を差し替え）だけ。一括の文の記録は `Session` を通る文だけで、`engine`・`connection` へ直接流す SQL は記録しない。
+  変更要求の反映は、スケジュールベースラインの写しが指す要素を今も 422 で拒む（直接の削除は写しの紐付けを空にする。どちらにそろえるかは CR-002・OQ-42 (9)）。
+  直さなかった指摘は OQ-42 と CR-004〜009
