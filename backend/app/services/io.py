@@ -84,7 +84,6 @@ from app.services.wbs import (
     _load,
     _mark_edited,
     _preorder,
-    _top_last_child_seq,
 )
 
 DATA_EXPORT: Final = "data.export"
@@ -580,7 +579,7 @@ def _write_wbs(
         parent = None if parent_id is None else by_id[parent_id]
         try:
             code = new_element_code(None if parent is None else _coded(parent), rule,
-                                    top_last_child_seq=_top_last_child_seq(elements) if parent is None else None)
+                                    top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None)
         except WbsCodeError as exc:
             raise code_error(exc) from exc
         element = WbsElement(
@@ -590,7 +589,9 @@ def _write_wbs(
             responsible_user_id=None if row.responsible_login_id is None else assignable[row.responsible_login_id],
             needs_renumber=code.needs_renumber,
         )
-        if parent is not None:
+        if parent is None:
+            context.rule_row.top_last_child_seq = code.parent_last_child_seq
+        else:
             parent.last_child_seq = code.parent_last_child_seq
         session.add(element)
         session.flush()
@@ -621,13 +622,16 @@ def _write_wbs(
         try:
             result = move_element(
                 [_coded(e) for e in elements], element_id, new_parent_id, rule,
-                top_last_child_seq=_top_last_child_seq(elements)
+                top_last_child_seq=context.rule_row.top_last_child_seq
                 if new_parent_id is None and element.parent_id is not None else None,
             )
         except WbsCodeError as exc:
             raise code_error(exc) from exc
-        if result.parent_last_child_seq is not None and new_parent_id is not None:
-            by_id[new_parent_id].last_child_seq = result.parent_last_child_seq
+        if result.parent_last_child_seq is not None:
+            if new_parent_id is None:
+                context.rule_row.top_last_child_seq = result.parent_last_child_seq
+            else:
+                by_id[new_parent_id].last_child_seq = result.parent_last_child_seq
         element.sort_order = end_of(new_parent_id, excluding=element_id)
         element.parent_id = new_parent_id
         element.sibling_seq = result.sibling_seq

@@ -43,7 +43,9 @@ COLUMNS_4_1 = {
         "id", "project_id", "parent_id", "kind", "name", "wbs_code", "sibling_seq", "last_child_seq", "sort_order",
         "own_estimate_hours", "responsible_user_id", "responsible_team", "needs_renumber",
     },
-    "wbs_numbering_rules": {"id", "project_id", "separator", "min_digits", "prefix", "pad_first_level"},
+    "wbs_numbering_rules": {
+        "id", "project_id", "separator", "min_digits", "prefix", "pad_first_level", "top_last_child_seq",
+    },
     "wbs_code_history": {"id", "project_id", "element_id", "old_code", "new_code", "renumbered_at", "renumbered_by"},
     "wbs_dictionary_entries": {"id", "element_id", "deliverable", "work_scope", "completion_criteria", "assumptions"},
     "wbs_scope_links": {"id", "element_id", "scope_item_id"},
@@ -262,6 +264,8 @@ def test_numbering_rules_defaults(db_session: Session) -> None:
     loaded = db_session.get(WbsNumberingRule, rule.id)
     assert loaded is not None
     assert (loaded.separator, loaded.min_digits, loaded.prefix, loaded.pad_first_level) == (".", 1, "", True)
+    # 第 1 階層で今まで使った最大の順番（設計書 1.1 の 4.1）は 0 から
+    assert loaded.top_last_child_seq == 0
 
 
 def test_numbering_rules_server_defaults_apply_to_raw_insert(db_session: Session) -> None:
@@ -269,9 +273,9 @@ def test_numbering_rules_server_defaults_apply_to_raw_insert(db_session: Session
     project = _project(db_session)
     db_session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
     row = db_session.execute(
-        sa.text("SELECT separator, min_digits, prefix, pad_first_level FROM wbs_numbering_rules")
+        sa.text("SELECT separator, min_digits, prefix, pad_first_level, top_last_child_seq FROM wbs_numbering_rules")
     ).one()
-    assert (row[0], row[1], row[2], bool(row[3])) == (".", 1, "", True)
+    assert (row[0], row[1], row[2], bool(row[3]), row[4]) == (".", 1, "", True, 0)
 
 
 def test_numbering_rules_one_per_project(db_session: Session) -> None:
@@ -290,6 +294,13 @@ def test_numbering_rules_min_digits_at_least_one(db_session: Session) -> None:
     """DB-WBS-002 wbs_numbering_rules：桁数は 1 以上。0 は DB が拒む。"""
     project = _project(db_session)
     db_session.add(WbsNumberingRule(project_id=project.id, min_digits=0))
+    _flush_fails(db_session)
+
+
+def test_numbering_rules_top_last_child_seq_not_negative(db_session: Session) -> None:
+    """DB-WBS-002 wbs_numbering_rules：第 1 階層の数え（top_last_child_seq）は 0 以上。負の値は DB が拒む。"""
+    project = _project(db_session)
+    db_session.add(WbsNumberingRule(project_id=project.id, top_last_child_seq=-1))
     _flush_fails(db_session)
 
 
@@ -772,3 +783,46 @@ def test_migration_creates_wbs_tables_matching_models(tmp_path: Path) -> None:
     finally:
         engine.dispose()
     _upgrade(url)
+
+
+def test_migration_fills_top_last_child_seq_from_existing_first_level(tmp_path: Path) -> None:
+    """0009（CR-003）：既にある採番規則の top_last_child_seq を、第 1 階層の要素の順番の最大で埋める。戻すと列が消える。"""
+    url = f"sqlite:///{tmp_path / 'top_seq.db'}"
+    _upgrade(url, "0008_est")
+    engine = create_db_engine(url)
+    try:
+        with Session(engine) as session:
+            filled = _project(session, "P-001")
+            empty = _project(session, "P-002")
+            for project in (filled, empty):
+                session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
+            insert = sa.text(
+                "INSERT INTO wbs_elements (project_id, parent_id, kind, name, wbs_code, sibling_seq, sort_order) "
+                "VALUES (:p, :parent, 'DELIVERABLE', 'x', :code, :seq, :seq)"
+            )
+            session.execute(insert, {"p": filled.id, "parent": None, "code": "1.0", "seq": 1})
+            session.execute(insert, {"p": filled.id, "parent": None, "code": "3.0", "seq": 3})
+            parent_id = session.scalar(sa.text("SELECT id FROM wbs_elements WHERE wbs_code = '1.0'"))
+            # 第 2 階層の順番は数えない
+            session.execute(insert, {"p": filled.id, "parent": parent_id, "code": "1.5", "seq": 5})
+            session.commit()
+            ids = (filled.id, empty.id)
+    finally:
+        engine.dispose()
+
+    _upgrade(url)
+    engine = create_db_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = dict(connection.execute(sa.text("SELECT project_id, top_last_child_seq FROM wbs_numbering_rules")).all())
+        assert rows == {ids[0]: 3, ids[1]: 0}
+    finally:
+        engine.dispose()
+
+    _downgrade(url, "0008_est")
+    engine = create_db_engine(url)
+    try:
+        columns = {c["name"] for c in sa.inspect(engine).get_columns("wbs_numbering_rules")}
+        assert "top_last_child_seq" not in columns
+    finally:
+        engine.dispose()

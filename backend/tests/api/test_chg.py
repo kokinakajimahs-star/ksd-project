@@ -22,7 +22,7 @@ from app.infra.security import generate_token, hash_token
 from app.models.chg import AuditLog, ChangeRequest
 from app.models.cmn import AuthSession, User
 from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
-from app.models.wbs import ApprovalRequest, ScopeBaseline, ScopeBaselineElement
+from app.models.wbs import ApprovalRequest, ScopeBaseline, ScopeBaselineElement, WbsElement, WbsNumberingRule
 from app.services.change import ChangeRequestStateMachine
 from app.services.clock import get_now
 
@@ -439,6 +439,24 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert project["wbs_status"] == "BASELINED"
     again = world.apply(draft["id"], expect=409)
     assert again["error"]["code"] == "INVALID_STATE"
+
+
+def test_apply_adds_first_level_element_without_reusing_numbers(world: World) -> None:
+    """API-CHG-006：第 1 階層への追加は数え（top_last_child_seq）+ 1 で採番し、数えを進める（設計書 1.1 の 5.2。CR-003）。"""
+    extra, _ = world.element("消す成果物", None, "DELIVERABLE")
+    deleted = world.client.delete(world.url(f"/wbs/elements/{extra}"), headers=world.h["planner"])
+    assert deleted.status_code == 204, deleted.text
+    world.baseline_wbs()
+    draft = world.approved(operations=[{"op": "add_element", "parent_code": "", "kind": "DELIVERABLE", "name": "追加の成果物",
+                                        "ref": "d2"}])
+    world.apply(draft["id"])
+
+    world.session.expire_all()
+    added = world.session.scalar(select(WbsElement).where(WbsElement.project_id == world.pid,
+                                                          WbsElement.name == "追加の成果物"))
+    assert added is not None and (added.wbs_code, added.sibling_seq, added.parent_id) == ("3.0", 3, None)
+    rule = world.session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == world.pid))
+    assert rule is not None and rule.top_last_child_seq == 3
 
 
 def test_apply_requires_baselined_wbs(world: World) -> None:

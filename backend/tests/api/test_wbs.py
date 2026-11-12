@@ -177,6 +177,33 @@ def test_deleted_number_is_not_reused_under_parent(world: World) -> None:
     assert c["wbs_code"] == "1.3"
 
 
+def test_deleted_number_is_not_reused_at_first_level(world: World) -> None:
+    """API-WBS-002・003：第 1 階層も消した番号を再利用しない（設計書 1.1 の 4.1・5.2：top_last_child_seq。CR-003）。
+
+    順番が最大の第 1 階層の要素を消しても次は 3.0。第 1 階層へ移した要素も数えを進め、消しても番号を戻さない。
+    """
+    world.add("A")
+    b = world.add("B")
+    assert world.client.delete(world.url(f"/elements/{b['id']}"), headers=world.headers["planner"]).status_code == 204
+    c = world.add("C")
+    assert (c["wbs_code"], c["sibling_seq"]) == ("3.0", 3)
+
+    child = world.add("子", c["id"])
+    response = world.client.post(world.url(f"/elements/{child['id']}/move"), json={"parent_id": None},
+                                 headers=world.headers["planner"])
+    assert response.status_code == 200, response.text
+    assert response.json()["sibling_seq"] == 4
+    assert world.client.delete(world.url(f"/elements/{child['id']}"), headers=world.headers["planner"]).status_code == 204
+    d = world.add("D")
+    assert (d["wbs_code"], d["sibling_seq"]) == ("5.0", 5)
+
+    # 改番は兄弟を 1 から振り直すが、数えは減らさない（BR-02）
+    assert world.client.post(world.url("/renumber"), headers=world.headers["planner"]).status_code == 200
+    assert codes(world.tree()) == ["1.0", "2.0", "3.0"]
+    e = world.add("E")
+    assert (e["wbs_code"], e["sibling_seq"]) == ("6.0", 6)
+
+
 def test_add_element_rejections(world: World) -> None:
     """API-WBS-002：WP の下は 422、無い親・メンバーでない責任者は 400、権限なしは 403、認証なしは 401。"""
     wp = world.add("WP", kind="WORK_PACKAGE")

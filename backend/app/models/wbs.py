@@ -106,10 +106,15 @@ class WbsNumberingRule(Base):
 
     プロジェクトに 1 つ（``project_id`` は一意）。プロジェクトを作るとき（API-PRJ-001）に既定の行を作る。
     ``min_digits`` は順番を 0 詰めする桁数（1 以上）。区切り文字・接頭辞の形の検査は規則を変える API（API-WBS-006）が行う。
+    ``top_last_child_seq`` は第 1 階層で今まで使った最大の順番（設計書 1.1 の 4.1・5.2。第 1 階層の親の ``last_child_seq`` に当たる。
+    減らさない：第 1 階層の要素を消しても番号を再利用しない）。
     """
 
     __tablename__ = "wbs_numbering_rules"
-    __table_args__ = (CheckConstraint("min_digits >= 1", name="min_digits"),)
+    __table_args__ = (
+        CheckConstraint("min_digits >= 1", name="min_digits"),
+        CheckConstraint("top_last_child_seq >= 0", name="top_last_child_seq"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), unique=True)
@@ -121,6 +126,7 @@ class WbsNumberingRule(Base):
     )
     prefix: Mapped[str] = mapped_column(String(20), default=PREFIX_DEFAULT, server_default=text(f"'{PREFIX_DEFAULT}'"))
     pad_first_level: Mapped[bool] = mapped_column(Boolean, default=PAD_FIRST_LEVEL_DEFAULT, server_default=true())
+    top_last_child_seq: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 # DB-WBS-003

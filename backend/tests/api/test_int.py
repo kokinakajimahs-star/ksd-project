@@ -29,7 +29,7 @@ from app.models.eff import Assignment, TimeEntry
 from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency
-from app.models.wbs import WbsDictionaryEntry, WbsElement
+from app.models.wbs import WbsDictionaryEntry, WbsElement, WbsNumberingRule
 from app.services.clock import get_now
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
@@ -335,6 +335,28 @@ def test_import_wbs_creates_updates_and_moves(world: World, db_session: Session)
     # 書いた後に出力して取り込むと変更は 0 件（往復の一致）
     again = world.load("wbs", world.export("wbs").content, dry_run=True)
     assert (again["created"], again["updated"]) == (0, 0)
+
+
+def test_import_wbs_does_not_reuse_first_level_numbers(world: World, db_session: Session) -> None:
+    """API-INT-002：第 1 階層への追加・移動も数え（top_last_child_seq）を進め、消した番号を再利用しない（設計書 1.1 の 5.2。CR-003）。"""
+    removed = world.element("消す成果物", None, "DELIVERABLE")
+    assert world.elements()["消す成果物"].wbs_code == "3.0"
+    deleted = world.client.delete(world.url(f"/wbs/elements/{removed}"), headers=world.h["planner"])
+    assert deleted.status_code == 204, deleted.text
+
+    grid = [
+        list(WBS_COLUMNS),
+        ["NEW", "", "DELIVERABLE", "新しい成果物", "", "", "", "", "", ""],
+        ["1.2", "", "WORK_PACKAGE", "WP2", "", "", "", "", "", ""],
+    ]
+    body = world.load("wbs", csv_of(grid))
+    assert body["written"] is True
+    assert [c["key"] for c in body["changes"] if c["action"] == "CREATE"] == ["4.0"]
+    elements = world.elements()
+    assert (elements["新しい成果物"].sibling_seq, elements["WP2"].sibling_seq, elements["WP2"].parent_id) == (4, 5, None)
+    db_session.expire_all()
+    rule = db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == world.pid))
+    assert rule is not None and rule.top_last_child_seq == 5
 
 
 def test_import_wbs_resolves_old_code(world: World) -> None:

@@ -25,7 +25,7 @@
 **表を作るスコープは読む実装を書き、``app.state`` を差し替える。** 差し替え忘れは
 ``backend/tests/api/test_wbs.py`` の ``test_*_wired_once_*`` が落とす。
 
-第 1 階層の順番の数え（OQ-16 (2)）は 4.1 に置き場が無いので ``_top_last_child_seq`` に閉じ込めた（CR-003。A-17）。
+第 1 階層の順番の数えは ``wbs_numbering_rules.top_last_child_seq``（設計書 1.1 の 4.1・5.2。CR-003）に置く。新規・移動・改番で進め、減らさない。
 """
 
 from __future__ import annotations
@@ -344,8 +344,14 @@ class WbsContext:
 def _rule_row(session: Session, project_id: int) -> WbsNumberingRule:
     row = session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == project_id))
     if row is None:
-        # API-PRJ-001 を通らずに作られたプロジェクト。4.1 の既定の行を作る（同じトランザクション）
-        row = WbsNumberingRule(project_id=project_id)
+        # API-PRJ-001 を通らずに作られたプロジェクト。4.1 の既定の行を作る（同じトランザクション）。
+        # 第 1 階層の数えは、既にある第 1 階層の順番の最大から始める（移行 0009 の埋め方と同じ）
+        top = session.scalar(
+            select(func.max(WbsElement.sibling_seq)).where(
+                WbsElement.project_id == project_id, WbsElement.parent_id.is_(None)
+            )
+        )
+        row = WbsNumberingRule(project_id=project_id, top_last_child_seq=top or 0)
         session.add(row)
         session.flush()
     return row
@@ -387,15 +393,6 @@ def _node(element: WbsElement, **overrides: Any) -> WbsNode:
     }
     values.update(overrides)
     return WbsNode(**values)
-
-
-def _top_last_child_seq(elements: Sequence[WbsElement]) -> int:
-    """第 1 階層で今まで使った最大の順番（OQ-16 (2)・CR-003 の暫定）。
-
-    4.1 に置き場が無いので、今ある第 1 階層の要素の ``sibling_seq`` の最大を使う。**順番が最大の第 1 階層の要素を消すと、
-    その番号を次の要素が再利用する**（5.2 の「削除した番号を再利用しない」を満たさない。CR-003 の判断を待つ）。
-    """
-    return max((element.sibling_seq for element in elements if element.parent_id is None), default=0)
 
 
 def _ensure_tree(nodes: Sequence[WbsNode], activities: Sequence[ActivityEstimate]) -> None:
@@ -634,7 +631,7 @@ def add_element(
         code = new_element_code(
             None if parent is None else _coded(parent),
             context.rule,
-            top_last_child_seq=_top_last_child_seq(context.elements) if parent is None else None,
+            top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None,
         )
     except WbsCodeError as exc:
         raise AppError(422, "WBS_CODE_INVALID", str(exc)) from exc
@@ -653,7 +650,9 @@ def add_element(
         responsible_team=responsible_team,
         needs_renumber=code.needs_renumber,
     )
-    if parent is not None:
+    if parent is None:
+        context.rule_row.top_last_child_seq = code.parent_last_child_seq
+    else:
         parent.last_child_seq = code.parent_last_child_seq
     _mark_edited(context.project)
     session.add(element)
@@ -726,15 +725,18 @@ def move(
             element_id,
             parent_id,
             context.rule,
-            top_last_child_seq=_top_last_child_seq(context.elements)
+            top_last_child_seq=context.rule_row.top_last_child_seq
             if parent_id is None and element.parent_id is not None
             else None,
         )
     except WbsCodeError as exc:
         raise AppError(422, "WBS_CODE_INVALID", str(exc)) from exc
 
-    if result.parent_last_child_seq is not None and parent_id is not None:
-        by_id[parent_id].last_child_seq = result.parent_last_child_seq
+    if result.parent_last_child_seq is not None:
+        if parent_id is None:
+            context.rule_row.top_last_child_seq = result.parent_last_child_seq
+        else:
+            by_id[parent_id].last_child_seq = result.parent_last_child_seq
     element.parent_id = parent_id
     element.sibling_seq = result.sibling_seq
     for node_id, flag in result.needs_renumber.items():
@@ -855,13 +857,14 @@ def renumber_wbs(
     context = _editing(session, access, actor, activities, project_id)
     try:
         result = renumber([_coded(e) for e in context.elements], context.rule,
-                          top_last_child_seq=_top_last_child_seq(context.elements))
+                          top_last_child_seq=context.rule_row.top_last_child_seq)
     except WbsCodeError as exc:
         raise AppError(422, "WBS_CODE_INVALID", str(exc)) from exc
     pending = any(e.needs_renumber for e in context.elements)
     reseq = any(result.sibling_seqs[e.id] != e.sibling_seq for e in context.elements)
     if not result.changes and not pending and not reseq:
         return RenumberView(renumbered_at=None, changes=[])
+    context.rule_row.top_last_child_seq = result.top_last_child_seq
     for element in context.elements:
         element.wbs_code = result.codes[element.id]
         element.sibling_seq = result.sibling_seqs[element.id]
