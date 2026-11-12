@@ -425,6 +425,42 @@ def test_lightning_line_skips_weekends(world: World, client: TestClient) -> None
                       headers=world.h["outsider"]).status_code == 403
 
 
+def test_get_progress_items_reads_current_items(app: FastAPI, world: World, client: TestClient) -> None:
+    """API-PRG-010 進捗の算定項目を読む（設計書 1.1・CR-004）：今の項目・算定方式・進捗率を API-PRG-004 の応答と同じ形で返す。
+
+    権限は project.view。無い活動・他のプロジェクトの活動は 404、委託先には自分の割当の活動だけ（他は 404）。
+    """
+    a = world.add("A", duration_days=4)
+    b = world.add("B", duration_days=4)
+    world.report("2026-12-03")
+    url = world.url(f"/activities/{a}/progress-items")
+    empty = client.get(url, headers=world.h["viewer"])
+    assert empty.status_code == 200, empty.text
+    assert (empty.json()["activity_id"], empty.json()["items"]) == (a, [])
+
+    assert client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                      headers=world.h["pm"]).status_code == 200
+    items = [{"item_type": "CHECK", "title": "単体試験", "done": True}, {"item_type": "CHECK", "title": "結合試験"}]
+    put = client.put(url, json={"items": items}, headers=world.h["pm"])
+    assert put.status_code == 200, put.text
+    got = client.get(url, headers=world.h["viewer"])
+    assert got.status_code == 200, got.text
+    assert got.json() == put.json()  # 置き換えの応答と同じもの（項目・方式・進捗率）
+    assert (got.json()["progress_method"], got.json()["percent_complete"]) == ("CHECK_ITEM_RATIO", 50.0)
+
+    assert client.get(world.url(f"/activities/{MISSING}/progress-items"), headers=world.h["viewer"]).status_code == 404
+    other = World(client, world.session, code="PRJ-Q")
+    foreign = client.get(other.url(f"/activities/{a}/progress-items"), headers=other.h["viewer"])
+    assert foreign.status_code == 404
+    assert client.get(url, headers=world.h["outsider"]).status_code == 403
+    assert client.get(url).status_code == 401
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b}}))
+    assert client.get(url, headers=world.h["contractor"]).status_code == 404
+    own = client.get(world.url(f"/activities/{b}/progress-items"), headers=world.h["contractor"])
+    assert own.status_code == 200 and own.json()["activity_id"] == b
+
+
 def test_contractor_sees_only_assigned_rows(app: FastAPI, world: World) -> None:
     a = world.add("A", duration_days=5)
     b = world.add("B", duration_days=5)

@@ -395,3 +395,31 @@ def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world:
     app.dependency_overrides[get_now] = lambda: datetime(2026, 12, 6, 9, 0, tzinfo=UTC)
     expired = client.get(f"/api/v1/shared/{expiring}")
     assert expired.status_code == 404 and expired.json()["error"]["details"] == [{"reason": "EXPIRED"}]
+
+
+def test_list_share_links_without_tokens(world: World, client: TestClient, db_session: Session) -> None:
+    """API-RPT-005 共有リンクの一覧（トークンは返さない。設計書 1.1・CR-004）。新しい順、失効したリンクも含む。"""
+    first = world.share("GANTT")
+    second = world.share("REPORT", who="progress")
+    assert client.delete(world.url(f"/share-links/{first['id']}"), headers=world.h["pm"]).status_code == 204
+    other = World(client, db_session, code="PRJ-O")
+    other.share("GANTT")
+
+    response = client.get(world.url("/share-links"), headers=world.h["progress"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["project_id"], body["total"], body["limit"], body["offset"]) == (world.pid, 2, 100, 0)
+    assert [i["id"] for i in body["items"]] == [second["id"], first["id"]]  # 他のプロジェクトのリンクは含まない
+    assert body["items"][1]["revoked_at"].startswith("2026-12-05T09:00:00")
+    assert body["items"][0] == {k: v for k, v in second.items() if k != "token"}
+    for token in (first["token"], second["token"]):
+        assert token not in response.text
+    assert all("token" not in i and "token_hash" not in i for i in body["items"])
+
+    paged = client.get(world.url("/share-links"), params={"limit": 1, "offset": 1}, headers=world.h["pm"]).json()
+    assert (paged["total"], [i["id"] for i in paged["items"]]) == (2, [first["id"]])
+    assert client.get(world.url("/share-links"), params={"limit": 0}, headers=world.h["pm"]).status_code == 400
+    for who in ("planner", "executor", "approver", "viewer", "contractor", "outsider"):
+        assert error_code(client.get(world.url("/share-links"), headers=world.h[who])) == "FORBIDDEN", who
+    assert client.get(world.url("/share-links")).status_code == 401
+    assert client.get(f"/api/v1/projects/{MISSING}/share-links", headers=world.admin_h).status_code == 404

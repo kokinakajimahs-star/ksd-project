@@ -21,7 +21,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ShareLinkRecord, ShareLinkStatus, ViewLevel, hash_token, project_view_level, verify_share_link
@@ -304,6 +304,23 @@ def create_share_link(
     session.add(link)
     session.commit()
     return CreatedShareLink(link=link, token=token)
+
+
+def list_share_links(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int,
+) -> tuple[list[ShareLink], int]:
+    """共有リンクの一覧（share.manage。RPT-03。API-RPT-005。設計書 1.1・CR-004）。
+
+    新しい順（ID の降順）。失効させたリンク・期限の過ぎたリンクも含める（状態は ``revoked_at``・``expires_at`` で分かる）。
+    トークンは DB に無い（ハッシュだけ）ので返せない。
+    """
+    authorize_project(session, access, actor, project_id, SHARE_MANAGE)
+    total = session.scalar(select(func.count()).select_from(ShareLink).where(ShareLink.project_id == project_id))
+    links = list(session.scalars(
+        select(ShareLink).where(ShareLink.project_id == project_id)
+        .order_by(ShareLink.id.desc()).limit(limit).offset(offset)
+    ))
+    return links, int(total or 0)
 
 
 def revoke_share_link(

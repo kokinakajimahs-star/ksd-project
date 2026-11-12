@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
@@ -21,6 +21,7 @@ from app.schemas.report import (
     ReportWindowOut,
     ShareLinkCreate,
     ShareLinkCreated,
+    ShareLinkList,
     ShareLinkOut,
     SharedProjectOut,
     SharedViewOut,
@@ -139,6 +140,24 @@ def create_share_link(
                                                expires_at=body.expires_at, now=now)
     out = _share_link_out(created.link)
     return ShareLinkCreated(**out.model_dump(), token=created.token)
+
+
+@router.get("/projects/{project_id}/share-links", response_model=ShareLinkList)
+def list_share_links(
+    project_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+) -> ShareLinkList:
+    """API-RPT-005 共有リンクの一覧（トークンは返さない）。
+
+    権限は share.manage。新しい順（ID の降順）。失効・期限切れのリンクも含む。``limit``・``offset``（6.1。設計書 1.1・CR-004）。
+    """
+    links, total = report_service.list_share_links(session, access, user, project_id, limit=limit, offset=offset)
+    return ShareLinkList(project_id=project_id, items=[_share_link_out(link) for link in links],
+                         total=total, limit=limit, offset=offset)
 
 
 @router.delete("/projects/{project_id}/share-links/{link_id}", status_code=204)

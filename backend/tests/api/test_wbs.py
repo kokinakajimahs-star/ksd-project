@@ -523,6 +523,44 @@ def test_scope_links_rejections(world: World) -> None:
     assert world.client.put(url, json={"scope_item_ids": []}, headers=world.headers["viewer"]).status_code == 403
 
 
+def test_get_scope_links_reads_current_links(world: World, app: FastAPI) -> None:
+    """API-WBS-026 要素とスコープ項目の紐付けを読む（設計書 1.1・CR-004）：今の紐付けを項目の ID の順で返す。
+
+    権限は project.view。無い要素は 404、委託先には割当の経路の要素だけ（他は 404）、メンバーでない人は 403。
+    """
+    parent = world.add("設計")
+    wp = world.add("基本設計", parent["id"], kind="WORK_PACKAGE")
+    other = world.add("管理", kind="WORK_PACKAGE")
+    items = world.client.put(f"/api/v1/projects/{world.pid}/scope-items",
+                             json={"items": [{"kind": "IN", "title": "a"}, {"kind": "IN", "title": "b"},
+                                             {"kind": "OUT", "title": "c"}]},
+                             headers=world.headers["pm"]).json()["items"]
+    ids = [i["id"] for i in items]
+    url = world.url(f"/elements/{wp['id']}/scope-links")
+    put = world.client.put(url, json={"scope_item_ids": [ids[2], ids[0]]}, headers=world.headers["planner"])
+    assert put.status_code == 200, put.text
+
+    got = world.client.get(url, headers=world.headers["viewer"])
+    assert got.status_code == 200, got.text
+    assert got.json()["element_id"] == wp["id"]
+    assert got.json()["scope_item_ids"] == sorted(put.json()["scope_item_ids"])  # 置き換えた紐付け（項目の ID の順）
+    empty = world.client.get(world.url(f"/elements/{other['id']}/scope-links"), headers=world.headers["viewer"])
+    assert empty.status_code == 200 and empty.json()["scope_item_ids"] == []
+    assert world.client.get(world.url(f"/elements/{MISSING}/scope-links"),
+                            headers=world.headers["viewer"]).status_code == 404
+    assert world.client.get(url, headers=world.headers["outsider"]).status_code == 403
+
+    # 委託先：割当の活動（101）の WP とその上だけが見える
+    contractor = world.users["contractor"].id
+    app.state.wbs_activities = FakeActivities({101: wp["id"]})
+    app.state.project_access = ProjectMembersTable(assignments=FakeAssigned({contractor: frozenset({101})}))
+    assert world.client.get(url, headers=world.headers["contractor"]).json()["scope_item_ids"] == sorted([ids[2], ids[0]])
+    assert world.client.get(world.url(f"/elements/{parent['id']}/scope-links"),
+                            headers=world.headers["contractor"]).status_code == 200
+    hidden = world.client.get(world.url(f"/elements/{other['id']}/scope-links"), headers=world.headers["contractor"])
+    assert hidden.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # 別の群の表を読む口の差し替え忘れ（A-17）
 # ---------------------------------------------------------------------------
@@ -643,6 +681,52 @@ def test_review_rejections(world: World, db_session: Session) -> None:
     assert world.client.post(comments_url, json=body, headers=world.headers["pm"]).status_code == 409
     assert world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "OPEN"},
                               headers=world.headers["planner"]).status_code == 409
+
+
+def test_review_list_and_close(world: World) -> None:
+    """API-WBS-025 レビューの一覧・API-WBS-024 レビューを閉じる（IN_REVIEW → DRAFT。設計書 1.1・CR-004）。
+
+    一覧は新しい順（project.view）。閉じると CLOSED と閉じた時刻が入り、WBS は DRAFT に戻る（指摘は残る）。
+    閉じるのは wbs.edit。閉じたレビューは 409、無いレビューは 404。
+    """
+    element = world.add("要素")
+    pm = world.users["pm"].id
+    reviews_url = world.url("/reviews")
+    empty = world.client.get(reviews_url, headers=world.headers["viewer"])
+    assert empty.status_code == 200, empty.text
+    assert (empty.json()["items"], empty.json()["total"]) == ([], 0)
+
+    first = world.client.post(reviews_url, json={"reviewer_ids": [pm]}, headers=world.headers["planner"]).json()
+    comment = world.client.post(world.url(f"/reviews/{first['id']}/comments"),
+                                json={"element_id": element["id"], "category": "OTHER", "body": "b"},
+                                headers=world.headers["pm"]).json()
+    close_url = world.url(f"/reviews/{first['id']}/close")
+    assert world.client.post(close_url, headers=world.headers["viewer"]).status_code == 403
+    assert world.client.post(world.url(f"/reviews/{MISSING}/close"), headers=world.headers["planner"]).status_code == 404
+    closed = world.client.post(close_url, headers=world.headers["planner"])
+    assert closed.status_code == 200, closed.text
+    body = closed.json()
+    assert (body["status"], body["closed_at"]) == ("CLOSED", NOW.isoformat().replace("+00:00", "Z"))
+    assert [(c["id"], c["status"]) for c in body["comments"]] == [(comment["id"], "OPEN")]  # 指摘は残る
+    assert world.tree()["wbs_status"] == "DRAFT"
+    again = world.client.post(close_url, headers=world.headers["planner"])
+    assert (again.status_code, again.json()["error"]["code"]) == (409, "INVALID_STATE")
+
+    second = world.client.post(reviews_url, json={"reviewer_ids": [pm]}, headers=world.headers["planner"])
+    assert second.status_code == 201, second.text  # 閉じた後は新しいレビューを始められる
+    listed = world.client.get(reviews_url, headers=world.headers["viewer"]).json()
+    assert [(r["id"], r["status"]) for r in listed["items"]] == [(second.json()["id"], "OPEN"), (first["id"], "CLOSED")]
+    assert (listed["project_id"], listed["total"], listed["limit"], listed["offset"]) == (world.pid, 2, 100, 0)
+    assert listed["items"][1]["reviewer_ids"] == [pm] and listed["items"][1]["requested_by"] == world.users["planner"].id
+    paged = world.client.get(reviews_url, params={"limit": 1, "offset": 1}, headers=world.headers["viewer"]).json()
+    assert [r["id"] for r in paged["items"]] == [first["id"]]
+    assert world.client.get(reviews_url, params={"limit": 1001}, headers=world.headers["viewer"]).status_code == 400
+    assert world.client.get(reviews_url, headers=world.headers["outsider"]).status_code == 403
+
+    # WBS が IN_REVIEW でなければ閉じられない（レビューが OPEN のまま状態だけずれた場合も 409）
+    world.set_status("DRAFT")
+    stale = world.client.post(world.url(f"/reviews/{second.json()['id']}/close"), headers=world.headers["planner"])
+    assert (stale.status_code, stale.json()["error"]["code"]) == (409, "INVALID_STATE")
 
 
 # ---------------------------------------------------------------------------

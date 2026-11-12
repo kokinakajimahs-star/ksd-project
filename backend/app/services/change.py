@@ -429,6 +429,37 @@ def submit_change_request(
     return ChangeRequestView(change_request=change_request, approval_request_id=approval.id)
 
 
+def withdraw_change_request(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, change_request_id: int
+) -> ChangeRequestView:
+    """提出を取り下げる（change.create。RULE-CHG-003 の WITHDRAW：SUBMITTED → DRAFT。5.10・CR-004）。
+
+    保留中（PENDING）の承認申請（``target_type = CHANGE_REQUEST``）の行を消す（承認申請の状態に値を足さない。
+    消したことは変更履歴に残る）。保存した影響分析は残し、提出し直すときに流し直す。提出日時は空に戻す（A-48）。
+    SUBMITTED でなければ 409。
+    """
+    authorize_project(session, access, actor, project_id, "change.create")
+    change_request = _change_request_of(session, project_id, change_request_id)
+    try:
+        transition = transition_change_request(change_request.status, ChangeRequestAction.WITHDRAW)
+    except WorkflowError as exc:
+        raise _workflow_error(exc, [{"change_request_id": change_request.id, "status": change_request.status}]) from exc
+    pending = session.scalars(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.project_id == project_id,
+               ApprovalRequest.target_type == TARGET_CHANGE_REQUEST,
+               ApprovalRequest.target_id == change_request.id,
+               ApprovalRequest.status == ApprovalStatus.PENDING.value)
+        .order_by(ApprovalRequest.id)
+    ).all()
+    for approval in pending:
+        session.delete(approval)
+    change_request.status = transition.to_status.value
+    change_request.submitted_at = None
+    session.commit()
+    return _view(session, change_request)
+
+
 class ChangeRequestStateMachine:
     """変更要求の承認申請への判断（API-WBS-019）を、RULE-CHG-003 で変更要求の状態へ通す ``ChangeRequestApprovals``
     （``app.services.wbs``。api:CHG で ``ChangeRequestTransitionNotWired`` から差し替えた。A-37）。

@@ -599,6 +599,21 @@ def _items_view(session: Session, project: Project, activity: Activity) -> Items
     return ItemsView(activity_id=activity.id, method=method, percent_complete=percent, items=items)
 
 
+def get_progress_items(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, activity_id: int
+) -> ItemsView:
+    """活動の算定項目と、今の算定方式・進捗率（project.view。PRG-05。API-PRG-010。設計書 1.1・CR-004）。
+
+    進捗率は API-PRG-004 の応答と同じ求め方（4.2 の最新の報告日の入力）。委託先だけで読む利用者に自分の割当でない活動は 404（9.2 の注記）。
+    """
+    table = authorize_project(session, access, actor, project_id, "project.view")
+    activity = _activity_of(session, project_id, activity_id)
+    visible = _visible_activity_ids(session, access, actor, project_id, table, [activity])
+    if visible is not None and activity.id not in visible:
+        raise AppError(404, "NOT_FOUND", "活動が見つかりません", details=[{"activity_id": activity_id}])
+    return _items_view(session, _project_of(session, project_id), activity)
+
+
 def replace_progress_items(
     session: Session,
     access: ProjectAccess,

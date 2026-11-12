@@ -259,6 +259,28 @@ class ReviewOut(BaseModel):
     comments: list[CommentOut]
 
 
+class ReviewSummary(BaseModel):
+    """レビューの一覧の 1 行（API-WBS-025。指摘は API-WBS-015 で読む）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    status: str
+    requested_by: int
+    requested_at: datetime
+    reviewer_ids: list[int]
+    closed_at: datetime | None
+
+
+class ReviewList(BaseModel):
+    project_id: int
+    items: list[ReviewSummary]
+    total: int
+    limit: int
+    offset: int
+
+
 class BaselineSummary(BaseModel):
     id: int
     version: int

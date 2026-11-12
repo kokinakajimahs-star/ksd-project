@@ -388,6 +388,55 @@ def test_approval_decision_moves_change_request_and_forbids_self_approval(world:
     assert closed.status_code == 409
 
 
+def test_withdraw_returns_to_draft_and_removes_pending_approval(world: World) -> None:
+    """API-CHG-011 提出した変更要求を取り下げる（SUBMITTED → DRAFT。承認申請を取り下げる。設計書 1.1・CR-004）。
+
+    保留中の承認申請の行を消し（変更履歴に DELETE が残る）、影響分析は残す。DRAFT に戻ると編集・提出し直しができる。
+    """
+    created = world.create()
+    url = world.url(f"/change-requests/{created['id']}/withdraw")
+    draft = world.client.post(url, headers=world.h["planner"])
+    assert draft.status_code == 409 and error_code(draft) == "INVALID_STATE"  # DRAFT は取り下げられない
+    submitted = world.submit(created["id"])
+    approval_id = submitted["approval_request_id"]
+    assert world.client.post(url, headers=world.h["executor"]).status_code == 403  # change.create が無い
+    assert world.client.post(url, headers=world.h["outsider"]).status_code in (403, 404)
+    missing = world.client.post(world.url(f"/change-requests/{MISSING}/withdraw"), headers=world.h["planner"])
+    assert missing.status_code == 404
+    withdrawn = world.client.post(url, headers=world.h["planner"])
+    assert withdrawn.status_code == 200, withdrawn.text
+    body = withdrawn.json()
+    assert (body["status"], body["submitted_at"], body["approval_request_id"]) == ("DRAFT", None, None)
+    assert body["impact"] == submitted["impact"]  # 影響分析は残す
+    world.session.expire_all()
+    assert world.session.get(ApprovalRequest, approval_id) is None
+    logs = world.client.get(world.url("/audit-logs"), params={"entity_type": "approval_requests",
+                                                               "entity_id": approval_id},
+                            headers=world.h["pm"]).json()["items"]
+    deleted = [r for r in logs if r["action"] == "DELETE"]
+    assert len(deleted) == 1
+    assert deleted[0]["user_id"] == world.uid("planner")
+    assert deleted[0]["before"]["status"] == "PENDING" and deleted[0]["after"] is None
+    # 消した承認申請には判断できない
+    world.decide(approval_id, "APPROVE", expect=404)
+    again = world.client.post(url, headers=world.h["planner"])
+    assert again.status_code == 409 and error_code(again) == "INVALID_STATE"
+    # DRAFT に戻ったので編集でき、提出し直すと新しい承認申請ができる
+    patched = world.client.patch(world.url(f"/change-requests/{created['id']}"), json={"title": "直した"},
+                                 headers=world.h["planner"])
+    assert patched.status_code == 200, patched.text
+    resubmitted = world.submit(created["id"])
+    assert resubmitted["status"] == "SUBMITTED"
+    world.session.expire_all()
+    rows = world.session.scalars(select(ApprovalRequest).where(ApprovalRequest.target_type == "CHANGE_REQUEST",
+                                                               ApprovalRequest.target_id == created["id"])).all()
+    # 取り下げた申請は消えており、提出し直した申請だけがある（SQLite は消した最大の ID を使い直すことがある）
+    assert [(r.id, r.status) for r in rows] == [(resubmitted["approval_request_id"], "PENDING")]
+    world.decide(resubmitted["approval_request_id"], "APPROVE")
+    approved = world.client.post(url, headers=world.h["planner"])
+    assert approved.status_code == 409 and error_code(approved) == "INVALID_STATE"  # 承認済みは取り下げられない
+
+
 # ---------------------------------------------------------------------------
 # API-CHG-006 反映と再基準化
 # ---------------------------------------------------------------------------

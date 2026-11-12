@@ -149,6 +149,21 @@ def put_progress(
     )
 
 
+@router.get("/projects/{project_id}/activities/{activity_id}/progress-items", response_model=ProgressItemsOut)
+def get_progress_items(
+    project_id: int,
+    activity_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+) -> ProgressItemsOut:
+    """API-PRG-010 進捗の算定項目を読む。
+
+    権限は project.view。応答は API-PRG-004 と同じ形（算定方式・今の進捗率・項目）。委託先に見えない活動は 404（設計書 1.1・CR-004）。
+    """
+    return _items_out(progress_service.get_progress_items(session, access, user, project_id, activity_id))
+
+
 @router.put("/projects/{project_id}/activities/{activity_id}/progress-items", response_model=ProgressItemsOut)
 def replace_progress_items(
     project_id: int,

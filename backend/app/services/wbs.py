@@ -96,6 +96,7 @@ from app.models.prj import Project, ProjectMember, ScopeItem
 from app.models.sch import Activity
 from app.models.wbs import (
     COMMENT_STATUS_INITIAL,
+    REVIEW_STATUS_CLOSED,
     REVIEW_STATUS_INITIAL,
     ApprovalRequest,
     ScopeBaseline,
@@ -936,6 +937,21 @@ def put_dictionary(
     return element, entry
 
 
+def get_scope_links(
+    session: Session, access: ProjectAccess, actor: User, activities: ActivitiesReader, project_id: int, element_id: int
+) -> list[int]:
+    """要素とスコープ項目の紐付け（project.view。項目の ID の順）。委託先に見えない要素は 404（API-WBS-026。設計書 1.1・CR-004）。"""
+    table = authorize_project(session, access, actor, project_id, "project.view")
+    context = _load(session, project_id, activities)
+    _element_of(context, element_id)
+    visible = _visible_element_ids(session, access, actor, context, table)
+    if visible is not None and element_id not in visible:
+        raise _element_not_found(element_id)
+    return list(session.scalars(
+        select(WbsScopeLink.scope_item_id).where(WbsScopeLink.element_id == element_id).order_by(WbsScopeLink.scope_item_id)
+    ))
+
+
 def replace_scope_links(
     session: Session,
     access: ProjectAccess,
@@ -1010,6 +1026,45 @@ def start_review(
     project.wbs_status = transition.to_status.value
     review = WbsReview(project_id=project_id, requested_by=actor.id, requested_at=now, reviewer_ids=list(reviewer_ids))
     session.add(review)
+    session.commit()
+    return review
+
+
+def list_reviews(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
+) -> tuple[list[WbsReview], int]:
+    """レビューの一覧（project.view。新しい順＝ID の降順。API-WBS-025。設計書 1.1・CR-004）。指摘は API-WBS-015 で読む。"""
+    authorize_project(session, access, actor, project_id, "project.view")
+    total = session.scalar(select(func.count()).select_from(WbsReview).where(WbsReview.project_id == project_id))
+    reviews = list(session.scalars(
+        select(WbsReview).where(WbsReview.project_id == project_id).order_by(WbsReview.id.desc()).limit(limit).offset(offset)
+    ))
+    return reviews, int(total or 0)
+
+
+def close_review(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, review_id: int, *, now: datetime
+) -> WbsReview:
+    """レビューを閉じる（wbs.edit。5.10 の IN_REVIEW → DRAFT。RULE-WBS-006 の CLOSE_REVIEW。API-WBS-024。設計書 1.1・CR-004）。
+
+    OPEN のレビューを CLOSED にし（``closed_at``）、WBS を DRAFT に戻す。指摘はそのまま残る。
+    閉じたレビュー、WBS が IN_REVIEW でないときは 409 ``INVALID_STATE``。無いレビューは 404。
+    """
+    authorize_project(session, access, actor, project_id, "wbs.edit")
+    review = _review_of(session, project_id, review_id)
+    if review.status != REVIEW_STATUS_INITIAL:
+        raise AppError(409, "INVALID_STATE", "閉じたレビューは閉じられません",
+                       details=[{"review_id": review.id, "status": review.status}])
+    project = session.get(Project, project_id)
+    assert project is not None
+    try:
+        transition = transition_wbs(project.wbs_status, WbsAction.CLOSE_REVIEW)
+    except WorkflowError as exc:
+        raise AppError(409, exc.code.value, f"WBS が {project.wbs_status} のときはレビューを閉じられません",
+                       details=[{"wbs_status": project.wbs_status}]) from exc
+    review.status = REVIEW_STATUS_CLOSED
+    review.closed_at = now
+    project.wbs_status = transition.to_status.value
     session.commit()
     return review
 
@@ -1309,7 +1364,8 @@ def submit_wbs(
     - DRAFT・IN_REVIEW でなければ 409 ``INVALID_STATE``。前提（完了条件の欠け・未対応の指摘・100% ルールの ERROR が 0 件）を
       満たさなければ 422 ``WBS_NOT_READY``（``details`` は満たしていない前提とその件数）
     - 通れば WBS は PENDING_APPROVAL、承認申請（``target_type = WBS``・``target_id`` はプロジェクトの ID。A-15）を作り、
-      開いているレビューを閉じる（5.10 の IN_REVIEW → PENDING_APPROVAL。閉じる API は 6.2 に無い。OQ-18 (2)・A-18）
+      開いているレビューを閉じる（5.10 の IN_REVIEW → PENDING_APPROVAL。レビューを閉じる API-WBS-024 を呼ばずに申請しても
+      レビューが開いたまま残らないように。OQ-18 (2)・A-18）
     """
     authorize_project(session, access, actor, project_id, "wbs.edit")
     context = _load(session, project_id, activities)
@@ -1325,7 +1381,7 @@ def submit_wbs(
                               [{"wbs_status": project.wbs_status}]) from exc
     session.execute(
         update(WbsReview).where(WbsReview.project_id == project_id, WbsReview.status == REVIEW_STATUS_INITIAL)
-        .values(status="CLOSED", closed_at=now)
+        .values(status=REVIEW_STATUS_CLOSED, closed_at=now)
     )
     project.wbs_status = transition.to_status.value
     approval = ApprovalRequest(project_id=project_id, target_type=TARGET_WBS, target_id=project_id,
