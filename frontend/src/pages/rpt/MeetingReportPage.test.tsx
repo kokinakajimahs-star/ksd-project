@@ -18,7 +18,6 @@ import { formatDateTime } from "../../lib/format";
 import { localDateTimeToIso, shareLinkState } from "./labels";
 import MeetingReportPage from "./MeetingReportPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 const REPORT_URL = `${BASE}/status-reports/41/meeting-report`;
 
@@ -32,7 +31,7 @@ function meWith(permissions: string[]) {
 
 function renderAt(path = "/projects/3/status-reports/41/meeting") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/status-reports/:reportId/meeting" element={<MeetingReportPage />} />
       </Routes>

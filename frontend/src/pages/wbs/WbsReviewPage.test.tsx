@@ -18,7 +18,6 @@ import {
 } from "../../test/wbsFixtures";
 import WbsReviewPage, { describeApprovalError, toleranceText } from "./WbsReviewPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[], id = 5): Me {
@@ -63,7 +62,7 @@ function LocationProbe() {
 
 function renderAt(path = "/projects/3/wbs-review") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route
           path="/projects/:projectId/wbs-review"

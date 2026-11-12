@@ -7,7 +7,6 @@ import { errorResponse, jsonResponse, mockApi } from "../../test/mockApi";
 import { makeDelay, makeDelays, makeSlip } from "../../test/prgFixtures";
 import DelaysPage, { slipText } from "./DelaysPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 // 稲妻チャート.txt §6 の例：報告日 12/10。資料作成（δ＝−4.75）と、もう 1 件の遅れ（δ＝−2。閾値ちょうど）
@@ -33,7 +32,7 @@ const DELAYS = makeDelays([
 
 function renderAt(path = "/projects/3/status-reports/41/delays") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/status-reports/:reportId/delays" element={<DelaysPage />} />
       </Routes>

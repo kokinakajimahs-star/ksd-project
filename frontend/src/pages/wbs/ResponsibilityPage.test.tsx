@@ -8,13 +8,12 @@ import { errorResponse, jsonResponse, mockApi, type RecordedCall } from "../../t
 import { makeMatrix } from "../../test/wbsFixtures";
 import ResponsibilityPage, { cellText } from "./ResponsibilityPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 const CSV = "﻿WBS ID,名称,責任者のログインID,担当チーム,割当工数の合計（人時）,planner\r\n1.1,業務整理,planner,,24.00,責任者・担当 16.00\r\n";
 
 function renderAt(path = "/projects/3/responsibility") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/responsibility" element={<ResponsibilityPage />} />
       </Routes>

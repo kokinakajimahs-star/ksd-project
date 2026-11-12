@@ -14,7 +14,6 @@ import { toCreateInput, type FormState } from "./activities/AddActivityForm";
 import { toAssignmentInputs } from "./activities/AssignmentEditor";
 import { assignmentTotals, collectChanges, draftOf, parseIdList } from "./activities/bulkEdit";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -113,7 +112,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/activities") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/activities" element={<ActivityListPage />} />
       </Routes>

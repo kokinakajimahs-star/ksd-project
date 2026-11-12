@@ -17,7 +17,6 @@ import { makeLightningLine, makeLightningRow, makeStatusReport, point } from "..
 import { buildEntryInput, buildItemsInput, itemDraftsFrom, type EntryForm } from "./EntryEditor";
 import StatusReportPage, { remainingText } from "./StatusReportPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -91,7 +90,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/status-reports/41") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/status-reports/:reportId" element={<StatusReportPage />} />
       </Routes>

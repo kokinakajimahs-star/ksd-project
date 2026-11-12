@@ -15,7 +15,7 @@ export default defineConfig({
     include: ["src/**/*.test.{ts,tsx}"],
     // 同時に走らせる試験のワーカー（jsdom を積んだ Node のプロセス）を 2 つまでにする。既定は CPU 数 − 1（この VM で 7）で、
     // ループの検証が別のセッションの試験と重なると VM ごと落ちる（docs/decisions/ASSUMPTIONS.md の A-24）
+    // （Vitest 4 で minWorkers は無くなった。上限の maxWorkers だけを置く）
     maxWorkers: 2,
-    minWorkers: 1,
   },
 });

@@ -10,7 +10,6 @@ import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHand
 import { estimateHistory, makeDictionary, makeEstimateRecord, makeTrace } from "../../test/wbsFixtures";
 import WbsElementPage, { missingCompletion } from "./WbsElementPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -49,7 +48,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/wbs/101") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/wbs/:elementId" element={<WbsElementPage />} />
       </Routes>

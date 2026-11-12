@@ -15,7 +15,6 @@ import { orderRoles } from "./settings/MembersSection";
 import { tableOf, toRoleGrants } from "./settings/RolePermissionsSection";
 import { toScopeInputs } from "./settings/ScopeSection";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 const PM_USER = makeUser({ id: 5, login_id: "pm", display_name: "PM 一郎", is_system_admin: false });
@@ -88,7 +87,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/settings") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/settings" element={<ProjectSettingsPage />} />
       </Routes>

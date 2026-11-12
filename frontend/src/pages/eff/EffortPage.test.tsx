@@ -20,7 +20,6 @@ import { makeScheduleBaseline, makeStatusReport } from "../../test/schFixtures";
 import { bucketLabel, depthOf, rateText } from "./labels";
 import EffortPage, { baselineText, reportBasisText } from "./EffortPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]) {
@@ -99,7 +98,7 @@ function routes(overrides: Record<string, RouteHandler> = {}): Record<string, Ro
 
 function renderAt(path = "/projects/3/effort") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/effort" element={<EffortPage />} />
       </Routes>

@@ -1325,7 +1325,7 @@
 ## A-48: 設計書 1.1（CR-001〜009 を推奨案で承認。2026-11-12）の実装で決めたこと
 
 - **経緯:** 利用者が CR-001〜009 を推奨案で承認し、設計書を 1.1 に改訂した（0.4 の改訂履歴）。作業木 `wt/cr-approved` で CR ごとに実装する。
-  この項は CR ごとの解釈と限界を記す。CR-001・004・008 は実装した時点で書き足す
+  この項は CR ごとの解釈と限界を記す
 - **選択:**
   1. **CR-005（RULE-EFF-005・API-EFF-003）**：実績工数は確定した報告日**以前**（当日を含む）の日を変えない（`LOCKED_DATE`）。取込の備考だけの変更も同じ境界。
      A-39 の「確定した報告日より前の日」を改めた
@@ -1372,10 +1372,17 @@
        UI-SCH-002 は status_report.manage を持つ人に報告日の作成の部品（UI-PRG-001 と共用の `CreateReportForm`）を出す（報告日が 0 件でも）。
        非稼働日は、描く範囲（バーの範囲を報告日線・頂点・過去の線で広げたもの。`chartExtraDates`）が前回受け取った範囲に収まらないときだけ、
        描く範囲を渡して API-SCH-010 を読み直す（バーより広いときに 1 回増える。狭まっても読み直さない）。ガントのデータは API-SCH-010 だけで取る（NFR-02）
+  9. **CR-001（1.1 の表と注）**：react-router-dom 7.18.5・vite 6.4.6・vitest 4.1.12・@vitejs/plugin-react 4.7.0 に上げた（`--save-exact` で版を固定）。
+     どれも主版の中の最新ではなく、設計書の下限（7・6・4）を満たし `npm audit` の勧告が無い（high 以上だけでなく全件 0。`--omit=dev` でも 0。2026-11-12）版。
+     Vite は 7 にしない（設計書の下限は 6 で、@vitejs/plugin-react 4 の対応範囲の中で足りる）。React 18・Testing Library・jsdom は変えない。
+     React Router 7 は v6 の `future`（`v7_startTransition`・`v7_relativeSplatPath`）が既定になり指定を受けないので、`main.tsx` と試験の
+     `MemoryRouter` から外した（振る舞いは 6 で両方を有効にしていた今までと同じ）。Vitest 4 は `minWorkers` を持たないので外し、ワーカーの上限
+     `maxWorkers: 2`（A-24）は残した。7.1 のルートの書き方は変えていない
 - **理由:** 設計書 1.1 の 0.4・4.1・4.2・5.1・5.2・5.6・5.7・5.8・6.2・7.3。承認した CR の推奨案のとおり
 - **影響範囲:** `backend/app/domain/{effort,progress,lightning,delay,snapshot,change,tabular,wbs_code}.py`、
   `backend/app/services/{effort,wbs,io,change,schedule,progress,report}.py`、`backend/app/api/{effort,wbs}.py`・`backend/app/schemas/effort.py`、
-  `backend/app/models/{wbs,sch,prg,eff}.py`、移行 0009・0010、`frontend/src/components/gantt/`・`frontend/src/pages/eff/`・`frontend/src/api/eff.ts`。
+  `backend/app/models/{wbs,sch,prg,eff}.py`、移行 0009・0010、`frontend/src/components/gantt/`・`frontend/src/pages/eff/`・`frontend/src/api/eff.ts`、
+  `frontend/package.json`・`frontend/package-lock.json`・`frontend/vite.config.ts`・`frontend/src/main.tsx`。
   試験はそれぞれの `backend/tests/`・`frontend/src/` の試験
 - **覆す場合:** 設計書を 1.0 へ戻すことになる（Change Request を起票する）。CR ごとの戻し方はそのコミット（`git log --grep CR-00`）の差分を戻す。
   移行 0010 は、今は無い要素・活動を指す写しがあれば戻せない（止まる）
@@ -1386,3 +1393,5 @@
   - CR-007：版の WP の項目と、その WP の活動の項目の和が食い違う版（`save_baseline`・再基準化以外で作った版）では、WBS の軸と他の軸の基準の合計がずれる（検査しない）
   - CR-004：SQLite は消した最大の ID を使い直すので、取り下げて提出し直した承認申請が前と同じ ID になりうる（変更履歴では同じ `entity_id` に
     CREATE・DELETE・CREATE が並ぶ。OQ-42 (10)）。PostgreSQL では起きない
+  - CR-001：確かめたのは型検査・画面の試験（jsdom）・`vite build` まで。ブラウザで開発サーバ・本番の配布物を動かしてはいない。
+    `npm audit` の結果はその日の勧告の一覧によるので、後から勧告が出れば同じ注（1.1）に従って版を上げ直す

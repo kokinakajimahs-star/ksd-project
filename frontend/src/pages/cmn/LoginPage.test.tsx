@@ -9,11 +9,9 @@ import { makeLoginResponse, makeMe, makeUser, storeSession } from "../../test/fi
 import { errorResponse, jsonResponse, mockApi } from "../../test/mockApi";
 import LoginPage from "./LoginPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true } as const;
-
 function renderApp(path: string) {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <App />
     </MemoryRouter>,
   );
@@ -21,7 +19,7 @@ function renderApp(path: string) {
 
 function renderLogin() {
   return render(
-    <MemoryRouter initialEntries={["/login"]} future={FUTURE}>
+    <MemoryRouter initialEntries={["/login"]}>
       <SessionProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />

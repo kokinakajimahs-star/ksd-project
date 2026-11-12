@@ -13,7 +13,7 @@ import { makeDictionary, makeMatrix, makeTrace, makeTree, makeValidation } from 
 
 function renderAt(path: string) {
   return render(
-    <MemoryRouter initialEntries={[path]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <MemoryRouter initialEntries={[path]}>
       <App />
     </MemoryRouter>,
   );
