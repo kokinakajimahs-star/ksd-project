@@ -1,6 +1,6 @@
 {
   "generated_from": "pmt-design.md",
-  "document_sha256": "ba49f9ec00d52755",
+  "document_sha256": "227a4778c617ac16",
   "kinds": {
     "db": {
       "label": "テーブル",
@@ -318,14 +318,14 @@
         {
           "id": "RULE-EFF-004",
           "name": "差異の判定",
-          "criteria": "差異＝EAC−基準、差異率と絶対値の両方の閾値を超えた要素と、基準に無い要素を抽出する（要求仕様書 BR-11）",
+          "criteria": "差異＝EAC−基準、差異率と絶対値の両方の閾値を超えた要素と、基準に無い要素（5.8 の「追加された要素」）を抽出する（要求仕様書 BR-11）",
           "module": "effort.py",
           "group": "EFF"
         },
         {
           "id": "RULE-EFF-005",
           "name": "実績工数の入力検査",
-          "criteria": "自分の割当の活動だけ、1日の合計24時間以下、負の値の禁止、確定した報告日より前の日は変えない",
+          "criteria": "自分の割当の活動だけ、1日の合計24時間以下、負の値の禁止、確定した報告日以前の日は変えない",
           "module": "effort.py",
           "group": "EFF"
         },
@@ -509,7 +509,7 @@
     "api": {
       "label": "API",
       "chapter": "6.2",
-      "baseline": 90,
+      "baseline": 96,
       "items": [
         {
           "id": "API-CHG-001",
@@ -678,6 +678,23 @@
           "path": "/api/v1/projects/{project_id}/audit-logs",
           "methods": [
             "GET"
+          ],
+          "group": "CHG"
+        },
+        {
+          "id": "API-CHG-011",
+          "name": "提出した変更要求を取り下げる（SUBMITTED → DRAFT。承認申請を取り下げる）",
+          "endpoints": [
+            {
+              "methods": [
+                "POST"
+              ],
+              "path": "/api/v1/projects/{project_id}/change-requests/{change_request_id}/withdraw"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/change-requests/{change_request_id}/withdraw",
+          "methods": [
+            "POST"
           ],
           "group": "CHG"
         },
@@ -1175,6 +1192,23 @@
           "group": "PRG"
         },
         {
+          "id": "API-PRG-010",
+          "name": "進捗の算定項目を読む",
+          "endpoints": [
+            {
+              "methods": [
+                "GET"
+              ],
+              "path": "/api/v1/projects/{project_id}/activities/{activity_id}/progress-items"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/activities/{activity_id}/progress-items",
+          "methods": [
+            "GET"
+          ],
+          "group": "PRG"
+        },
+        {
           "id": "API-PRJ-001",
           "name": "プロジェクトを作成する（カレンダー・採番規則・既定の権限も作る）",
           "endpoints": [
@@ -1430,6 +1464,23 @@
           "group": "RPT"
         },
         {
+          "id": "API-RPT-005",
+          "name": "共有リンクの一覧（トークンは返さない）",
+          "endpoints": [
+            {
+              "methods": [
+                "GET"
+              ],
+              "path": "/api/v1/projects/{project_id}/share-links"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/share-links",
+          "methods": [
+            "GET"
+          ],
+          "group": "RPT"
+        },
+        {
           "id": "API-SCH-001",
           "name": "活動の一覧（日程・依存・担当付き）",
           "endpoints": [
@@ -1584,7 +1635,7 @@
         },
         {
           "id": "API-SCH-010",
-          "name": "ガントの描画データ（`baseline_id` 任意）",
+          "name": "ガントの描画データ（`baseline_id`・`range_start`・`range_end` 任意。非稼働日は表示範囲 `range_start`〜`range_end` の分を返し、省けばバーの範囲）",
           "endpoints": [
             {
               "methods": [
@@ -2040,6 +2091,57 @@
             "GET"
           ],
           "group": "WBS"
+        },
+        {
+          "id": "API-WBS-024",
+          "name": "レビューを閉じる（IN_REVIEW → DRAFT）",
+          "endpoints": [
+            {
+              "methods": [
+                "POST"
+              ],
+              "path": "/api/v1/projects/{project_id}/wbs/reviews/{review_id}/close"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/wbs/reviews/{review_id}/close",
+          "methods": [
+            "POST"
+          ],
+          "group": "WBS"
+        },
+        {
+          "id": "API-WBS-025",
+          "name": "レビューの一覧",
+          "endpoints": [
+            {
+              "methods": [
+                "GET"
+              ],
+              "path": "/api/v1/projects/{project_id}/wbs/reviews"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/wbs/reviews",
+          "methods": [
+            "GET"
+          ],
+          "group": "WBS"
+        },
+        {
+          "id": "API-WBS-026",
+          "name": "要素とスコープ項目の紐付けを読む",
+          "endpoints": [
+            {
+              "methods": [
+                "GET"
+              ],
+              "path": "/api/v1/projects/{project_id}/wbs/elements/{element_id}/scope-links"
+            }
+          ],
+          "path": "/api/v1/projects/{project_id}/wbs/elements/{element_id}/scope-links",
+          "methods": [
+            "GET"
+          ],
+          "group": "WBS"
         }
       ]
     },
@@ -2186,10 +2288,10 @@
   "counts": {
     "db": 35,
     "rule": 40,
-    "api": 90,
+    "api": 96,
     "ui": 22,
-    "total": 187
+    "total": 193
   },
-  "source_sha256": "ba49f9ec00d52755946d53df84cb9e5a8011b7406c592a49fe7ea1f3912ab913:32dfbd77f532ecb63ce33ae883559c744681867b789c3b0430b9972f5db1ef8e",
+  "source_sha256": "227a4778c617ac168147f51b57c83f2de217f3ef550b3e38b24b429d5e8eb59f:18ca9a5b1bae61faf3e2a9c5dc5b64569dc32114b9224d1699bb5b44fb07eb4c",
   "extractor_sha256": "b8d15ead6b061f8c9cd8001f4d4df78defe0d47749b77e3c74f15a631afde9d2"
 }
