@@ -28,7 +28,14 @@ from app.domain.authz import ShareLinkRecord, ShareLinkStatus, ViewLevel, hash_t
 from app.domain.effort import EffortValues
 from app.domain.gantt import GanttChart
 from app.domain.progress import round_percent
-from app.domain.report import CorrectiveActionDue, MeetingReport, ProgressNote, ReportError, build_meeting_report
+from app.domain.report import (
+    REPORT_WINDOW,
+    CorrectiveActionDue,
+    MeetingReport,
+    ProgressNote,
+    ReportError,
+    build_meeting_report,
+)
 from app.domain.scheduling import ScheduleActivity, ScheduleCycleError
 from app.domain.snapshot import Snapshot, SnapshotActivity, SnapshotItem, StatusReportStatus
 from app.errors import AppError
@@ -219,9 +226,11 @@ def _build(
                 actual_finish=entry.actual_finish if entry is not None else None,
             )
 
+    # 非稼働日は会議レポートの表示範囲（報告日の前後 4 週。7.4）の分を受け取る（設計書 1.1・CR-008）
     chart, baseline = plan_gantt(
         session, links, plan, visible=visible,
         progress=LatestProgress(report_date=report.report_date, activities=gantt_progress),
+        range_start=report.report_date - REPORT_WINDOW, range_end=report.report_date + REPORT_WINDOW,
     )
     restricted = visible is not None
     try:

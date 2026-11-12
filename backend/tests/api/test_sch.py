@@ -563,6 +563,30 @@ def test_gantt_rows_bars_links_and_progress(app: FastAPI, world: World, client: 
     assert client.get(world.url("/gantt"), params={"baseline_id": MISSING}, headers=world.h["viewer"]).status_code == 404
 
 
+def test_gantt_non_working_days_follow_display_range(world: World, client: TestClient) -> None:
+    """API-SCH-010：``range_start``・``range_end`` を渡すと、その表示範囲の非稼働日を返す（設計書 1.1・CR-008）。
+
+    応答の ``range_start``・``range_end`` はバーの範囲のまま。省いた端はバーの範囲の端。始まりが終わりより後・長すぎる範囲・
+    日付でない値は 400。
+    """
+    chain(world)
+    url = world.url("/gantt")
+    wide = client.get(url, params={"range_start": "2026-11-28", "range_end": "2026-12-14"}, headers=world.h["viewer"])
+    assert wide.status_code == 200, wide.text
+    g = wide.json()
+    assert (g["range_start"], g["range_end"]) == ("2026-12-01", "2026-12-07")
+    assert g["non_working_days"] == ["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06", "2026-12-12",
+                                     "2026-12-13"]
+    end_only = client.get(url, params={"range_end": "2026-12-13"}, headers=world.h["viewer"]).json()
+    assert end_only["non_working_days"] == ["2026-12-05", "2026-12-06", "2026-12-12", "2026-12-13"]
+    reversed_range = client.get(url, params={"range_start": "2026-12-10", "range_end": "2026-12-09"},
+                                headers=world.h["viewer"])
+    assert reversed_range.status_code == 400 and reversed_range.json()["error"]["code"] == "VALIDATION_ERROR"
+    too_long = client.get(url, params={"range_start": "2000-01-01", "range_end": "2026-12-09"}, headers=world.h["viewer"])
+    assert too_long.status_code == 400 and too_long.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert client.get(url, params={"range_start": "12/01"}, headers=world.h["viewer"]).status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # API-SCH-011〜013 スケジュールベースライン（SCH-16・17・18）
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ from app.domain.baseline import (
 )
 from app.domain.calendar import CalendarError, WorkCalendar
 from app.domain.estimate import ActivityEstimate, WbsNode, rollup_estimates
-from app.domain.gantt import BaselineBarInput, GanttActivity, GanttChart, GanttElement, build_gantt
+from app.domain.gantt import BaselineBarInput, GanttActivity, GanttChart, GanttElement, GanttRangeError, build_gantt
 from app.domain.scheduling import (
     DEPENDENCY_LAG_R1,
     DEPENDENCY_TYPE_FS,
@@ -844,30 +844,33 @@ class GanttView:
 
 def gantt(
     session: Session, access: ProjectAccess, actor: User, links: ScheduleLinks, project_id: int,
-    baseline_id: int | None = None,
+    baseline_id: int | None = None, *, range_start: date | None = None, range_end: date | None = None,
 ) -> GanttView:
     """ガントの描画データ（project.view。SCH-11・12・13）。
 
     基準のバーは ``baseline_id`` の版（省けば最新の版。版が無ければ出さない。SCH-17）。他のプロジェクトの版・無い版は 404。
     実績のバーと進捗率は最新の進捗（``latest_progress``）、未完了の実績はその報告日まで描く。
+    非稼働日は表示範囲 ``range_start``〜``range_end`` の分（省いた端はバーの範囲の端。設計書 1.1・CR-008）。
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
     plan = load_plan(session, project_id)
     visible = _visible_activity_ids(session, access, actor, project_id, table, plan.activities)
     progress = links.latest_progress(session, project_id)
-    chart, baseline = plan_gantt(session, links, plan, visible=visible, progress=progress, baseline_id=baseline_id)
+    chart, baseline = plan_gantt(session, links, plan, visible=visible, progress=progress, baseline_id=baseline_id,
+                                 range_start=range_start, range_end=range_end)
     return GanttView(chart=chart, project_start=plan.project.start_date, baseline=baseline,
                      report_date=progress.report_date, restricted=visible is not None)
 
 
 def plan_gantt(
     session: Session, links: ScheduleLinks, plan: Plan, *, visible: frozenset[int] | None, progress: LatestProgress,
-    baseline_id: int | None = None,
+    baseline_id: int | None = None, range_start: date | None = None, range_end: date | None = None,
 ) -> tuple[GanttChart, ScheduleBaseline | None]:
     """計画のガント（RULE-SCH-005）と基準のバーを取った版（権限は呼び手が確かめる）。
 
     ``visible`` は見せる活動（``None`` は全て）。実績のバー・進捗率は ``progress``（その報告日まで描く）。
     基準は ``baseline_id`` の版（省けば最新の版。版が無ければ基準のバーは無い）。無い版・他のプロジェクトの版は 404。
+    非稼働日は表示範囲 ``range_start``〜``range_end``（省いた端はバーの範囲の端）の分。範囲が不正なら 400（CR-008）。
     """
     project_id = plan.project.id
     baselines = _baselines_of(session, project_id)
@@ -903,16 +906,21 @@ def plan_gantt(
         if visible is None or a.id in visible
     ]
     shown = {a.id for a in activities}
-    chart = build_gantt(
-        [GanttElement(id=e.id, parent_id=e.parent_id, wbs_code=e.wbs_code, name=e.name, sort_order=e.sort_order,
-                      sibling_seq=e.sibling_seq) for e in plan.elements],
-        activities,
-        [(p, s) for p, s in plan.pairs if p in shown and s in shown],
-        calendar=plan.calendar,
-        project_start=plan.project.start_date,
-        baseline=bars if baseline is not None else None,
-        report_date=progress.report_date,
-    )
+    try:
+        chart = build_gantt(
+            [GanttElement(id=e.id, parent_id=e.parent_id, wbs_code=e.wbs_code, name=e.name, sort_order=e.sort_order,
+                          sibling_seq=e.sibling_seq) for e in plan.elements],
+            activities,
+            [(p, s) for p, s in plan.pairs if p in shown and s in shown],
+            calendar=plan.calendar,
+            project_start=plan.project.start_date,
+            baseline=bars if baseline is not None else None,
+            report_date=progress.report_date,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    except GanttRangeError as exc:
+        raise _validation_error([{"loc": ["query", "range_start"], "message": str(exc)}]) from exc
     return chart, baseline
 
 

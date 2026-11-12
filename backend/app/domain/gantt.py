@@ -23,15 +23,23 @@ from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from fractions import Fraction
+from typing import Final
 
 from app.domain.calendar import Position, WorkCalendar, WorkdayAxis
 from app.domain.wbs_code import CodedElement, WbsCodeError, display_preorder
 
 _ONE_DAY = timedelta(days=1)
 
+# 非稼働日を返す表示範囲の長さの上限（暦日。両端を含む）。業務の値ではなく、1 回の応答の大きさの歯止め（ASSUMPTIONS.md A-48）
+MAX_GANTT_RANGE_DAYS: Final = 3660
+
 
 class GanttError(ValueError):
     """ガントの組み立ての入力が不正（未定義の入力は推測せずに拒む）。"""
+
+
+class GanttRangeError(GanttError):
+    """表示範囲（``range_start``・``range_end``）が不正：始まりが終わりより後、または長さが上限を超える。"""
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +172,11 @@ class GanttLink:
 
 @dataclass(frozen=True)
 class GanttChart:
-    """ガントの描画データ（API-SCH-010 が返す）。バーが 1 本も無ければ範囲は ``None``、非稼働日は空。"""
+    """ガントの描画データ（API-SCH-010 が返す）。
+
+    ``range_start``・``range_end`` はバーの範囲（バーが 1 本も無ければ ``None``）。``non_working_days`` は表示範囲
+    （``build_gantt`` に渡した範囲。省いた端はバーの範囲の端）の非稼働日（設計書 1.1・CR-008）。
+    """
 
     rows: tuple[GanttRow, ...]
     links: tuple[GanttLink, ...]
@@ -324,6 +336,8 @@ def build_gantt(
     project_start: date,
     baseline: Mapping[int, BaselineBarInput] | None = None,
     report_date: date | None = None,
+    range_start: date | None = None,
+    range_end: date | None = None,
 ) -> GanttChart:
     """ガントの描画データを組み立てる（7.3・SCH-11・12・13）。
 
@@ -331,7 +345,12 @@ def build_gantt(
     - ``dependencies``：依存の（先行, 後続）の組
     - ``baseline``：選んだベースラインの項目を活動の ID で引くもの（選ばなければ ``None`` で、基準のバーを出さない）
     - ``report_date``：報告日。未完了の実績のバーの終わりに使う（未完了の実績があるのに無ければ ``GanttError``）
+    - ``range_start``・``range_end``：表示範囲（6.2 の API-SCH-010。設計書 1.1・CR-008）。この範囲の非稼働日を返す。
+      省いた端はバーの範囲の端（両方省けばバーの範囲）。始まりが終わりより後、または長さが ``MAX_GANTT_RANGE_DAYS`` を
+      超えれば ``GanttRangeError``。バーが無くても両端を渡せばその範囲の非稼働日を返す
     """
+    if range_start is not None and range_end is not None and range_start > range_end:
+        raise GanttRangeError(f"表示範囲の始まり {range_start} が終わり {range_end} より後")
     element_list = list(elements)
     by_element = {e.id: e for e in element_list}
     if len(by_element) != len(element_list):
@@ -415,20 +434,31 @@ def build_gantt(
         )
 
     bars = [bar for row in rows for bar in (row.planned, row.actual, row.baseline) if bar is not None]
-    if not bars:
-        return GanttChart(rows=tuple(rows), links=tuple(links), range_start=None, range_end=None, non_working_days=())
-    range_start = min(min(bar.start.calendar.date, bar.start_date) for bar in bars)
-    range_end = max(max(bar.end.calendar.date, bar.end_date) for bar in bars)
-    non_working: list[date] = []
-    day = range_start
-    while day <= range_end:
-        if not calendar.is_working_day(day):
-            non_working.append(day)
-        day += _ONE_DAY
+    bar_start = min((min(bar.start.calendar.date, bar.start_date) for bar in bars), default=None)
+    bar_end = max((max(bar.end.calendar.date, bar.end_date) for bar in bars), default=None)
+    shown_start = range_start if range_start is not None else bar_start
+    shown_end = range_end if range_end is not None else bar_end
     return GanttChart(
         rows=tuple(rows),
         links=tuple(links),
-        range_start=range_start,
-        range_end=range_end,
-        non_working_days=tuple(non_working),
+        range_start=bar_start,
+        range_end=bar_end,
+        non_working_days=_non_working_days(calendar, shown_start, shown_end),
     )
+
+
+def _non_working_days(calendar: WorkCalendar, start: date | None, end: date | None) -> tuple[date, ...]:
+    """表示範囲 ``start``〜``end``（両端を含む）の非稼働日。どちらかの端が無ければ空。"""
+    if start is None or end is None:
+        return ()
+    if start > end:
+        raise GanttRangeError(f"表示範囲の始まり {start} が終わり {end} より後")
+    if (end - start).days + 1 > MAX_GANTT_RANGE_DAYS:
+        raise GanttRangeError(f"表示範囲が長すぎる（{start}〜{end}。上限 {MAX_GANTT_RANGE_DAYS} 日）")
+    non_working: list[date] = []
+    day = start
+    while day <= end:
+        if not calendar.is_working_day(day):
+            non_working.append(day)
+        day += _ONE_DAY
+    return tuple(non_working)

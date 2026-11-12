@@ -242,6 +242,20 @@ def test_meeting_report_of_open_report_is_calculated(world: World, client: TestC
     assert kpi["overdue_action_count"] == 1
 
 
+def test_meeting_report_gantt_returns_non_working_days_of_window(world: World, client: TestClient) -> None:
+    """API-RPT-001：上段のガントの非稼働日は表示の範囲（報告日の前後 4 週）の分（7.4。設計書 1.1・CR-008）。"""
+    calendar = {"working_weekdays": "1111111", "hours_per_day": 8,
+                "holidays": [{"holiday_date": d} for d in ("2026-11-06", "2026-11-10", "2026-12-31", "2027-01-03")]}
+    assert client.put(world.url("/calendar"), json=calendar, headers=world.h["pm"]).status_code == 200
+    report = world.delayed_report()
+    body = world.meeting(report)
+    assert body["window"] == {"start": "2026-11-07", "end": "2027-01-02"}
+    gantt = body["gantt"]
+    # バーの範囲（12/01〜）の外でも、表示の範囲の中の休日は返す。範囲の外（11/06・2027-01-03）は返さない
+    assert gantt["non_working_days"] == ["2026-11-10", "2026-12-31"]
+    assert gantt["range_start"] == "2026-12-01"
+
+
 def test_meeting_report_of_finalized_report_uses_snapshot(world: World, client: TestClient) -> None:
     report = world.delayed_report()
     before = world.meeting(report)
