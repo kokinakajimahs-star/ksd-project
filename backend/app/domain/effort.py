@@ -5,8 +5,9 @@
   見積×（1−進捗率）、進捗率が未算定なら max(見積−実績, 0)。どの式で求めたかを ``EtcSource`` で返す（EFF-06 の「自動か入力か」）
 - EAC と上位への集計（RULE-EFF-002。5.8）：活動の EAC＝実績＋ETC。WP はその活動の合計、**活動を 1 つも持たない WP** は
   自分の見積を計画・ETC・EAC とし実績は 0。上位はその下位の合計。計画（今の見積）・基準（スケジュールベースラインの見積）・
-  予測（EAC）を別の値で持つ（EFF-08）
-- 多軸集計（RULE-EFF-003。5.8 の表）：WBS・担当者・組織・期間（週・月）の 4 軸。どの軸でも桶の合計がプロジェクトの合計に一致する（EFF-09）
+  予測（EAC）を別の値で持つ（EFF-08）。基準は版の項目から 5.8 の数え方で求める（WP は版の WORK_PACKAGE の項目。設計書 1.1・CR-007）
+- 多軸集計（RULE-EFF-003。5.8 の表）：WBS・担当者・組織・期間（週・月）の 4 軸。どの軸でも桶の合計がプロジェクトの合計に一致する（EFF-09）。
+  版にあって今は無い活動・WP の基準は、どの軸でも桶「基準にあって今は無い」に置く
 - 差異の判定（RULE-EFF-004。BR-11）：差異＝EAC−基準、差異率＝差異÷基準。差異率と絶対値の**両方**の閾値を超えた要素と、
   基準に無い要素（追加）を抽出する
 - 実績工数の入力検査（RULE-EFF-005。EFF-02）：自分の割当の活動だけ・1 日の合計 24 時間以下・負の値の禁止・
@@ -20,7 +21,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
@@ -218,18 +219,16 @@ def _sum_values(values: Iterable[EffortValues]) -> EffortValues:
 
 @dataclass(frozen=True)
 class EffortElement:
-    """WBS 要素（4.1 の ``wbs_elements`` のうち集計に要る列）と、その基準の見積。
+    """WBS 要素（4.1 の ``wbs_elements`` のうち集計に要る列）。
 
-    ``own_estimate_hours`` と ``baseline_hours`` が効くのは**活動を 1 つも持たない WP** だけ（5.8。それ以外の要素の値は下位の合計）。
-    ``baseline_hours`` はスケジュールベースラインのその WP の項目（``schedule_baseline_items`` の WORK_PACKAGE）の見積で、
-    基準に無ければ ``None``。基準にあって見積が空の項目は、呼び手が 0 にして渡す。
+    ``own_estimate_hours`` が効くのは**活動を 1 つも持たない WP** だけ（5.8。それ以外の要素の値は下位の合計）。
+    基準の値は要素に持たせず、版の項目（``BaselineItem``）から求める。
     """
 
     id: int
     parent_id: int | None
     kind: ElementKind
     own_estimate_hours: Decimal | None = None
-    baseline_hours: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -239,7 +238,8 @@ class ActivityEffortInput:
     - ``estimate_hours``：今の見積（``activities.estimate_hours``。``None`` は 0）
     - ``actual_hours``：実績（その活動の ``time_entries`` の合計。報告日を指定したときは報告日以前の分。5.8）
     - ``percent_complete``：進捗率（RULE-PRG-001。``None`` は未算定）、``entered_etc_hours``：担当者が入力した残工数（``None`` は自動）
-    - ``baseline_hours``：スケジュールベースラインのその活動の項目の見積。基準に無ければ ``None``（見積が空の項目は呼び手が 0 にして渡す）
+
+    基準の値は版の項目（``BaselineItem``）から求める。
     """
 
     id: int
@@ -248,7 +248,49 @@ class ActivityEffortInput:
     actual_hours: Decimal
     percent_complete: Decimal | None = None
     entered_etc_hours: Decimal | None = None
-    baseline_hours: Decimal | None = None
+
+
+class BaselineItemType(StrEnum):
+    """スケジュールベースラインの項目の種類（4.1 の ``schedule_baseline_items.item_type``）。"""
+
+    ACTIVITY = "ACTIVITY"
+    WORK_PACKAGE = "WORK_PACKAGE"
+
+
+@dataclass(frozen=True)
+class BaselineItem:
+    """基準に選んだスケジュールベースラインの版の項目（4.1 の ``schedule_baseline_items`` のうち基準の値に要る列）。
+
+    - ``item_type``：ACTIVITY は活動の写し、WORK_PACKAGE は WP の写し（見積はその時点の活動の見積の和、活動が無ければ WP の見積）
+    - ``element_id``：WP の項目は自分、活動の項目はその時点の置き場の WP。``activity_id``：写した活動（WP の項目では ``None``）。
+      どちらも写した時点の ID で、今の計画に無ければ「基準にあって今は無い」（設計書 1.1 の 4.2・5.8）。
+      1.1 より前に消した要素・活動の写しは ``None`` のことがあり、今の計画に無いものとして数える
+    - ``estimate_hours``：写した見積（``None`` は 0）。``start_date``・``finish_date``：写した開始日・終了日（期間の軸で基準を配る）
+    """
+
+    item_type: BaselineItemType | str
+    element_id: int | None
+    activity_id: int | None = None
+    estimate_hours: Decimal | None = None
+    start_date: date | None = None
+    finish_date: date | None = None
+
+
+@dataclass(frozen=True)
+class BaselinePlacement:
+    """担当者・組織・期間の軸に置く基準の値の 1 つ（5.8 の基準の値の数え方）。
+
+    - 今もある活動の、版の活動の項目：``activity_id`` はその活動（担当者は今の割当の比で分ける）。``element_id`` は今の置き場の WP
+    - 版に活動の項目を持たない、今もある WP の WORK_PACKAGE の項目：``activity_id`` は ``None``（担当者は「未割当」）
+
+    期間は ``start_date``〜``finish_date`` の稼働日に均等に配る（日付が無ければ「日付なし」）。
+    """
+
+    activity_id: int | None
+    element_id: int
+    hours: Decimal
+    start_date: date | None
+    finish_date: date | None
 
 
 @dataclass(frozen=True)
@@ -276,16 +318,30 @@ class EffortRollup:
 
     - ``elements``：要素の ID → 値（WP は活動の合計か自分の見積、上位は下位の合計）
     - ``activities``：活動の ID → 値
-    - ``roots``：最上位の要素の ID（入力の順）、``project``：プロジェクトの合計（最上位の要素の合計）
+    - ``roots``：最上位の要素の ID（入力の順）、``project``：プロジェクトの合計（最上位の要素の合計。基準は版の合計：
+      最上位の要素の基準の合計に ``wbs_removed_baseline`` を足した値）
+    - ``baseline_placements``：担当者・組織・期間の軸に置く基準の値（版の項目の順。基準を選ばなければ空）
+    - ``removed_baseline``：担当者・組織・期間の軸の桶「基準にあって今は無い」の基準（版にあって今は無い活動の項目と、
+      版に活動の項目を持たない、今は無い WP の WORK_PACKAGE の項目の合計）
+    - ``wbs_removed_baseline``：WBS の軸の同じ桶の基準（版にあって今は無い WP の値の合計）
+
+    桶の 2 つは、基準を選ばなかったか、版にあって今は無いものが 1 つも無ければ ``None``。
     """
 
     elements: Mapping[int, ElementEffort]
     activities: Mapping[int, ActivityEffort]
     roots: tuple[int, ...]
     project: EffortValues
+    baseline_placements: tuple[BaselinePlacement, ...] = ()
+    removed_baseline: Decimal | None = None
+    wbs_removed_baseline: Decimal | None = None
 
     def leaf_values(self) -> Iterable[tuple[int | None, int, EffortValues]]:
-        """集計の葉（活動と、活動を 1 つも持たない WP）を ``(活動の ID か None, 要素の ID, 値)`` で返す。全ての葉の合計がプロジェクトの合計。"""
+        """集計の葉（活動と、活動を 1 つも持たない WP）を ``(活動の ID か None, 要素の ID, 値)`` で返す。
+
+        全ての葉の計画・実績・ETC・EAC の合計がプロジェクトの合計。基準は版の項目から数える（``baseline_placements``）ので、
+        葉の基準の合計はプロジェクトの基準に一致するとは限らない。
+        """
         for activity in self.activities.values():
             yield activity.activity_id, activity.work_package_id, activity.values
         for element in self.elements.values():
@@ -293,15 +349,117 @@ class EffortRollup:
                 yield None, element.element_id, element.values
 
 
+@dataclass(frozen=True)
+class _BaselineBasis:
+    """版の項目を今の計画に当てた結果（5.8 の基準の値の数え方）。"""
+
+    activity_hours: Mapping[int, Decimal]  # 今もある活動 → 版のその活動の項目の見積
+    work_package_hours: Mapping[int, Decimal]  # 今もある WP → 版のその WP の値
+    placements: tuple[BaselinePlacement, ...]
+    removed: Decimal | None
+    wbs_removed: Decimal | None
+
+
+def _baseline_basis(
+    nodes: Sequence[EffortElement], acts: Sequence[ActivityEffortInput], items: Iterable[BaselineItem],
+) -> _BaselineBasis:
+    """版の項目を今の計画に当てる。
+
+    - 版の WP の値：その WP の WORK_PACKAGE の項目の見積。項目が無く活動の項目があれば、その活動の項目の和
+      （1.1 より前の写しで ``element_id`` が空の項目は、まとめて 1 つの「今は無い WP」として数える）
+    - WBS の軸：今もある WP は版の WP の値。今は WP でない ID の値は桶「基準にあって今は無い」
+    - 担当者・組織・期間の軸：今もある活動の項目はその活動に置く。版に活動の項目を持たない WP の項目は、今もある WP なら
+      「未割当」に置く。今は無い活動の項目と、版に活動の項目を持たない今は無い WP の項目は桶「基準にあって今は無い」
+
+    版が 5.8 のとおりに作られていれば（WP の項目＝その時点の活動の項目の和）、どちらの数え方でも合計は版の合計になる（EFF-09）。
+    項目の種類の誤り・負の見積・同じ活動の項目の重複・同じ WP の WORK_PACKAGE の項目の重複・活動を指す WORK_PACKAGE の項目は ``EffortError``。
+    """
+    current_activities = {a.id: a for a in acts}
+    current_wps = {n.id for n in nodes if n.kind == ElementKind.WORK_PACKAGE}
+
+    parsed: list[tuple[BaselineItem, BaselineItemType, Decimal]] = []
+    activity_items_of: dict[int | None, Decimal] = {}  # 版の WP（項目の element_id）→ 活動の項目の和
+    package_items_of: dict[int | None, Decimal] = {}  # 版の WP → WORK_PACKAGE の項目の見積
+    seen_activities: set[int] = set()
+    for item in items:
+        try:
+            item_type = BaselineItemType(item.item_type)
+        except ValueError:
+            raise EffortError(f"基準の項目の種類は ACTIVITY・WORK_PACKAGE のいずれか: {item.item_type!r}") from None
+        what = (f"基準の活動 {item.activity_id} の項目" if item_type is BaselineItemType.ACTIVITY
+                else f"基準の WP {item.element_id} の項目")
+        hours = _optional_hours(item.estimate_hours, f"{what} の見積")
+        hours = _ZERO if hours is None else hours
+        if item_type is BaselineItemType.ACTIVITY:
+            if item.activity_id is not None:
+                if item.activity_id in seen_activities:
+                    raise EffortError(f"基準の版に活動 {item.activity_id} の項目が 2 つある")
+                seen_activities.add(item.activity_id)
+            activity_items_of[item.element_id] = activity_items_of.get(item.element_id, _ZERO) + hours
+        else:
+            if item.activity_id is not None:
+                raise EffortError(f"{what} が活動 {item.activity_id} を指している（WORK_PACKAGE の項目は活動を持たない）")
+            if item.element_id is not None and item.element_id in package_items_of:
+                raise EffortError(f"基準の版に WP {item.element_id} の WORK_PACKAGE の項目が 2 つある")
+            package_items_of[item.element_id] = package_items_of.get(item.element_id, _ZERO) + hours
+        parsed.append((item, item_type, hours))
+
+    def version_value(element_id: int | None) -> Decimal:
+        return package_items_of[element_id] if element_id in package_items_of else activity_items_of[element_id]
+
+    version_ids = package_items_of.keys() | activity_items_of.keys()
+    removed_ids = [i for i in version_ids if i is None or i not in current_wps]
+    activity_hours: dict[int, Decimal] = {}
+    placements: list[BaselinePlacement] = []
+    removed: Decimal | None = None
+    for item, item_type, hours in parsed:
+        if item_type is BaselineItemType.ACTIVITY:
+            current = current_activities.get(item.activity_id) if item.activity_id is not None else None
+            if current is not None:
+                activity_hours[current.id] = hours
+                placements.append(BaselinePlacement(activity_id=current.id, element_id=current.work_package_id,
+                                                    hours=hours, start_date=item.start_date,
+                                                    finish_date=item.finish_date))
+                continue
+        elif item.element_id in activity_items_of:
+            continue  # 版に活動の項目がある WP：値は活動の項目が持つ
+        elif item.element_id is not None and item.element_id in current_wps:
+            placements.append(BaselinePlacement(activity_id=None, element_id=item.element_id, hours=hours,
+                                                start_date=item.start_date, finish_date=item.finish_date))
+            continue
+        removed = hours if removed is None else removed + hours
+    return _BaselineBasis(
+        activity_hours=activity_hours,
+        work_package_hours={i: version_value(i) for i in version_ids if i is not None and i in current_wps},
+        placements=tuple(placements),
+        removed=removed,
+        wbs_removed=sum((version_value(i) for i in removed_ids), _ZERO) if removed_ids else None,
+    )
+
+
 # RULE-EFF-002 EACと上位への集計
-def rollup_effort(elements: Iterable[EffortElement], activities: Iterable[ActivityEffortInput] = ()) -> EffortRollup:
+def rollup_effort(
+    elements: Iterable[EffortElement],
+    activities: Iterable[ActivityEffortInput] = (),
+    baseline_items: Iterable[BaselineItem] | None = None,
+) -> EffortRollup:
     """活動の EAC（実績＋ETC。ETC は RULE-EFF-001）を求め、WP→上位→プロジェクトへ合計する（5.8・EFF-07・EFF-08）。
 
-    - 活動：計画＝今の見積、基準＝基準の項目の見積、実績＝入力の実績、ETC＝RULE-EFF-001、EAC＝実績＋ETC
-    - 活動を持つ WP：その活動の値の合計（自分の見積・``baseline_hours`` は使わない）
-    - 活動を 1 つも持たない WP：計画＝ETC＝EAC＝自分の見積（``None`` は 0）、実績＝0、基準＝``baseline_hours``
-    - WP 以外の要素：子の要素の値の合計（子が無ければ全て 0・基準は無し）。プロジェクト：最上位の要素の合計
-    - 基準の合計は、基準にある下位だけを足す。下位の 1 つも基準に無ければ ``None``（基準に無い要素。RULE-EFF-004 の「追加」）
+    - 活動：計画＝今の見積、実績＝入力の実績、ETC＝RULE-EFF-001、EAC＝実績＋ETC
+    - 活動を持つ WP：その活動の値の合計（自分の見積は使わない）
+    - 活動を 1 つも持たない WP：計画＝ETC＝EAC＝自分の見積（``None`` は 0）、実績＝0
+    - WP 以外の要素：子の要素の値の合計（子が無ければ全て 0）。プロジェクト：最上位の要素の合計
+
+    基準（``baseline_items`` は選んだ版の項目。``None`` は版が無い：基準の値は全て ``None``）は 5.8 の数え方（設計書 1.1・CR-007）：
+
+    - 活動：版のその活動の項目の見積。項目が無ければ ``None``（追加された活動）
+    - WP：版のその WP の WORK_PACKAGE の項目の見積（活動の和ではない）。版に WORK_PACKAGE の項目も活動の項目も無ければ
+      ``None``（追加された WP）
+    - WP 以外の要素：下位の基準の合計（``None`` は足さない）。子の無い要素は 0。配下に WP があり、その全てが追加された
+      要素なら ``None``（追加された上位の要素。BR-11・RULE-EFF-004）
+    - プロジェクト：版の合計（最上位の要素の合計と、WBS の軸の桶「基準にあって今は無い」の和）
+    - 版にあって今は無い活動・WP の基準は ``removed_baseline``・``wbs_removed_baseline``、担当者・組織・期間の軸に置く基準は
+      ``baseline_placements``（``_baseline_basis``）
 
     木の検査（ID の重複・存在しない親・循環・子を持つ WP・WP 以外に置いた活動）は RULE-EST-001 と同じで、誤りは ``EffortError``。
     """
@@ -314,6 +472,7 @@ def rollup_effort(elements: Iterable[EffortElement], activities: Iterable[Activi
         )
     except EstimateError as exc:
         raise EffortError(str(exc)) from exc
+    basis = None if baseline_items is None else _baseline_basis(nodes, acts, baseline_items)
 
     activity_results: dict[int, ActivityEffort] = {}
     activity_values_of: dict[int, list[EffortValues]] = {}
@@ -324,7 +483,7 @@ def rollup_effort(elements: Iterable[EffortElement], activities: Iterable[Activi
                           entered_hours=a.entered_etc_hours)
         values = EffortValues(
             planned=estimates.activities[a.id],
-            baseline=_optional_hours(a.baseline_hours, f"{what} の基準の見積"),
+            baseline=None if basis is None else basis.activity_hours.get(a.id),
             actual=actual,
             etc=etc.hours,
             eac=actual + etc.hours,
@@ -334,6 +493,7 @@ def rollup_effort(elements: Iterable[EffortElement], activities: Iterable[Activi
         activity_values_of.setdefault(a.work_package_id, []).append(values)
 
     by_id = {n.id: n for n in nodes}
+    has_work_package: dict[int, bool] = {}  # 自分か配下に WP がある
     children: dict[int, list[int]] = {n.id: [] for n in nodes}
     roots: list[int] = []
     for n in nodes:
@@ -355,22 +515,34 @@ def rollup_effort(elements: Iterable[EffortElement], activities: Iterable[Activi
             values = _sum_values(activity_values_of[node_id])
         elif rollup.source is RollupSource.OWN_ESTIMATE:
             own = rollup.hours
-            values = EffortValues(
-                planned=own,
-                baseline=_optional_hours(by_id[node_id].baseline_hours, f"WBS 要素 {node_id} の基準の見積"),
-                actual=_ZERO,
-                etc=own,
-                eac=own,
-            )
+            values = EffortValues(planned=own, actual=_ZERO, etc=own, eac=own)
         else:
             values = _sum_values(results[kid].values for kid in children[node_id])
-        results[node_id] = ElementEffort(element_id=node_id, values=values, source=rollup.source)
+        is_work_package = by_id[node_id].kind == ElementKind.WORK_PACKAGE
+        package_kids = [kid for kid in children[node_id] if has_work_package[kid]]
+        has_work_package[node_id] = is_work_package or bool(package_kids)
+        if basis is None:
+            baseline = None
+        elif is_work_package:
+            baseline = basis.work_package_hours.get(node_id)
+        elif package_kids and all(results[kid].values.baseline is None for kid in package_kids):
+            baseline = None
+        else:
+            baseline = sum((results[kid].values.baseline or _ZERO for kid in children[node_id]), _ZERO)
+        results[node_id] = ElementEffort(element_id=node_id, values=replace(values, baseline=baseline),
+                                         source=rollup.source)
 
+    project = _sum_values(results[r].values for r in roots)
+    if basis is not None:
+        project = replace(project, baseline=(project.baseline or _ZERO) + (basis.wbs_removed or _ZERO))
     return EffortRollup(
         elements=MappingProxyType(results),
         activities=MappingProxyType(activity_results),
         roots=tuple(roots),
-        project=_sum_values(results[r].values for r in roots),
+        project=project,
+        baseline_placements=() if basis is None else basis.placements,
+        removed_baseline=None if basis is None else basis.removed,
+        wbs_removed_baseline=None if basis is None else basis.wbs_removed,
     )
 
 
@@ -435,23 +607,23 @@ class TimeEntryValue:
 
 @dataclass(frozen=True)
 class ActivityPeriod:
-    """活動の日付（期間の軸で計画・基準を配る）。今の計画の ``start_date``・``finish_date`` と、基準の項目の開始日・終了日。"""
+    """活動の今の計画の日付（期間の軸で計画を配る）。基準は版の項目の日付で配る（``BaselinePlacement``）。"""
 
     activity_id: int
     start_date: date | None
     finish_date: date | None
-    baseline_start: date | None = None
-    baseline_finish: date | None = None
 
 
 @dataclass(frozen=True)
 class EffortAxes:
-    """多軸集計の結果（読むだけ）。どの軸でも桶の合計が ``total`` に一致する（EFF-09）。
+    """多軸集計の結果（読むだけ）。どの軸でも、桶「基準にあって今は無い」を含めた桶の合計が ``total`` に一致する（EFF-09）。
 
-    - ``wbs``：要素の ID → 値（階層ごとの合計。最上位の要素 ``wbs_roots`` の合計が ``total``）
+    - ``wbs``：要素の ID → 値（階層ごとの合計。最上位の要素 ``wbs_roots`` の合計と ``wbs_removed`` の和が ``total``）
     - ``assignee``：利用者の ID → 値。``None`` は「未割当」
     - ``organization``：所属 → 値
     - ``period``：期間の桶 → 値（桶の順に並べた）
+    - ``removed``：担当者・組織・期間の軸の桶「基準にあって今は無い」（基準だけを持つ）、``wbs_removed``：WBS の軸の同じ桶
+      （プロジェクトの直下の行）。版にあって今は無いものが無ければ ``None``（5.8）
     """
 
     total: EffortValues
@@ -460,6 +632,8 @@ class EffortAxes:
     assignee: Mapping[int | None, EffortValues]
     organization: Mapping[OrganizationKey, EffortValues]
     period: Mapping[PeriodKey, EffortValues]
+    removed: EffortValues | None = None
+    wbs_removed: EffortValues | None = None
 
 
 def _split_values(values: EffortValues, weights: Sequence[Fraction]) -> list[EffortValues]:
@@ -524,11 +698,14 @@ def aggregate_effort(
     """計画・基準・実績・ETC・EAC を WBS・担当者・組織・期間の 4 軸で集計する（5.8 の表・EFF-09）。
 
     - WBS：RULE-EFF-002 の階層ごとの合計
-    - 担当者：計画・基準・ETC・EAC は活動の値を割当工数の比で分ける（割当が無ければ「未割当」。割当工数が全て空か 0 なら均等に分ける）。
+    - 担当者：計画・ETC・EAC は活動の値を割当工数の比で分ける（割当が無ければ「未割当」。割当工数が全て空か 0 なら均等に分ける）。
       実績は入力した人（``time_entries.user_id``）。活動を持たない WP の値は「未割当」
     - 組織：担当者の軸を ``organizations``（利用者の ID → メンバーの所属）でまとめる。所属が無い・メンバーでない利用者は「所属なし」
-    - 期間：計画は今の計画の開始日〜終了日、基準は基準の項目の開始日〜終了日の稼働日に均等に配る（日付が無ければ「日付なし」）。
+    - 期間：計画は今の計画の開始日〜終了日の稼働日に均等に配る（日付が無ければ「日付なし」）。
       実績は作業日の桶。ETC は桶「残り」。EAC は実績の桶と「残り」（ETC の分）に置く
+    - 基準：``rollup.baseline_placements`` を置く。担当者は今の割当の比（割当が無い活動と、版に活動の項目を持たない WP の項目は
+      「未割当」）、期間は版の項目の開始日〜終了日の稼働日に均等に配る。版にあって今は無いものは、どの軸でも桶
+      「基準にあって今は無い」（``removed``・``wbs_removed``。5.8）
 
     ``time_entries`` は報告日（``report_date``）を指定すれば報告日以前の分だけを使う（5.8）。活動ごとの合計は RULE-EFF-002 に
     渡した実績に一致していなければならない（違えば ``EffortError``。軸ごとに合計が食い違うのを防ぐ）。
@@ -569,27 +746,38 @@ def aggregate_effort(
 
     assignee: dict[int | None, EffortValues] = {}
     period: dict[PeriodKey, EffortValues] = {}
-    for activity_id, _element_id, values in rollup.leaf_values():
-        # 担当者：計画・基準・ETC・EAC を割当工数の比で分ける
+    def weights_of(shares: Sequence[AssignmentShare]) -> list[Fraction]:
+        return [Fraction(s.planned_hours or 0) for s in shares]
+
+    for activity_id, _element_id, leaf in rollup.leaf_values():
+        values = EffortValues(planned=leaf.planned, etc=leaf.etc, eac=leaf.eac)  # 基準は下で版の項目から置く
+        # 担当者：計画・ETC・EAC を割当工数の比で分ける
         shares = shares_of.get(activity_id, []) if activity_id is not None else []
         if shares:
-            weights = [Fraction(s.planned_hours or 0) for s in shares]
-            for share, part in zip(shares, _split_values(values, weights), strict=True):
+            for share, part in zip(shares, _split_values(values, weights_of(shares)), strict=True):
                 _add_to(assignee, share.user_id, part)
         else:
-            _add_to(assignee, None, EffortValues(planned=values.planned, baseline=values.baseline, etc=values.etc,
-                                                 eac=values.eac))
-        # 期間：計画・基準は稼働日に配り、ETC と EAC の ETC の分は「残り」へ
+            _add_to(assignee, None, values)
+        # 期間：計画は稼働日に配り、ETC と EAC の ETC の分は「残り」へ
         dates = periods_of.get(activity_id) if activity_id is not None else None
-        what = f"活動 {activity_id}"
         for key, hours in _spread_over_days(values.planned, dates and dates.start_date, dates and dates.finish_date,
-                                            calendar, unit, what):
+                                            calendar, unit, f"活動 {activity_id}"):
             _add_to(period, key, EffortValues(planned=hours))
-        if values.baseline is not None:
-            for key, hours in _spread_over_days(values.baseline, dates and dates.baseline_start,
-                                                dates and dates.baseline_finish, calendar, unit, f"{what} の基準"):
-                _add_to(period, key, EffortValues(baseline=hours))
         _add_to(period, REMAINING, EffortValues(etc=values.etc, eac=values.etc))
+
+    for placement in rollup.baseline_placements:
+        # 担当者：今の割当の比で分ける（割当が無い活動と WP の項目は「未割当」）。期間：版の項目の日付の稼働日に配る
+        shares = shares_of.get(placement.activity_id, []) if placement.activity_id is not None else []
+        if shares:
+            for share, hours in zip(shares, _allocate(placement.hours, weights_of(shares)), strict=True):
+                _add_to(assignee, share.user_id, EffortValues(baseline=hours))
+        else:
+            _add_to(assignee, None, EffortValues(baseline=placement.hours))
+        what = (f"活動 {placement.activity_id} の基準" if placement.activity_id is not None
+                else f"WP {placement.element_id} の基準")
+        for key, hours in _spread_over_days(placement.hours, placement.start_date, placement.finish_date, calendar,
+                                            unit, what):
+            _add_to(period, key, EffortValues(baseline=hours))
 
     for e in entries:
         hours = Decimal(e.hours)
@@ -615,6 +803,8 @@ def aggregate_effort(
         assignee=MappingProxyType(assignee),
         organization=MappingProxyType(organization),
         period=MappingProxyType(dict(sorted(period.items()))),
+        removed=None if rollup.removed_baseline is None else EffortValues(baseline=rollup.removed_baseline),
+        wbs_removed=None if rollup.wbs_removed_baseline is None else EffortValues(baseline=rollup.wbs_removed_baseline),
     )
 
 

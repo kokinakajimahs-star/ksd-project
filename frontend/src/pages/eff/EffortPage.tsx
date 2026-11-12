@@ -108,8 +108,10 @@ function SummaryTable({ summary }: { summary: EffortSummary }) {
           <tr key={rowKey(row, index)}>
             {isWbs ? (
               <>
-                <td>{row.wbs_code}</td>
-                <td style={{ paddingLeft: `${(depth.get(row.element_id ?? -1) ?? 0) * 1.5}em` }}>{row.name}</td>
+                <td>{row.element_id === null ? "—" : row.wbs_code}</td>
+                <td style={{ paddingLeft: `${(depth.get(row.element_id ?? -1) ?? 0) * 1.5}em` }}>
+                  {row.element_id === null ? bucketLabel(axis, row) : row.name}
+                </td>
               </>
             ) : (
               <td>{bucketLabel(axis, row)}</td>

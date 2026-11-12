@@ -36,6 +36,7 @@ from app.domain.effort import (
     ActivityEffortInput,
     ActivityPeriod,
     AssignmentShare,
+    BaselineItem,
     EffortAxes,
     EffortElement,
     EffortRollup,
@@ -515,7 +516,8 @@ class EffortBasis:
 
     - ``report``：進捗率・入力した ETC を取った報告日（無ければ空）。``report_specified`` は報告日を指定したか
       （指定したときだけ実績を報告日以前の分に絞る。5.8）
-    - ``baseline``：基準の値を取ったスケジュールベースライン（無ければ空。基準の値は全て「基準に無い」）
+    - ``baseline``：基準の値を取ったスケジュールベースライン（無ければ空。基準の値は全て「基準に無い」）。
+      基準の値は版の項目から 5.8 の数え方で求める（RULE-EFF-002。設計書 1.1・CR-007）
     """
 
     plan: Plan
@@ -558,17 +560,15 @@ def load_basis(session: Session, project_id: int, *, report_id: int | None = Non
     plan = load_plan(session, project_id)
     report = _report_of(session, project_id, report_id) if report_id is not None else _latest_report(session, project_id)
     baseline = _baseline_of(session, project_id, baseline_id)
-
-    activity_base: dict[int, ScheduleBaselineItem] = {}
-    element_base: dict[int, Decimal] = {}
-    if baseline is not None:
+    baseline_items = None if baseline is None else [
+        BaselineItem(item_type=item.item_type, element_id=item.element_id, activity_id=item.activity_id,
+                     estimate_hours=None if item.estimate_hours is None else _decimal(item.estimate_hours),
+                     start_date=item.start_date, finish_date=item.finish_date)
         for item in session.scalars(
             select(ScheduleBaselineItem).where(ScheduleBaselineItem.schedule_baseline_id == baseline.id)
-        ):
-            if item.item_type == "ACTIVITY" and item.activity_id is not None:
-                activity_base[item.activity_id] = item
-            elif item.item_type == "WORK_PACKAGE" and item.element_id is not None:
-                element_base[item.element_id] = _ZERO if item.estimate_hours is None else _decimal(item.estimate_hours)
+            .order_by(ScheduleBaselineItem.id)
+        )
+    ]
 
     entries_of = entries_of_report(session, report.id) if report is not None else {}
     percents = (percents_at_report(session, plan.project, plan.activities, report, entries_of) if report is not None
@@ -584,16 +584,9 @@ def load_basis(session: Session, project_id: int, *, report_id: int | None = Non
     for e in entries:
         actual[e.activity_id] = actual.get(e.activity_id, _ZERO) + e.hours
 
-    def base_hours(activity_id: int) -> Decimal | None:
-        item = activity_base.get(activity_id)
-        if item is None:
-            return None
-        return _ZERO if item.estimate_hours is None else _decimal(item.estimate_hours)
-
     rollup = rollup_effort(
         [EffortElement(id=e.id, parent_id=e.parent_id, kind=ElementKind(e.kind),
-                       own_estimate_hours=None if e.own_estimate_hours is None else _decimal(e.own_estimate_hours),
-                       baseline_hours=element_base.get(e.id))
+                       own_estimate_hours=None if e.own_estimate_hours is None else _decimal(e.own_estimate_hours))
          for e in plan.elements],
         [ActivityEffortInput(
             id=a.id, work_package_id=a.work_package_id,
@@ -602,8 +595,8 @@ def load_basis(session: Session, project_id: int, *, report_id: int | None = Non
             percent_complete=None if percents[a.id] is None else _decimal(percents[a.id]),
             entered_etc_hours=(None if a.id not in entries_of or entries_of[a.id].remaining_hours is None
                                else _decimal(entries_of[a.id].remaining_hours)),
-            baseline_hours=base_hours(a.id),
         ) for a in plan.activities],
+        baseline_items,
     )
     return EffortBasis(plan=plan, report=report, report_specified=report_id is not None, baseline=baseline,
                        rollup=rollup, entries=entries, preorder=_element_preorder(plan.elements))
@@ -641,22 +634,12 @@ def summary(
     shares = [AssignmentShare(activity_id=a.activity_id, user_id=a.user_id,
                               planned_hours=None if a.planned_hours is None else _decimal(a.planned_hours))
               for a, _, _ in _assignment_rows(session, project_id)]
-    base_dates: dict[int, tuple[date | None, date | None]] = {}
-    if basis.baseline is not None:
-        for item in session.scalars(
-            select(ScheduleBaselineItem).where(ScheduleBaselineItem.schedule_baseline_id == basis.baseline.id,
-                                               ScheduleBaselineItem.item_type == "ACTIVITY")
-        ):
-            if item.activity_id is not None:
-                base_dates[item.activity_id] = (item.start_date, item.finish_date)
     axes = aggregate_effort(
         basis.rollup,
         assignments=shares,
         time_entries=basis.entries,
         organizations={m.user_id: m.organization for m in members},
-        schedules=[ActivityPeriod(activity_id=a.id, start_date=a.start_date, finish_date=a.finish_date,
-                                  baseline_start=base_dates.get(a.id, (None, None))[0],
-                                  baseline_finish=base_dates.get(a.id, (None, None))[1])
+        schedules=[ActivityPeriod(activity_id=a.id, start_date=a.start_date, finish_date=a.finish_date)
                    for a in basis.plan.activities],
         calendar=basis.plan.calendar,
         period_unit=PeriodUnit.WEEK if axis == "week" else PeriodUnit.MONTH,

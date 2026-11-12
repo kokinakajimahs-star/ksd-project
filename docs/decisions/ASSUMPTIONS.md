@@ -1321,3 +1321,43 @@
 - **限界:** 試験は SQLite の TestClient と画面の試験（fetch を差し替え）だけ。一括の文の記録は `Session` を通る文だけで、`engine`・`connection` へ直接流す SQL は記録しない。
   変更要求の反映は、スケジュールベースラインの写しが指す要素を今も 422 で拒む（直接の削除は写しの紐付けを空にする。どちらにそろえるかは CR-002・OQ-42 (9)）。
   直さなかった指摘は OQ-42 と CR-004〜009
+
+## A-48: 設計書 1.1（CR-001〜009 を推奨案で承認。2026-11-12）の実装で決めたこと
+
+- **経緯:** 利用者が CR-001〜009 を推奨案で承認し、設計書を 1.1 に改訂した（0.4 の改訂履歴）。作業木 `wt/cr-approved` で CR ごとに実装する。
+  この項は CR ごとの解釈と限界を記す。CR-001・004・008 は実装した時点で書き足す
+- **選択:**
+  1. **CR-005（RULE-EFF-005・API-EFF-003）**：実績工数は確定した報告日**以前**（当日を含む）の日を変えない（`LOCKED_DATE`）。取込の備考だけの変更も同じ境界。
+     A-39 の「確定した報告日より前の日」を改めた
+  2. **CR-006（API-INT-002）**：取込は data.import に加えて、wbs は wbs.edit、activities は schedule.edit、見積の列を変える行があれば estimate.edit も確かめる
+     （dry_run でも同じ）。time-entries は data.import だけ（実績の入力の権限は RULE-EFF-005 の割当の検査が担う）。A-39 の権限の記述を改めた
+  3. **CR-009（5.6・5.7・7.3）**：進捗率は `Fraction` で丸めずに求め（`exact_percent_complete`）、保存する値だけ小数 2 桁へ四捨五入する（`round_percent`）。
+     P・ずれ・判定・表示日・完了見込み日の残りの日数は丸める前の値で求める。ガントの頂点は完了＝白いチェック、未着手（予定内）＝白い穴を緑に重ねる。
+     A-23 の「割合を Numeric(5,2) の桁へ四捨五入してから P を求める」を改めた
+  4. **CR-003（4.1 DB-WBS-002・5.2）**：第 1 階層の数えは `wbs_numbering_rules.top_last_child_seq`（既定 0）。移行 0009 は既にある行を第 1 階層の順番の最大で埋める。
+     行の無いプロジェクトで行を作るときも最大から始める。追加・移動・改番・取込・変更の反映が読み書きする。A-17 の `_top_last_child_seq`（最大から数える）を改めた
+  5. **CR-002（4.2）**：写しの列（`scope_baseline_elements.element_id`・`parent_element_id`、`schedule_baseline_items.activity_id`・`element_id`、
+     `progress_snapshot_items.activity_id`）に外部キーを張らない（移行 0010）。SQLite では `wbs_elements`・`activities` を AUTOINCREMENT で作り直し、内部キーを再利用しない
+     （PostgreSQL の identity・sequence は元から再利用しない）。版に入った要素・活動も消せる（`ELEMENT_IN_BASELINE` を外した）。消しても写しは変えない。
+     A-17・A-37 の `ELEMENT_IN_BASELINE`、A-19・A-22・A-47 (8) の「写しの紐付けを空にしてから消す」を改めた
+  6. **CR-007（5.8・RULE-EFF-002〜004）**：基準の値は版の項目から数える（`app/domain/effort.py` の `BaselineItem`・`_baseline_basis`）。
+     - WBS の軸：WP は版のその WP の WORK_PACKAGE の項目（無く活動の項目があれば、その和）。上位は下位の合計、子の無い WP 以外の要素は 0
+     - 担当者・組織・期間の軸：今もある活動の項目を、今の割当の比・項目の日付で配る。版に活動の項目を持たない今もある WP の項目は「未割当」・項目の日付
+     - 桶「基準にあって今は無い」（API の `bucket_kind`＝`BASELINE_REMOVED`。どの軸でも最後の行、WBS の軸ではプロジェクトの直下）：
+       WBS の軸は今は WP でない ID の版の WP の値。担当者・組織・期間の軸は、今は無い活動の項目と、版に活動の項目を持たない今は無い WP の項目。
+       **今もある WP から消した活動の基準は、WBS の軸ではその WP の項目の中に残る**（設計書の「WP は版の WORK_PACKAGE の項目」のとおり）。
+       活動を別の WP へ移してから元の WP を消すと、WBS の軸では元の WP の値が桶に、担当者の軸では活動の項目がその活動に置かれる。どちらの数え方でも合計は版の合計
+     - 追加された要素（BR-11）：版に項目の無い活動・WP と、配下の WP が全て追加された上位の要素だけが `None`（差異は ADDED）
+     - プロジェクトの基準は版の合計（会議レポートの KPI の基準もこの値）。A-28 の「基準の値は集計の葉で持ち、上位は基準にある下位だけを足す」を改めた
+- **理由:** 設計書 1.1 の 0.4・4.1・4.2・5.1・5.2・5.6・5.7・5.8・6.2・7.3。承認した CR の推奨案のとおり
+- **影響範囲:** `backend/app/domain/{effort,progress,lightning,delay,snapshot,change,tabular,wbs_code}.py`、
+  `backend/app/services/{effort,wbs,io,change,schedule,progress,report}.py`、`backend/app/api/{effort,wbs}.py`・`backend/app/schemas/effort.py`、
+  `backend/app/models/{wbs,sch,prg,eff}.py`、移行 0009・0010、`frontend/src/components/gantt/`・`frontend/src/pages/eff/`・`frontend/src/api/eff.ts`。
+  試験はそれぞれの `backend/tests/`・`frontend/src/` の試験
+- **覆す場合:** 設計書を 1.0 へ戻すことになる（Change Request を起票する）。CR ごとの戻し方はそのコミット（`git log --grep CR-00`）の差分を戻す。
+  移行 0010 は、今は無い要素・活動を指す写しがあれば戻せない（止まる）
+- **限界:** 試験は SQLite の TestClient・ドメインの試験・画面の試験（fetch を差し替え）だけ。PostgreSQL での移行 0009・0010 は流していない。
+  - CR-009：確定した報告日の遅延一覧は、保存した小数 2 桁の進捗率から求める（丸める前の値を持たない）。今の値から求める遅延一覧とは小数 2 桁未満でずれうる
+  - CR-002：1.1 より前に消した要素・活動の写しは紐付けが空のまま（戻せない）。CR-007 の数え方では、空の `element_id` の WP の項目をまとめて 1 つの「今は無い WP」として数える。
+    空の WP の項目と空の活動の項目が両方あると、担当者・組織・期間の軸の桶から WP の項目を外す（WBS の軸と合計がずれうる）。本番のデータはまだ無いので起きない見込み
+  - CR-007：版の WP の項目と、その WP の活動の項目の和が食い違う版（`save_baseline`・再基準化以外で作った版）では、WBS の軸と他の軸の基準の合計がずれる（検査しない）

@@ -144,6 +144,8 @@ export function bucketLabel(axis: EffortAxis, row: SummaryRow): string {
       return "残り（報告日より後の ETC）";
     case "UNSCHEDULED":
       return "日付なし（日程の無い計画・基準）";
+    case "BASELINE_REMOVED":
+      return "基準にあって今は無い";
     case "PERIOD":
       if (row.period_start === null) {
         return "—";
