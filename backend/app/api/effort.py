@@ -144,7 +144,7 @@ def put_time_entries(
     """API-EFF-003 自分の実績工数をまとめて書く（日×活動）。
 
     権限は effort.enter_own（自分の割当の活動）。マスごとにその日・その活動の値で置き換える（0 は行を消す）。RULE-EFF-005 で全ての
-    マスを検査し、1 件でも問題があれば何も書かない：値の誤り・重複 400、自分の割当でない 403、確定した報告日より前の日 409
+    マスを検査し、1 件でも問題があれば何も書かない：値の誤り・重複 400、自分の割当でない 403、確定した報告日以前の日 409
     ``INVALID_STATE``、1 日の合計 24 時間超 422 ``DAY_TOTAL_EXCEEDED``（EFF-02）。
     """
     cells = [TimeEntryCell(activity_id=c.activity_id, work_date=c.work_date, hours=_decimal(c.hours), note=c.note)

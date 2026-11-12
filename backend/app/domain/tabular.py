@@ -1064,7 +1064,7 @@ def plan_time_entry_import(
     - ``current``：プロジェクトの今の実績工数（6.3 の形）。``activity_ids``：プロジェクトの活動
     - ``users``：ログインID ごとの利用者（無いログインID は ``NOT_FOUND``）。``finalized_report_dates``：確定した報告日
     - 照合キー（ログインID＋活動ID＋作業日）が今の行にあれば更新、無ければ追加。今の行が無いキーは 0 時間・備考なしとみなす
-    - 行ごとの検査が通れば、利用者ごとに RULE-EFF-005（自分の割当・1 日 24 時間以下・確定した報告日より前の日）を当てる
+    - 行ごとの検査が通れば、利用者ごとに RULE-EFF-005（自分の割当・1 日 24 時間以下・確定した報告日以前の日）を当てる
     """
     target = TabularTarget.TIME_ENTRIES
     issues = _Issues()
@@ -1132,9 +1132,9 @@ def _check_effort_rules(
     """利用者ごとに、書く行へ RULE-EFF-005 を当てる。
 
     工数が今の値と同じ行（備考だけの変更）は RULE-EFF-005 の「変えない」マスなので割当・1 日の合計を当てないが、
-    確定した報告日より前の日の備考は変えさせない（確定した日の行を書き換えないため。A-34）。
+    確定した報告日以前の日の備考は変えさせない（確定した日の行を書き換えないため。A-34・設計書 1.1 の RULE-EFF-005）。
     """
-    locked_before = max(finalized_report_dates, default=None)
+    locked_through = max(finalized_report_dates, default=None)
     by_login: dict[str, list[TimeEntryImportChange]] = {}
     for change in changes:
         by_login.setdefault(change.row.login_id, []).append(change)
@@ -1151,9 +1151,9 @@ def _check_effort_rules(
         flagged = {(p.activity_id, p.work_date) for p in check.problems if p.activity_id is not None}
         for c in items:
             cell = (c.row.activity_id, c.row.work_date)
-            if locked_before is not None and c.row.work_date < locked_before and cell not in hours_changed | flagged:
+            if locked_through is not None and c.row.work_date <= locked_through and cell not in hours_changed | flagged:
                 issues.add(c.line, "備考", ImportIssueCode.LOCKED_DATE,
-                           f"{login}: 確定した報告日 {locked_before} より前の日 {c.row.work_date} の備考は変えられない")
+                           f"{login}: 確定した報告日 {locked_through} 以前の日 {c.row.work_date} の備考は変えられない")
         for problem in check.problems:
             code = _EFFORT_CODES[problem.code]
             if problem.activity_id is not None:

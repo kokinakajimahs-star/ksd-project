@@ -10,7 +10,7 @@
 - 差異の判定（RULE-EFF-004。BR-11）：差異＝EAC−基準、差異率＝差異÷基準。差異率と絶対値の**両方**の閾値を超えた要素と、
   基準に無い要素（追加）を抽出する
 - 実績工数の入力検査（RULE-EFF-005。EFF-02）：自分の割当の活動だけ・1 日の合計 24 時間以下・負の値の禁止・
-  確定した報告日より前の日は変えない。全ての問題を集めて返す（1 件でもあれば全体を拒むのは呼び手）
+  確定した報告日以前の日は変えない。全ての問題を集めて返す（1 件でもあれば全体を拒むのは呼び手）
 
 工数は人時の ``Decimal``（2.4 の ``Numeric(10,2)``）。``float`` は誤差を持ち込むので受けない。式で求めた ETC と、
 比で分けた値は小数 2 桁にする（分けた値は最大剰余法で配り、合計を崩さない）。
@@ -710,7 +710,7 @@ class TimeEntryProblemCode(StrEnum):
     INVALID_HOURS = "INVALID_HOURS"  # 数でない・小数 3 桁以降がある
     NEGATIVE_HOURS = "NEGATIVE_HOURS"  # 負の値
     NOT_ASSIGNED = "NOT_ASSIGNED"  # 自分の割当でない活動
-    LOCKED_DATE = "LOCKED_DATE"  # 確定した報告日より前の日を変えようとした
+    LOCKED_DATE = "LOCKED_DATE"  # 確定した報告日以前の日を変えようとした
     DUPLICATE = "DUPLICATE"  # 同じ活動・同じ日を 2 回入れた
     DAY_TOTAL_EXCEEDED = "DAY_TOTAL_EXCEEDED"  # 1 日の合計が 24 時間を超える
 
@@ -775,7 +775,8 @@ def check_time_entries(
 
     - 値：0 以上・小数 2 桁まで（負の値は ``NEGATIVE_HOURS``、数でない・3 桁目以降は ``INVALID_HOURS``）
     - 自分の割当の活動だけ（``assigned_activity_ids`` はその利用者の割当の活動。違えば ``NOT_ASSIGNED``）
-    - 確定した報告日より前の日は変えない（``finalized_report_dates`` のどれかより前の作業日の値を変えれば ``LOCKED_DATE``）
+    - 確定した報告日以前の日は変えない（``finalized_report_dates`` のどれか以前の作業日の値を変えれば ``LOCKED_DATE``。
+      報告日の当日も締める。写しと報告日を指定した集計が当日の分を含むため。設計書 1.1・CR-005）
     - 1 日の合計 24 時間以下（``existing`` はその利用者の今の行で、プロジェクトをまたいで渡す。書いた後の合計が 24 を超えれば
       ``DAY_TOTAL_EXCEEDED``。ちょうど 24 は通す）
     - 同じ活動・同じ日のマスを 2 回入れれば ``DUPLICATE``
@@ -787,7 +788,7 @@ def check_time_entries(
     for row in existing:
         current[(row.activity_id, row.work_date)] = current.get((row.activity_id, row.work_date), _ZERO) + Decimal(row.hours)
     assigned = frozenset(assigned_activity_ids)
-    locked_before = max(finalized_report_dates, default=None)
+    locked_through = max(finalized_report_dates, default=None)
 
     problems: list[TimeEntryProblem] = []
     accepted: dict[tuple[int, date], Decimal] = {}
@@ -813,9 +814,9 @@ def check_time_entries(
             problems.append(TimeEntryProblem(TimeEntryProblemCode.NOT_ASSIGNED, change.work_date, change.activity_id,
                                              f"活動 {change.activity_id} は自分の割当ではない"))
             continue
-        if locked_before is not None and change.work_date < locked_before:
+        if locked_through is not None and change.work_date <= locked_through:
             problems.append(TimeEntryProblem(TimeEntryProblemCode.LOCKED_DATE, change.work_date, change.activity_id,
-                                             f"確定した報告日 {locked_before} より前の日 {change.work_date} は変えられない"))
+                                             f"確定した報告日 {locked_through} 以前の日 {change.work_date} は変えられない"))
             continue
         accepted[cell] = hours
         changed.append(TimeEntryChange(activity_id=change.activity_id, work_date=change.work_date, hours=hours))

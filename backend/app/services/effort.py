@@ -5,7 +5,7 @@
   実績工数を書くは effort.enter_own（自分の割当の活動）、実績工数を読むは「本人の行は effort.enter_own、他人の行は effort.view を
   持つプロジェクトの分」、集計・差異を読むは effort.view、差異の理由を書くは variance.note
 - 実績工数の書き込み（API-EFF-003）は日×活動のマスの置き換え。RULE-EFF-005 で全てのマスを検査し、1 件でも問題があれば全体を拒む
-  （値の誤り・重複は 400、自分の割当でない活動は 403、確定した報告日より前の日は 409 ``INVALID_STATE``、1 日の合計 24 時間超は
+  （値の誤り・重複は 400、自分の割当でない活動は 403、確定した報告日以前の日は 409 ``INVALID_STATE``、1 日の合計 24 時間超は
   422 ``DAY_TOTAL_EXCEEDED``。問題は全て ``details`` に載せる）。0 時間のマスは行を持たない（行を消す）
 - 集計（API-EFF-005）と差異（API-EFF-006）は 5.8 のとおり：実績＝``time_entries`` の合計（報告日を指定したときは報告日以前の分）、
   進捗率・入力した ETC＝対象の報告日（指定しなければ 4.2 の「最新」）の ``progress_entries``、計画＝今の見積、
@@ -336,7 +336,7 @@ _PROBLEM_STATUS: tuple[tuple[frozenset[TimeEntryProblemCode], int, str, str], ..
      400, "VALIDATION_ERROR", "入力に誤りがあるため、全件を保存しませんでした"),
     (frozenset({TimeEntryProblemCode.NOT_ASSIGNED}), 403, "FORBIDDEN", "自分の割当でない活動には実績工数を書けません"),
     (frozenset({TimeEntryProblemCode.LOCKED_DATE}), 409, "INVALID_STATE",
-     "確定した報告日より前の日の実績工数は変えられません"),
+     "確定した報告日以前の日の実績工数は変えられません"),
     (frozenset({TimeEntryProblemCode.DAY_TOTAL_EXCEEDED}), 422, "DAY_TOTAL_EXCEEDED",
      "1 日の実績工数の合計が 24 時間を超えます"),
 )
@@ -373,7 +373,7 @@ def put_time_entries(
     """自分の実績工数をまとめて書く（effort.enter_own。EFF-02）。日×活動のマスを置き換える。プロジェクトをまたいでよい。
 
     確かめる順：活動が無い 404 → 活動のプロジェクトで effort.enter_own を持たない 403 → RULE-EFF-005 の検査（全てのマス）。
-    RULE-EFF-005 の「自分の割当の活動だけ」「確定した報告日より前の日は変えない」はマスのプロジェクトごとに（割当と確定した報告日は
+    RULE-EFF-005 の「自分の割当の活動だけ」「確定した報告日以前の日は変えない」はマスのプロジェクトごとに（割当と確定した報告日は
     プロジェクトのもの）、「1 日の合計 24 時間以下」はプロジェクトをまたいだ全ての行で見る。メモだけを変えたマスも「変える」とみなす。
     1 件でも問題があれば何も書かない。
     """

@@ -300,18 +300,19 @@ def test_put_time_entries_rejects_invalid_values_and_day_total_over_24(world: Wo
     assert response.status_code == 422
 
 
-def test_put_time_entries_rejects_days_before_finalized_report(world: World, client: TestClient) -> None:
+def test_put_time_entries_rejects_days_through_finalized_report(world: World, client: TestClient) -> None:
     world.assign(world.a, [{"user_id": world.uid("executor")}])
     world.enter("executor", [cell(world.a, "2026-12-01", 8)])
     report = world.report("2026-12-03")
     finalized = client.post(world.url(f"/status-reports/{report}/finalize"), headers=world.h["pm"])
     assert finalized.status_code == 200, finalized.text
-    for entries in ([cell(world.a, "2026-12-02", 6)], [cell(world.a, "2026-12-01", 8, "後から")]):
+    for entries in ([cell(world.a, "2026-12-02", 6)], [cell(world.a, "2026-12-01", 8, "後から")],
+                    [cell(world.a, "2026-12-03", 2)]):
         locked = client.put("/api/v1/time-entries", json={"entries": entries}, headers=world.h["executor"])
         assert locked.status_code == 409 and error_code(locked) == "INVALID_STATE", locked.text
         assert locked.json()["error"]["details"][0]["code"] == "LOCKED_DATE"
-    # 変えないマスと、報告日その日以降は書ける
-    assert world.enter("executor", [cell(world.a, "2026-12-01", 8), cell(world.a, "2026-12-03", 2)])["changed"] == 1
+    # 変えないマスと、報告日の翌日以降は書ける（報告日の当日は締める。設計書 1.1・CR-005）
+    assert world.enter("executor", [cell(world.a, "2026-12-01", 8), cell(world.a, "2026-12-04", 2)])["changed"] == 1
 
 
 # ---------------------------------------------------------------------------

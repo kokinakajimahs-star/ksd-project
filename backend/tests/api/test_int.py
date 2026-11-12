@@ -415,6 +415,49 @@ def test_import_permission_is_data_import(world: World) -> None:
     assert missing.status_code == 404
 
 
+def test_import_requires_write_permission_of_target(world: World, db_session: Session) -> None:
+    """API-INT-002：data.import に加えて対象の書く権限（wbs は wbs.edit、activities は schedule.edit、見積の列を変えるなら
+    estimate.edit も。time-entries は data.import だけ）。設計書 1.1・CR-006：data.import だけのロールで迂回させない。"""
+    world.grant("EXECUTOR", "data.import")
+    wbs = world.grid("wbs")
+    wbs[2][3] = "WP1（改）"
+    for dry_run in (True, False):
+        body = world.load("wbs", csv_of(wbs), who="executor", dry_run=dry_run, expect=403)
+        assert body["error"]["code"] == "FORBIDDEN"
+    activities = world.grid("activities")
+    activities[1][2] = "A（改）"
+    world.load("activities", csv_of(activities), who="executor", expect=403)
+    assert world.activity(world.a).name == "A" and world.elements()["WP1"].name == "WP1"
+
+    # schedule.edit があれば見積以外の列は書ける。見積の列を変える行があれば estimate.edit も要る（dry_run でも）
+    world.grant("EXECUTOR", "schedule.edit")
+    assert world.load("activities", csv_of(activities), who="executor")["written"] is True
+    assert world.activity(world.a).name == "A（改）"
+    estimate = world.grid("activities")
+    estimate[1][6] = "12"
+    for dry_run in (True, False):
+        world.load("activities", csv_of(estimate), who="executor", dry_run=dry_run, expect=403)
+    added = world.grid("activities") + [["", "1.1", "D", "", "2", "0", "4", "", ""]]
+    world.load("activities", csv_of(added), who="executor", expect=403)
+    assert world.activity(world.a).estimate_hours is None
+    world.grant("EXECUTOR", "estimate.edit")
+    assert world.load("activities", csv_of(estimate), who="executor")["written"] is True
+    assert world.activity(world.a).estimate_hours == Decimal("12")
+
+    # wbs は wbs.edit があれば書ける
+    world.grant("EXECUTOR", "wbs.edit")
+    assert world.load("wbs", csv_of(wbs), who="executor")["written"] is True
+
+    # time-entries は data.import だけで書ける（他人の行を書く権限が 9.1 に無い）
+    db_session.add(TimeEntry(user_id=world.users["contractor"].id, activity_id=world.c, work_date=date(2026, 12, 2),
+                             hours=Decimal("2.5"), note="調査"))
+    db_session.commit()
+    entries = world.grid("time-entries")
+    entries[1][4] = "調査（追記）"
+    world.grant("VIEWER", "data.import")
+    assert world.load("time-entries", csv_of(entries), who="viewer")["written"] is True
+
+
 def test_import_unreadable_files_report_file_unreadable(world: World) -> None:
     """API-INT-002：UTF-8 でない CSV・xlsx でないファイル・見出しの違う表は、行の誤りとして返す（何も書かない）。"""
     sjis = world.load("wbs", "WBS ID,名称\n".encode("shift_jis"), dry_run=True)

@@ -499,13 +499,16 @@ def test_negative_and_invalid_hours_are_rejected(hours: object, code: TimeEntryP
     assert result.changes == ()
 
 
-def test_days_before_finalized_report_are_locked() -> None:
-    """RULE-EFF-005：確定した報告日（最も新しいもの）より前の日の値は変えない。報告日ちょうど以降は変えられる。"""
+def test_days_through_finalized_report_are_locked() -> None:
+    """RULE-EFF-005：確定した報告日（最も新しいもの）以前の日の値は変えない（報告日の当日も。設計書 1.1・CR-005）。翌日から変えられる。"""
     finalized = [date(2026, 12, 1), date(2026, 12, 5)]
     locked = check_time_entries([change(A, 4, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
                                 finalized_report_dates=finalized)
     assert codes(locked) == [(TimeEntryProblemCode.LOCKED_DATE, A, 4)]
-    assert check_time_entries([change(A, 5, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
+    on_report_date = check_time_entries([change(A, 5, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
+                                        finalized_report_dates=finalized)
+    assert codes(on_report_date) == [(TimeEntryProblemCode.LOCKED_DATE, A, 5)]
+    assert check_time_entries([change(A, 6, D("2"))], existing=EXISTING, assigned_activity_ids=ASSIGNED,
                               finalized_report_dates=finalized).ok
     # 今の値と同じ値（行が無いマスは 0）を送り直すのは「変える」に当たらない
     unchanged = check_time_entries([change(A, 3, D("3.00")), change(B, 2, D("0"))], existing=EXISTING,
