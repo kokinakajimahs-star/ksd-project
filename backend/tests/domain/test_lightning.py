@@ -373,3 +373,24 @@ def test_overlay_rejects_same_report_date_twice() -> None:
     """RULE-PRG-005：同じ報告日の線を 2 本重ねる入力は拒む（線の種類が決まらない）。"""
     with pytest.raises(LightningError):
         overlay_lightning_lines([_line(3, [1]), _line(3, [1])], row_of={1: 0})
+
+
+def test_point_uses_unrounded_percent() -> None:
+    """RULE-PRG-002：P は丸める前の進捗率から求める（設計書 1.1 の 5.6・CR-009）。
+
+    3 項目中 2 完了（200/3 %）・d＝3 なら P＝2 ちょうど（表示の日付 12/02）。保存した 66.67% から求めると 2.0001 になり、
+    表示の日付が 12/03 にずれ、許容幅 1 の境目（報告日 12/01、L＝1、δ＝1）で判定が前倒しに変わる。
+    """
+    axis = WorkdayAxis(ALL_DAYS, ORIGIN)
+    exact = LightningActivity(activity_id=1, start_date=d(1), finish_date=d(3), duration_days=3, is_milestone=False,
+                              percent_complete=Fraction(200, 3))
+    rounded = act(1, 1, 3, 3, Decimal("66.67"))
+    assert progress_point(axis, exact) == Decimal(2)
+    assert progress_point(axis, rounded) == Decimal("2.0001")
+    assert axis.display_date(progress_point(axis, exact)) == d(2)
+    assert axis.display_date(progress_point(axis, rounded)) == d(3)
+    assert judge_progress(axis, exact, d(1), Decimal(1)).judgement is Judgement.ON_SCHEDULE
+    assert judge_progress(axis, rounded, d(1), Decimal(1)).judgement is Judgement.AHEAD
+    with pytest.raises(LightningError):
+        LightningActivity(activity_id=1, start_date=d(1), finish_date=d(3), duration_days=3, is_milestone=False,
+                          percent_complete=Fraction(301, 3))

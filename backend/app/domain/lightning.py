@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from fractions import Fraction
 from typing import Final
 
 from app.domain.calendar import WorkCalendar, WorkdayAxis
@@ -94,6 +95,8 @@ class LightningActivity:
 
     ``start_date``・``finish_date``：日程計算（RULE-SCH-002）の開始予定日・終了予定日。``duration_days``：期間（稼働日）。
     マイルストーンは期間 0 で開始日＝終了日。``percent_complete``：RULE-PRG-001 の進捗率（0〜100。``None`` は未算定）。
+    進捗率は**丸める前の値**を渡す（``Fraction`` か ``Decimal``。設計書 1.1 の 5.6・CR-009）。保存した小数 2 桁の値から
+    求めると、境目の日付と判定がずれる（例：3 項目中 2 完了の 66.67% で d＝3 の P が 2 を超える）。
     """
 
     activity_id: int
@@ -101,7 +104,7 @@ class LightningActivity:
     finish_date: date
     duration_days: int
     is_milestone: bool
-    percent_complete: Decimal | None
+    percent_complete: Decimal | Fraction | None
     actual_start: date | None = None
     actual_finish: date | None = None
 
@@ -118,7 +121,7 @@ class LightningActivity:
         if self.finish_date < self.start_date:
             raise LightningError(f"活動 {self.activity_id}：終了予定日 {self.finish_date} が開始予定日 {self.start_date} より前")
         if self.percent_complete is not None:
-            p = _as_decimal(self.percent_complete, "進捗率")
+            p = self.percent_complete if isinstance(self.percent_complete, Fraction) else _as_decimal(self.percent_complete, "進捗率")
             if p < 0 or p > HUNDRED:
                 raise LightningError(f"活動 {self.activity_id}：進捗率は 0〜100: {p}")
             object.__setattr__(self, "percent_complete", p)
@@ -200,7 +203,9 @@ def progress_point(axis: WorkdayAxis, activity: LightningActivity) -> Decimal:
     if activity.percent_complete is None:
         raise LightningError(f"活動 {activity.activity_id}：進捗率が未算定で、進捗ポイントを式で求められない")
     start = axis.index(activity.start_date)
-    return Decimal(start) + Decimal(activity.duration_days) * activity.percent_complete / HUNDRED
+    # 丸める前の進捗率から分数のまま求め、最後に Decimal へ直す（5.6。割り切れない値は 28 桁の近似。整数の P は正確に整数になる）
+    exact = start + activity.duration_days * Fraction(activity.percent_complete) / 100
+    return Decimal(exact.numerator) / Decimal(exact.denominator)
 
 
 # ---------------------------------------------------------------------------

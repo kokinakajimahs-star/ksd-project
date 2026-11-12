@@ -388,6 +388,28 @@ def test_lightning_line_matches_basis_example(world: World) -> None:
     assert first["point"]["calendar"] == {"date": "2026-12-06", "fraction": 0.25}
 
 
+def test_lightning_point_uses_unrounded_percent(world: World, client: TestClient) -> None:
+    """API-PRG-006・007：P は丸める前の進捗率から求める（設計書 1.1 の 5.6・CR-009）。表示・写しの進捗率は小数 2 桁。
+
+    3 項目中 2 完了（200/3 %）・d＝3、報告日 12/01（L＝1）：P＝2 ちょうど・表示の日付 12/02・ずれ 1。66.67% から求めると 2.0001・12/03。
+    """
+    world.all_days_working()
+    a = world.add("検証", requested_start="2026-12-01", duration_days=3)
+    report = world.report("2026-12-01")["id"]
+    world.progress(report, a, actual_start="2026-12-01")
+    assert client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                      headers=world.h["pm"]).status_code == 200
+    items = [{"item_type": "CHECK", "title": t, "done": t != "C"} for t in ("A", "B", "C")]
+    assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": items},
+                      headers=world.h["pm"]).status_code == 200
+    (row,) = world.line(report)["rows"]
+    assert (row["point"]["position"], row["display_date"], row["deviation"], row["percent_complete"]) == (
+        2.0, "2026-12-02", 1.0, 66.67)
+    world.finalize(report)
+    (frozen,) = world.line(report)["rows"]
+    assert (frozen["point"]["position"], frozen["display_date"], frozen["percent_complete"]) == (2.0, "2026-12-02", 66.67)
+
+
 def test_lightning_line_skips_weekends(world: World, client: TestClient) -> None:
     """土日を非稼働にした場合（PRG-10）：12-01（火）〜 5 稼働日、報告日 12-05（土）は金曜の終業（L＝4）。"""
     a = world.add("A", duration_days=5)

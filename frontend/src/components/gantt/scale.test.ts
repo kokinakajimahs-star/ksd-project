@@ -12,6 +12,7 @@ import {
   PAST_LINE_DASHES,
   rangeWidth,
   ticks,
+  vertexMark,
   visibleRows,
   xOfDate,
   xOfPoint,
@@ -79,6 +80,20 @@ describe("判定の色（7.3 の ⑦）", () => {
     expect(judgementColor("NOT_STARTED")).toBe("#388e3c");
     expect(countedAs("COMPLETED")).toBe("ON_SCHEDULE");
     expect(countedAs("BEHIND")).toBe("BEHIND");
+  });
+
+  it("完了・未着手（予定内）は予定どおりの色に印（形）を重ねて区別する（設計書 1.1 の 7.3）", () => {
+    const completed = vertexMark("COMPLETED", 100, 50, 4);
+    const notStarted = vertexMark("NOT_STARTED", 100, 50, 4);
+    expect(completed?.kind).toBe("check");
+    expect(notStarted?.kind).toBe("hole");
+    expect(completed?.d).not.toBe(notStarted?.d);
+    // 印は頂点の円の中に収まる
+    expect(completed?.d).toBe("M 98 50 L 99.6 51.6 L 102.2 48.4");
+    expect(notStarted?.d.startsWith("M 98.2 50 a 1.8 1.8 0 1 0 3.6 0")).toBe(true);
+    for (const judgement of ["BEHIND", "AHEAD", "ON_SCHEDULE", "NOT_COMPUTED"] as const) {
+      expect(vertexMark(judgement, 100, 50, 4)).toBeNull();
+    }
   });
 
   it("過去の線は報告日ごとに線の種類を変え、種類が尽きたら繰り返す", () => {

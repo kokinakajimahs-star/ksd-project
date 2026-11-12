@@ -124,6 +124,32 @@ export function judgementColor(judgement: Judgement): string {
   }
 }
 
+/** 頂点に重ねる印（7.3：完了・未着手（予定内）は予定どおりの色に形を重ねて区別する） */
+export interface VertexMark {
+  /** check＝完了（白いチェック）、hole＝未着手（予定内）（白い穴で輪にする） */
+  kind: "check" | "hole";
+  /** SVG の path の d */
+  d: string;
+}
+
+/** 中心 (cx, cy)・半径 r の頂点に重ねる印。完了・未着手（予定内）のほかは印を付けない */
+export function vertexMark(judgement: Judgement, cx: number, cy: number, r: number): VertexMark | null {
+  if (judgement === "COMPLETED") {
+    return {
+      kind: "check",
+      d: `M ${cx - r * 0.5} ${cy} L ${cx - r * 0.1} ${cy + r * 0.4} L ${cx + r * 0.55} ${cy - r * 0.4}`,
+    };
+  }
+  if (judgement === "NOT_STARTED") {
+    const inner = r * 0.45;
+    return {
+      kind: "hole",
+      d: `M ${cx - inner} ${cy} a ${inner} ${inner} 0 1 0 ${2 * inner} 0 a ${inner} ${inner} 0 1 0 ${-2 * inner} 0 Z`,
+    };
+  }
+  return null;
+}
+
 export const JUDGEMENT_LABELS: Record<Judgement, string> = {
   COMPLETED: "完了",
   NOT_STARTED: "未着手（予定内）",

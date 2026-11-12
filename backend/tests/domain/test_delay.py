@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -135,7 +136,7 @@ def test_remaining_uses_ceiling() -> None:
 
 
 def test_forecast_on_non_working_day_rolls_back() -> None:
-    """RULE-PRG-006：完了見込み日が非稼働日なら終了日の寄せ（前の稼働日。BR-04）をしてから終業の位置にする（A-23）。
+    """RULE-PRG-006：完了見込み日が非稼働日なら終了日の寄せ（前の稼働日。BR-04）をしてから終業の位置にする（設計書 1.1 の 5.7 の 2）。
 
     土日休み、原点 12/01（火）。C の完了見込み 12/05（土）→ 12/04（金）の終業＝4。
     """
@@ -198,3 +199,15 @@ def test_invalid_inputs_rejected() -> None:
         analyze([], extract_days=Decimal(-1))
     with pytest.raises(ScheduleCycleError):
         analyze_delays([], PLAN, [(1, 2), (2, 1)], calendar=ALL_DAYS, project_start=ORIGIN, report_date=REPORT)
+
+
+def test_remaining_uses_unrounded_percent() -> None:
+    """RULE-PRG-006：見込みの終了の残りは丸める前の進捗率から求める（設計書 1.1 の 5.6・5.7・CR-009）。
+
+    活動 5（12 日）が 1/3 なら残りは 12×2/3＝8 ちょうどで見込み＝18。保存した 33.33% なら 8.0004 → 9 で 19 になる。
+    """
+    exact = DelayInput(activity_id=5, deviation=Decimal(-5), judgement=Judgement.BEHIND, percent_complete=Fraction(100, 3))
+    (impact,) = analyze([exact]).delays
+    assert impact.forecast_finish == 18
+    (rounded,) = analyze([judged(5, "-5", "33.33")]).delays
+    assert rounded.forecast_finish == 19

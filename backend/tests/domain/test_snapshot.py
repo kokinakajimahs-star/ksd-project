@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -204,3 +205,11 @@ def test_finalize_with_no_activities() -> None:
     """RULE-PRG-007：活動が 0 件のプロジェクトでも確定でき、写しの活動は 0 行。"""
     snap = finalize(activities=[]).snapshot
     assert snap.items == () and snap.report_line == 10
+
+
+def test_snapshot_rounds_stored_percent_but_points_use_unrounded_value() -> None:
+    """RULE-PRG-007：写しの進捗率は 4.1 の小数 2 桁へ丸め、ポイント・判定は丸める前の値から求める（設計書 1.1 の 5.6・CR-009）。"""
+    row = SnapshotActivity(9, "3.1", "検証", d(1), d(3), 3, False, False, Fraction(200, 3))
+    (item,) = finalize(activities=[row]).snapshot.items
+    assert item.percent_complete == Decimal("66.67")
+    assert item.point == Decimal(2)

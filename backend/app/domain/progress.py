@@ -16,18 +16,21 @@
 - 入力の検査（PRG-02）：進捗率は 0〜100、実績開始日より前の実績終了日は拒む（マイルストーンは実績終了日だけを持てるので、
   実績開始日の無い実績終了日は拒まない）
 
-進捗率は 0〜100 の ``Decimal``。項目を数える方式の割合は 4.1 の列（``Numeric(5,2)``）の桁へ四捨五入する
-（スナップショットに写した進捗率から同じ進捗ポイントを再現するため。docs/decisions/ASSUMPTIONS.md A-23）。
+進捗率は 0〜100。``exact_percent_complete`` は丸める前の値（``Fraction``。項目を数える方式の割合を割り切れないまま持つ）で、
+進捗ポイント・ずれ・判定・見込みの終了はこの値から求める（設計書 1.1 の 5.6・CR-009）。``compute_percent_complete`` は保存する値で、
+4.1 の列の精度（小数 2 桁。``Numeric(5,2)``）へ四捨五入する（``round_percent``）。
 純粋に保つ（1.3）。DB・HTTP・時刻・乱数に触れない。項目の行はサービス層が下のデータクラスへ直して渡す。
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
+from fractions import Fraction
 from typing import Final
 
 HUNDRED: Final = Decimal(100)
@@ -111,6 +114,19 @@ def _quantize(percent: Decimal) -> Decimal:
     return percent.quantize(PERCENT_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def round_percent(percent: Fraction | Decimal | None) -> Decimal | None:
+    """保存する進捗率：4.1 の精度（小数 2 桁）へ四捨五入する（``None`` はそのまま）。丸めた値から進捗ポイントを求めない（5.6）。"""
+    if percent is None:
+        return None
+    if isinstance(percent, Fraction):
+        if percent < 0:
+            raise ProgressError(f"進捗率は 0〜100: {percent}")
+        # 0.01 の単位で四捨五入（ROUND_HALF_UP。0 以上なので floor(x + 1/2)）を分数のまま行う（近似の誤差で境目をまたがない）
+        hundredths = math.floor(percent * 100 + Fraction(1, 2))
+        return _quantize(Decimal(hundredths) / 100)
+    return _quantize(percent)
+
+
 def validate_progress_input(
     *,
     percent_complete: Decimal | int | None = None,
@@ -126,13 +142,12 @@ def validate_progress_input(
         raise ProgressError(f"実績終了日 {actual_finish} が実績開始日 {actual_start} より前（PRG-02）")
 
 
-def _ratio(numerator: Decimal, denominator: Decimal) -> Decimal | None:
+def _ratio(numerator: Decimal, denominator: Decimal) -> Fraction | None:
     if denominator == 0:
         return None  # 該当する項目が 0 件（重みの総和が 0）：未算定（BR-06）
-    return _quantize(numerator * HUNDRED / denominator)
+    return Fraction(numerator) * 100 / Fraction(denominator)
 
 
-# RULE-PRG-001 進捗率の算定方式
 def compute_percent_complete(
     method: ProgressMethod | str,
     *,
@@ -141,7 +156,21 @@ def compute_percent_complete(
     actual_start: date | None = None,
     actual_finish: date | None = None,
 ) -> Decimal | None:
-    """活動の進捗率（0〜100）を算定方式に従って求める（BR-06）。未算定は ``None``。
+    """保存する進捗率：``exact_percent_complete`` を 4.1 の精度（小数 2 桁）へ四捨五入した値。未算定は ``None``。"""
+    return round_percent(exact_percent_complete(method, entered_percent=entered_percent, items=items,
+                                                actual_start=actual_start, actual_finish=actual_finish))
+
+
+# RULE-PRG-001 進捗率の算定方式
+def exact_percent_complete(
+    method: ProgressMethod | str,
+    *,
+    entered_percent: Decimal | int | None = None,
+    items: Iterable[ProgressItem] = (),
+    actual_start: date | None = None,
+    actual_finish: date | None = None,
+) -> Fraction | None:
+    """活動の進捗率（0〜100）を算定方式に従って、丸めずに求める（BR-06。5.6 の「丸める前の進捗率」）。未算定は ``None``。
 
     - ``method``：活動の方式（活動に無ければサービス層がプロジェクトの既定を渡す）。7 つ以外は ``ProgressError``
     - ``entered_percent``：直接入力の値（``DIRECT`` だけが使う。他の方式では使わない）
@@ -158,14 +187,14 @@ def compute_percent_complete(
         actual_finish=actual_finish,
     )
     if actual_finish is not None:
-        return _quantize(HUNDRED)
+        return Fraction(HUNDRED)
 
     if method is ProgressMethod.DIRECT:
-        return None if entered_percent is None else _quantize(_as_decimal(entered_percent, "進捗率"))
+        return None if entered_percent is None else Fraction(_as_decimal(entered_percent, "進捗率"))
     if method is ProgressMethod.ZERO_HUNDRED:
-        return _quantize(ZERO)
+        return Fraction(ZERO)
     if method is ProgressMethod.FIFTY_FIFTY:
-        return _quantize(FIFTY if actual_start is not None else ZERO)
+        return Fraction(FIFTY if actual_start is not None else ZERO)
 
     item_type = _ITEM_TYPE_OF[method]
     counted = [item for item in items if item.item_type is item_type]

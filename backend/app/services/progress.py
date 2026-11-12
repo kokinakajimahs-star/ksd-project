@@ -27,6 +27,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from typing import Any, Protocol
 
 from sqlalchemy import func, select
@@ -46,7 +47,7 @@ from app.domain.lightning import (
     overlay_lightning_lines,
     restore_lightning_line,
 )
-from app.domain.progress import ProgressError, ProgressMethod, compute_percent_complete
+from app.domain.progress import ProgressError, ProgressMethod, exact_percent_complete, round_percent
 from app.domain.progress import ProgressItem as RuleProgressItem
 from app.domain.scheduling import ScheduleActivity, ScheduleCycleError
 from app.domain.snapshot import (
@@ -298,26 +299,51 @@ def _rule_items(items: Iterable[ProgressItem]) -> list[RuleProgressItem]:
             for i in items]
 
 
-def _percent(
+def _exact_percent(
     method: ProgressMethod, items: Iterable[ProgressItem], *, entered: Decimal | None, actual_start: date | None,
     actual_finish: date | None,
-) -> Decimal | None:
-    """RULE-PRG-001 の進捗率。入力が不正なら 400。"""
+) -> Fraction | None:
+    """RULE-PRG-001 の丸める前の進捗率（進捗ポイント・判定・見込みの終了に使う。5.6）。入力が不正なら 400。"""
     try:
-        return compute_percent_complete(method, entered_percent=entered, items=_rule_items(items),
-                                        actual_start=actual_start, actual_finish=actual_finish)
+        return exact_percent_complete(method, entered_percent=entered, items=_rule_items(items),
+                                      actual_start=actual_start, actual_finish=actual_finish)
     except ProgressError as exc:
         raise _invalid(["body"], str(exc)) from exc
 
 
-def _entry_percent(project: Project, activity: Activity, entry: ProgressEntry | None, items: Iterable[ProgressItem]) -> Decimal | None:
-    """報告日の入力（無ければ入力なし）から求めた活動の進捗率（RULE-PRG-001）。"""
-    return _percent(
+def _percent(
+    method: ProgressMethod, items: Iterable[ProgressItem], *, entered: Decimal | None, actual_start: date | None,
+    actual_finish: date | None,
+) -> Decimal | None:
+    """RULE-PRG-001 の進捗率の保存・表示の値（4.1 の精度：小数 2 桁）。入力が不正なら 400。"""
+    return round_percent(_exact_percent(method, items, entered=entered, actual_start=actual_start,
+                                        actual_finish=actual_finish))
+
+
+def _entry_exact_percent(
+    project: Project, activity: Activity, entry: ProgressEntry | None, items: Iterable[ProgressItem],
+) -> Fraction | None:
+    """報告日の入力（無ければ入力なし）から求めた活動の丸める前の進捗率（RULE-PRG-001。5.6）。"""
+    return _exact_percent(
         effective_method(project, activity), items,
         entered=entry.percent_complete if entry is not None else None,
         actual_start=entry.actual_start if entry is not None else None,
         actual_finish=entry.actual_finish if entry is not None else None,
     )
+
+
+def _entry_percent(project: Project, activity: Activity, entry: ProgressEntry | None, items: Iterable[ProgressItem]) -> Decimal | None:
+    """報告日の入力（無ければ入力なし）から求めた活動の進捗率（RULE-PRG-001。保存・表示の値）。"""
+    return round_percent(_entry_exact_percent(project, activity, entry, items))
+
+
+def report_exact_percents(
+    session: Session, project: Project, activities: Iterable[Activity], entries: Mapping[int, ProgressEntry],
+) -> dict[int, Fraction | None]:
+    """報告日の入力から求めた活動ごとの丸める前の進捗率（RULE-PRG-001。イナズマ線・見込みの終了に使う。5.6・5.7）。"""
+    acts = list(activities)
+    items = _items_of(session, [a.id for a in acts])
+    return {a.id: _entry_exact_percent(project, a, entries.get(a.id), items[a.id]) for a in acts}
 
 
 def report_percents(
@@ -326,10 +352,9 @@ def report_percents(
     """報告日の入力（``entries``：活動の ID → 行）から求めた活動ごとの進捗率（RULE-PRG-001。``None`` は未算定）。
 
     工数の集計（5.8 の「進捗率・ETC の入力値は対象の報告日の progress_entries を使う」）が、イナズマ線と同じ値を使うための口。
+    値は 4.1 の精度（小数 2 桁）へ丸めたもの（確定の写しと同じ）。
     """
-    acts = list(activities)
-    items = _items_of(session, [a.id for a in acts])
-    return {a.id: _entry_percent(project, a, entries.get(a.id), items[a.id]) for a in acts}
+    return {k: round_percent(v) for k, v in report_exact_percents(session, project, activities, entries).items()}
 
 
 def percents_at_report(
@@ -698,10 +723,11 @@ class LightningView:
 
 @dataclass(frozen=True)
 class _Calculated:
-    """OPEN の報告日の計算：行の順の活動・その進捗率・線。"""
+    """OPEN の報告日の計算：行の順の活動・その進捗率（表示の値と丸める前の値）・線。"""
 
     activities: list[Activity]
     percents: dict[int, Decimal | None]
+    exact: dict[int, Fraction | None]
     line: LightningLine
 
 
@@ -710,14 +736,15 @@ def _calculate_line(session: Session, plan: Plan, report: StatusReport, entries:
     """今の計画とその報告日の入力から線を組み立てる（RULE-PRG-001〜005。PRG-01：その報告日の値だけで計算する）。"""
     _require_schedule(activities)
     items = _items_of(session, [a.id for a in activities])
-    percents = {a.id: _entry_percent(plan.project, a, entries.get(a.id), items[a.id]) for a in activities}
+    exact = {a.id: _entry_exact_percent(plan.project, a, entries.get(a.id), items[a.id]) for a in activities}
+    percents = {k: round_percent(v) for k, v in exact.items()}
     tolerance = _decimal(project_settings(plan.project)["delay_tolerance_days"])
     try:
         line = build_lightning_line(
             [
                 LightningActivity(
                     activity_id=a.id, start_date=a.start_date, finish_date=a.finish_date,  # type: ignore[arg-type]
-                    duration_days=a.duration_days, is_milestone=a.is_milestone, percent_complete=percents[a.id],
+                    duration_days=a.duration_days, is_milestone=a.is_milestone, percent_complete=exact[a.id],
                     actual_start=entries[a.id].actual_start if a.id in entries else None,
                     actual_finish=entries[a.id].actual_finish if a.id in entries else None,
                 )
@@ -730,7 +757,7 @@ def _calculate_line(session: Session, plan: Plan, report: StatusReport, entries:
         )
     except LightningError as exc:
         raise _invalid_state(f"イナズマ線を組み立てられません: {exc}") from exc
-    return _Calculated(activities=list(activities), percents=percents, line=line)
+    return _Calculated(activities=list(activities), percents=percents, exact=exact, line=line)
 
 
 def _snapshot_of(session: Session, report: StatusReport) -> tuple[ProgressSnapshot, list[ProgressSnapshotItem]]:
@@ -890,7 +917,8 @@ def finalize(
     _require_schedule(ordered)
     entries = _entries_of(session, report.id)
     items = _items_of(session, [a.id for a in ordered])
-    percents = {a.id: _entry_percent(plan.project, a, entries.get(a.id), items[a.id]) for a in ordered}
+    exact = {a.id: _entry_exact_percent(plan.project, a, entries.get(a.id), items[a.id]) for a in ordered}
+    percents = {k: round_percent(v) for k, v in exact.items()}
     efforts = links.effort.effort(session, project_id, report.report_date, entries, [a.id for a in ordered],
                                   percents=percents)
     elements = plan.element_by_id
@@ -904,7 +932,7 @@ def finalize(
                 activity_id=a.id, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
                 start_date=a.start_date, finish_date=a.finish_date,  # type: ignore[arg-type]
                 duration_days=a.duration_days, is_milestone=a.is_milestone, is_critical=a.is_critical,
-                percent_complete=percents[a.id],
+                percent_complete=exact[a.id],  # 写しには小数 2 桁へ丸めた値が入る（RULE-PRG-007。5.6）
                 actual_start=entry.actual_start if entry is not None else None,
                 actual_finish=entry.actual_finish if entry is not None else None,
                 actual_hours=effort.actual_hours, etc_hours=effort.etc_hours,
@@ -996,7 +1024,7 @@ def delays(session: Session, access: ProjectAccess, actor: User, project_id: int
             assert vertex.activity_id is not None
             entry = entries.get(vertex.activity_id)
             judged.append(DelayInput(activity_id=vertex.activity_id, deviation=vertex.deviation,
-                                     judgement=vertex.judgement, percent_complete=calculated.percents[vertex.activity_id],
+                                     judgement=vertex.judgement, percent_complete=calculated.exact[vertex.activity_id],
                                      forecast_finish=entry.forecast_finish if entry is not None else None))
     try:
         analysis = analyze_delays(

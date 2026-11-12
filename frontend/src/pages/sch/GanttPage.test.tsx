@@ -273,6 +273,9 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
       "NOT_COMPUTED",
     ]);
     expect(vertices.map((c) => c.getAttribute("fill"))).toEqual(["#d32f2f", "#1976d2", "#388e3c", "#388e3c", "#9e9e9e"]);
+    // 完了・未着手（予定内）は同じ緑に印（形）を重ねて区別する（設計書 1.1 の 7.3）
+    const marks = Array.from(layer(container, "lightning").querySelectorAll("path[data-mark]"));
+    expect(marks.map((m) => m.getAttribute("data-mark"))).toEqual(["hole", "check"]);
     // P＝5.25（12/06 の 1/4）・P＝12.6（12/13 の 6 割）
     expect(Number(vertices[0]!.getAttribute("cx"))).toBeCloseTo(LABEL_WIDTH + 5.25 * w);
     expect(Number(vertices[1]!.getAttribute("cx"))).toBeCloseTo(LABEL_WIDTH + 12.6 * w);
