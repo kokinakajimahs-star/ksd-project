@@ -40,12 +40,12 @@ from app.errors import AppError
 from app.infra.db import lock_row
 from app.models.cmn import User
 from app.models.est import EstimateRecord
-from app.models.prj import HOURS_PER_DAY_DEFAULT, Calendar, Project
+from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
-from app.services.wbs import mark_wbs_edited, preorder_elements
+from app.services.wbs import mark_wbs_edited, preorder_elements, project_hours_per_day
 
 ESTIMATE_EDIT = "estimate.edit"
 PROJECT_VIEW = "project.view"
@@ -78,12 +78,6 @@ def _target_of(
 
 def _current_hours(target: WbsElement | Activity) -> Decimal | None:
     return target.own_estimate_hours if isinstance(target, WbsElement) else target.estimate_hours
-
-
-def project_hours_per_day(session: Session, project_id: int) -> Decimal:
-    """人日→人時の換算に使う 1 日の稼働時間（PRJ-04）。カレンダーの行が無いプロジェクトは 4.1 の既定。"""
-    value = session.scalar(select(Calendar.hours_per_day).where(Calendar.project_id == project_id))
-    return Decimal(HOURS_PER_DAY_DEFAULT if value is None else value)
 
 
 def _elements(session: Session, project_id: int) -> list[WbsElement]:
