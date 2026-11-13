@@ -335,7 +335,7 @@ class TimeEntriesWritten:
     day_totals: Mapping[date, Decimal]
 
 
-# RULE-EFF-005 の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
+# 実績工数の入力検査（RULE-EFF-005）の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
 _PROBLEM_STATUS: tuple[tuple[frozenset[TimeEntryProblemCode], int, str, str], ...] = (
     (frozenset({TimeEntryProblemCode.INVALID_HOURS, TimeEntryProblemCode.NEGATIVE_HOURS, TimeEntryProblemCode.DUPLICATE}),
      400, "VALIDATION_ERROR", "入力に誤りがあるため、全件を保存しませんでした"),

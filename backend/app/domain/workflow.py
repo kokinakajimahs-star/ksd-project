@@ -261,7 +261,7 @@ def decide_approval(
 
 
 # ---------------------------------------------------------------------------
-# RULE-CHG-003 変更要求の状態遷移
+# 変更要求の状態遷移（RULE-CHG-003）
 # ---------------------------------------------------------------------------
 
 
@@ -357,7 +357,7 @@ def ensure_change_request_editable(status: ChangeRequestStatus | str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# RULE-CHG-005 是正措置の状態と期限超過
+# 是正措置の状態と期限超過（RULE-CHG-005）
 # ---------------------------------------------------------------------------
 
 
@@ -393,7 +393,7 @@ def transition_corrective_action(
     raise WorkflowError(WorkflowErrorCode.INVALID_STATE, f"是正措置は {current} から {target} へ移れない")
 
 
-# RULE-CHG-005 是正措置の状態と期限超過
+# 是正措置の期限超過の判定（RULE-CHG-005 の一部）
 def is_corrective_action_overdue(
     due_date: date | None, status: CorrectiveActionStatus | str, *, today: date
 ) -> bool:

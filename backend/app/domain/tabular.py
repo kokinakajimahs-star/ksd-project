@@ -8,7 +8,7 @@
 - 行ごとの検査：見出し、必須、形式（日付・整数・数・0/1・区分）、範囲（負の値・上限・小数 3 桁）、文字数、
   照合キーの重複、参照先（WBS ID・ログインID・活動ID）の有無。誤りは ``{行, 列, コード, メッセージ}``（``ImportIssue``）で全件を返す
 - 全件の検査：行ごとの検査が全て通った後に、取り込んだ後の全体へ RULE-WBS-003（階層と区分）・RULE-SCH-001（依存の循環）・
-  RULE-EFF-005（実績工数の入力検査）を当てる
+  実績工数の入力検査（RULE-EFF-005）を当てる
 - 全件の検査が通ったときだけ書く：誤りが 1 件でもあれば ``ImportPlan.changes`` は空（何も書かない）。書くのは呼び手（サービス層）
 - 往復の一致：出力した直後のファイルを取り込むと、変更は 0 件（``changes`` が空・全ての行が ``unchanged``）
 
@@ -120,13 +120,13 @@ class ImportIssueCode(StrEnum):
     TOO_LONG = "TOO_LONG"  # 文字数が列の長さを超える
     DUPLICATE_KEY = "DUPLICATE_KEY"  # 照合キーがファイルの中で重複している
     NOT_FOUND = "NOT_FOUND"  # 参照先（WBS ID・ログインID・活動ID）が無い
-    # RULE-WBS-003（階層と区分の整合）
+    # 階層と区分の整合（RULE-WBS-003）
     PARENT_CYCLE = "PARENT_CYCLE"
     WORK_PACKAGE_HAS_CHILDREN = "WORK_PACKAGE_HAS_CHILDREN"
     ACTIVITY_NOT_ON_WORK_PACKAGE = "ACTIVITY_NOT_ON_WORK_PACKAGE"
-    # RULE-SCH-001（依存の循環）
+    # 依存の循環（RULE-SCH-001）
     SCHEDULE_CYCLE = "SCHEDULE_CYCLE"
-    # RULE-EFF-005（実績工数の入力検査）
+    # 実績工数の入力検査（RULE-EFF-005）
     NOT_ASSIGNED = "NOT_ASSIGNED"
     LOCKED_DATE = "LOCKED_DATE"
     DAY_TOTAL_EXCEEDED = "DAY_TOTAL_EXCEEDED"
@@ -681,7 +681,7 @@ def _wbs_values(row: WbsRow) -> tuple[object, ...]:
     )
 
 
-# RULE-INT-001 表形式の入出力
+# WBS の表の取込の計画（RULE-INT-001 の一部）
 def plan_wbs_import(
     grid: Sequence[Sequence[object]],
     *,
@@ -898,7 +898,7 @@ def _activity_values(row: ActivityRow) -> tuple[object, ...]:
     )
 
 
-# RULE-INT-001 表形式の入出力
+# 活動の表の取込の計画（RULE-INT-001 の一部）
 def plan_activity_import(
     grid: Sequence[Sequence[object]],
     *,
@@ -1026,7 +1026,7 @@ def _check_activity_cycles(
 
 @dataclass(frozen=True)
 class UserEffortContext:
-    """RULE-EFF-005 を当てるのに要る、利用者 1 人の今の値。
+    """実績工数の入力検査（RULE-EFF-005）を当てるのに要る、利用者 1 人の今の値。
 
     - ``user_id``：``existing`` の行の利用者
     - ``existing``：その利用者の今の実績工数（プロジェクトをまたいで渡す。1 日の合計の検査に使う）
@@ -1050,7 +1050,7 @@ _EFFORT_CODES: Final[Mapping[TimeEntryProblemCode, ImportIssueCode]] = MappingPr
 )
 
 
-# RULE-INT-001 表形式の入出力
+# 実績工数の表の取込の計画（RULE-INT-001 の一部）
 def plan_time_entry_import(
     grid: Sequence[Sequence[object]],
     *,

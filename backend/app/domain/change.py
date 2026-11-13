@@ -13,7 +13,7 @@
     期間 0 の活動がマイルストーン（4.2）
 
 - 影響分析（RULE-CHG-002）：計画の写しに変更を当て、前後の計画それぞれに RULE-SCH-002・003（``calculate_schedule``）と
-  RULE-EST-001（``rollup_estimates``）を流し、前後の差を 5.9 の形で返す：``project_finish``（前・後・ずれの稼働日）、
+  ボトムアップ集計の RULE-EST-001（``rollup_estimates``）を流し、前後の差を 5.9 の形で返す：``project_finish``（前・後・ずれの稼働日）、
   ``milestones``（ずれたもの）、``critical_path``（加わった・外れた活動）、``total_estimate_hours``（前・後）、
   ``elements``（追加・変更・削除）。**本計画には書き込まない**（モデルは不変のデータで、写しにだけ当てる）。
 
@@ -669,7 +669,7 @@ def roll_requested_starts(operations: Sequence[Mapping[str, Any]], calendar: Wor
 
 
 # ---------------------------------------------------------------------------
-# RULE-CHG-002 影響分析
+# 影響分析（RULE-CHG-002）
 # ---------------------------------------------------------------------------
 
 

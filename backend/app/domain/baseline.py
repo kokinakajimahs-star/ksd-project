@@ -236,7 +236,7 @@ def select_baseline(baselines: Sequence[BaselineVersion], baseline_id: int | Non
 
 
 # ---------------------------------------------------------------------------
-# RULE-CHG-004 再基準化
+# 再基準化（RULE-CHG-004）
 # ---------------------------------------------------------------------------
 
 # 版の名前の長さの上限（4.1 の schedule_baselines.name の列の長さ。A-19）
@@ -348,7 +348,7 @@ def _next_version(versions: Iterable[int], what: str) -> int:
 
 
 def _rollup(elements: Sequence[RebaselineElement], activities: Sequence[RebaselineActivity]) -> dict[int, Decimal]:
-    """RULE-EST-001 と同じ WP の値（活動があれば活動の見積の合計、無ければ自分の見積。空は 0）。"""
+    """ボトムアップ集計（RULE-EST-001）と同じ WP の値（活動があれば活動の見積の合計、無ければ自分の見積。空は 0）。"""
     rollup = rollup_estimates(
         [WbsNode(id=e.id, parent_id=e.parent_id, kind=e.kind, own_estimate_hours=e.own_estimate_hours)  # type: ignore[arg-type]
          for e in elements],
