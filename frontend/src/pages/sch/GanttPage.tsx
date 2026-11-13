@@ -36,6 +36,7 @@ import {
   JUDGEMENT_LABELS,
   rangeToRefetch,
   UNIT_LABELS,
+  unplacedVertexCounts,
   type DateRange,
   type GanttUnit,
 } from "../../components/gantt/scale";
@@ -201,6 +202,12 @@ export default function GanttPage() {
     [gantt, lightning, pastLines],
   );
 
+  // 今のガントの行に当てられず描かない頂点の数（GanttChart と同じ当て方。黙って落とさず注記する。A-49 の 13）
+  const unplaced = useMemo(
+    () => (gantt === null ? null : unplacedVertexCounts(gantt.rows, { lightning, pastLines })),
+    [gantt, lightning, pastLines],
+  );
+
   // 描く範囲が受け取った非稼働日の範囲に収まらなければ、描く範囲で読み直す。収まれば何もしない（読み直した後は
   // 要求した範囲＝描く範囲なので止まる）。基準の版・報告日・過去の線を選び直したときも同じ判定をする
   useEffect(() => {
@@ -356,6 +363,16 @@ export default function GanttPage() {
             {lightning !== null && `／報告日：${lightning.report.report_date}（許容幅 ${lightning.tolerance_days} 日）`}
           </p>
           <GanttChart gantt={gantt} unit={unit} lightning={lightning} pastLines={pastLines} />
+          {unplaced !== null && unplaced.lightning > 0 && (
+            <p className="note">{`今の計画に無い活動の頂点 ${unplaced.lightning} 件は描いていない`}</p>
+          )}
+          {unplaced?.pastLines
+            .filter((line) => line.count > 0)
+            .map((line) => (
+              <p key={line.reportId} className="note">
+                {`報告日 ${line.reportDate} の線：今の計画に無い活動の頂点 ${line.count} 件は描いていない`}
+              </p>
+            ))}
         </>
       )}
 

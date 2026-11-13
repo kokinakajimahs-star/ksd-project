@@ -118,6 +118,38 @@ export function chartExtraDates(rows: Pick<GanttRow, "row_index" | "activity_id"
   return extra;
 }
 
+/** 今のガントの行に当てられず描かない頂点の数（⑥⑦ の線と、⑧ の過去の線ごと） */
+export interface UnplacedVertices {
+  /** API-PRG-006 の線のうち、活動が無い（消した活動の写し）か今のガントの行に無い頂点の数（線が無ければ 0） */
+  lightning: number;
+  /** 過去の線ごと（並びは pastLines と同じ）：今のガントに無い活動（missing_activity_ids）と、行の番号が今の行に無い頂点の数 */
+  pastLines: { reportId: number; reportDate: string; count: number }[];
+}
+
+/**
+ * 描かない頂点を数える（docs/decisions/ASSUMPTIONS.md A-49 の 13・OQ-42 (21) の b。黙って落とさない）。
+ * 当て方は GanttChart と同じ：API-PRG-006 の線は活動、過去の線は行の番号で今のガントの行へ当てる
+ */
+export function unplacedVertexCounts(
+  rows: Pick<GanttRow, "row_index" | "activity_id">[],
+  lines: Pick<RangeLines, "lightning" | "pastLines">,
+): UnplacedVertices {
+  const { lightning = null, pastLines = [] } = lines;
+  const activities = new Set(rows.map((r) => r.activity_id));
+  const rowIndexes = new Set(rows.map((r) => r.row_index));
+  return {
+    lightning:
+      lightning === null
+        ? 0
+        : lightning.rows.filter((r) => r.activity_id === null || !activities.has(r.activity_id)).length,
+    pastLines: pastLines.map((line) => ({
+      reportId: line.report_id,
+      reportDate: line.report_date,
+      count: line.missing_activity_ids.length + line.vertices.filter((v) => !rowIndexes.has(v.row_index)).length,
+    })),
+  };
+}
+
 /** inner が outer に収まる（両端を含む） */
 export function rangeContains(outer: DateRange, inner: DateRange): boolean {
   return parseIsoDate(outer.start) <= parseIsoDate(inner.start) && parseIsoDate(inner.end) <= parseIsoDate(outer.end);

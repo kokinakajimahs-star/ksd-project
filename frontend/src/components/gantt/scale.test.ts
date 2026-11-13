@@ -23,6 +23,7 @@ import {
   rangeToRefetch,
   rangeWidth,
   ticks,
+  unplacedVertexCounts,
   vertexMark,
   visibleRows,
   xOfDate,
@@ -107,6 +108,34 @@ describe("描く範囲を広げる日付と、非稼働日を受け取り直す�
       "2026-12-03",
       "2026-12-02",
     ]);
+  });
+
+  it("今のガントの行に当てられない頂点を数える：線は活動で、過去の線は行の番号で当て、今のガントに無い活動も足す", () => {
+    const lightning = makeLightningLine([
+      makeLightningRow({ activity_id: 21 }),
+      makeLightningRow({ row_index: 1, activity_id: 22 }),
+      makeLightningRow({ row_index: 5, activity_id: 99 }),
+      makeLightningRow({ row_index: 6, activity_id: null }),
+    ]);
+    const vertex = makeOverlaidLine().vertices[0]!;
+    const placed = makeOverlaidLine({ report_id: 40, report_date: "2026-12-03" });
+    const unplaced = makeOverlaidLine({
+      report_id: 42,
+      report_date: "2026-12-17",
+      vertices: [vertex, { ...vertex, row_index: 1 }, { ...vertex, row_index: 7 }],
+      missing_activity_ids: [98, null],
+    });
+
+    expect(unplacedVertexCounts(rows, { lightning, pastLines: [placed, unplaced] })).toEqual({
+      lightning: 2,
+      pastLines: [
+        { reportId: 40, reportDate: "2026-12-03", count: 0 },
+        { reportId: 42, reportDate: "2026-12-17", count: 3 },
+      ],
+    });
+    expect(unplacedVertexCounts(rows, {})).toEqual({ lightning: 0, pastLines: [] });
+    // 行が無ければ全ての頂点を数える
+    expect(unplacedVertexCounts([], { lightning })).toEqual({ lightning: 4, pastLines: [] });
   });
 
   it("範囲が収まるかは両端を含めて比べる", () => {
