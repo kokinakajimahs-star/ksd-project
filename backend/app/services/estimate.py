@@ -44,7 +44,7 @@ from app.models.sch import Activity
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
-from app.services.wbs import _mark_edited, _preorder
+from app.services.wbs import mark_wbs_edited, preorder_elements
 
 ESTIMATE_EDIT = "estimate.edit"
 PROJECT_VIEW = "project.view"
@@ -80,7 +80,7 @@ def _current_hours(target: WbsElement | Activity) -> Decimal | None:
     return target.own_estimate_hours if isinstance(target, WbsElement) else target.estimate_hours
 
 
-def _hours_per_day(session: Session, project_id: int) -> Decimal:
+def project_hours_per_day(session: Session, project_id: int) -> Decimal:
     """人日→人時の換算に使う 1 日の稼働時間（PRJ-04）。カレンダーの行が無いプロジェクトは 4.1 の既定。"""
     value = session.scalar(select(Calendar.hours_per_day).where(Calendar.project_id == project_id))
     return Decimal(HOURS_PER_DAY_DEFAULT if value is None else value)
@@ -107,7 +107,7 @@ def _rollup(project_id: int, elements: Sequence[WbsElement], activities: Sequenc
         raise RuntimeError(f"プロジェクト {project_id} の見積を集計できない: {exc}") from exc
 
 
-def _visible(
+def visible_scope(
     session: Session,
     access: ProjectAccess,
     actor: User,
@@ -191,7 +191,7 @@ def write_estimate(
             target_id=target_id,
             input_value=input_value,
             input_unit=input_unit,
-            hours_per_day=_hours_per_day(session, project_id),
+            hours_per_day=project_hours_per_day(session, project_id),
             entered_by=actor.id,
             entered_at=now,
             method=method,
@@ -202,7 +202,7 @@ def write_estimate(
         raise AppError(400, "VALIDATION_ERROR", "見積の値が正しくありません",
                        details=[{"loc": ["body", "input_value"], "message": str(exc)}]) from exc
     if isinstance(target, WbsElement):
-        _mark_edited(project)
+        mark_wbs_edited(project)
         target.own_estimate_hours = record.hours
     else:
         target.estimate_hours = record.hours
@@ -263,7 +263,7 @@ def estimate_history(
     target = _target_of(session, project_id, target_type, target_id)
     elements = _elements(session, project_id)
     activities = _activities(session, project_id)
-    visible = _visible(session, access, actor, project_id, table, elements, activities)
+    visible = visible_scope(session, access, actor, project_id, table, elements, activities)
     if visible is not None:
         allowed = visible.element_ids if target_type is TargetType.ELEMENT else visible.activity_ids
         if target is None or target_id not in allowed:
@@ -313,8 +313,8 @@ def estimate_rollup(session: Session, access: ProjectAccess, actor: User, projec
     elements = _elements(session, project_id)
     activities = _activities(session, project_id)
     rollup = _rollup(project_id, elements, activities)
-    visible = _visible(session, access, actor, project_id, table, elements, activities)
-    rows = _preorder(elements)
+    visible = visible_scope(session, access, actor, project_id, table, elements, activities)
+    rows = preorder_elements(elements)
     if visible is not None:
         rows = [(e, depth) for e, depth in rows if e.id in visible.element_ids]
         activities = [a for a in activities if a.id in visible.activity_ids]

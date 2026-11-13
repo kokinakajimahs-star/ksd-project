@@ -6,7 +6,7 @@ import { ApiError, setAuthToken } from "../../api/client";
 import { jsonResponse, mockApi } from "../../test/mockApi";
 import { makeMeetingReport, makeSharedView } from "../../test/rptFixtures";
 import { makeGantt, makeGanttRow } from "../../test/schFixtures";
-import SharedViewPage, { shareFailureReason } from "./SharedViewPage";
+import SharedViewPage, { isShareUnavailable } from "./SharedViewPage";
 
 const SHARED_URL = "/api/v1/shared/tok-abc_123";
 
@@ -20,9 +20,10 @@ function renderAt(path = "/shared/tok-abc_123") {
   );
 }
 
-function notFound(reason: string) {
+/** 無い・失効・期限切れのどれでもサーバが返す同じ 404（API-RPT-004） */
+function notFound() {
   return jsonResponse(404, {
-    error: { code: "NOT_FOUND", message: "共有リンクが見つからないか、失効・期限切れです", details: [{ reason }] },
+    error: { code: "NOT_FOUND", message: "共有リンクが見つからないか、失効・期限切れです", details: [] },
   });
 }
 
@@ -50,6 +51,8 @@ describe("UI-RPT-002 共有ビュー（ログイン不要）", () => {
       "（読むだけ）",
     );
     expect(screen.getByRole("table", { name: "マイルストーンの状況" })).toBeInTheDocument();
+    // 共有の会議レポートにも、計画は表示した時点の最新計画と書く（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent("計画は表示した時点の最新計画");
     expect(container.querySelector('[data-kpi="overall_progress"]')).toHaveTextContent("37.5%");
     expect(screen.getByRole("img", { name: "ガントチャート" })).toHaveAttribute("width", String(280 + 57 * 24));
     // 読むだけ：書き込みの部品（共有リンクの作成など）は置かない
@@ -79,17 +82,13 @@ describe("UI-RPT-002 共有ビュー（ログイン不要）", () => {
     expect(await screen.findByText("報告日がまだ無いため、定例会議レポートはありません")).toBeInTheDocument();
   });
 
-  it.each([
-    ["REVOKED", "このリンクは失効しています"],
-    ["EXPIRED", "このリンクは有効期限が切れています"],
-    ["NOT_FOUND", "リンクが正しくありません"],
-  ])("閲覧できないリンク（%s）はサーバの文言と理由を出す", async (reason, text) => {
-    mockApi({ [`GET ${SHARED_URL}`]: () => notFound(reason) });
+  it("閲覧できないリンクは、理由を見分けずにサーバの文言と 1 つの案内を出す", async () => {
+    mockApi({ [`GET ${SHARED_URL}`]: () => notFound() });
     renderAt();
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("共有リンクが見つからないか、失効・期限切れです");
-    expect(alert).toHaveTextContent(text);
+    expect(alert).toHaveTextContent("リンクが正しいか、まだ有効かを、共有した人に確かめてください");
     expect(screen.queryByRole("img", { name: "ガントチャート" })).toBeNull();
   });
 
@@ -104,13 +103,11 @@ describe("UI-RPT-002 共有ビュー（ログイン不要）", () => {
   });
 });
 
-describe("shareFailureReason（閲覧できない理由を読む）", () => {
-  it("404 の details の reason だけを読み、それ以外は null", () => {
-    const body = (details: unknown[]) => ({ code: "NOT_FOUND", message: "x", details });
-    expect(shareFailureReason(new ApiError(404, body([{ reason: "EXPIRED" }])))).toBe("EXPIRED");
-    expect(shareFailureReason(new ApiError(404, body([{ reason: "OTHER" }])))).toBeNull();
-    expect(shareFailureReason(new ApiError(404, body([])))).toBeNull();
-    expect(shareFailureReason(new ApiError(500, body([{ reason: "REVOKED" }])))).toBeNull();
-    expect(shareFailureReason(new Error("network"))).toBeNull();
+describe("isShareUnavailable（共有リンクで閲覧できないか）", () => {
+  it("API の 404 だけを閲覧できないとし、それ以外（サーバの誤り・通信の誤り）は違う", () => {
+    const body = (code: string) => ({ code, message: "x", details: [] });
+    expect(isShareUnavailable(new ApiError(404, body("NOT_FOUND")))).toBe(true);
+    expect(isShareUnavailable(new ApiError(500, body("INTERNAL_ERROR")))).toBe(false);
+    expect(isShareUnavailable(new Error("network"))).toBe(false);
   });
 });

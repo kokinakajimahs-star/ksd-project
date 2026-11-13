@@ -10,8 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.domain.effort import EffortValues, OrganizationKey, PeriodKey
-from app.models.prg import StatusReport
-from app.models.sch import ScheduleBaseline
 from app.schemas.effort import (
     ActivityAssignmentsOut,
     AssignmentList,
@@ -37,7 +35,16 @@ from app.services import effort as effort_service
 from app.services import get_session
 from app.services.auth import User
 from app.services.clock import get_now
-from app.services.effort import AssignmentRow, EffortLinks, NoteView, SummaryView, TimeEntryCell, TimeEntryRow
+from app.services.effort import (
+    AssignmentRow,
+    EffortLinks,
+    NoteView,
+    ScheduleBaseline,
+    StatusReport,
+    SummaryView,
+    TimeEntryCell,
+    TimeEntryRow,
+)
 from app.services.project_access import ProjectAccess
 
 router = APIRouter(tags=["effort"])

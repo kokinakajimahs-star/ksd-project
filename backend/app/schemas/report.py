@@ -82,7 +82,8 @@ class ReportKpiOut(BaseModel):
 class MeetingReportOut(BaseModel):
     """定例会議レポートのデータ（RULE-RPT-001・7.4）。
 
-    ``source`` は値の源：``SNAPSHOT``（確定済みの報告日の写し）か ``CALCULATED``（確定前の計算値）。
+    ``source`` は進捗の値の源：``SNAPSHOT``（確定済みの報告日の写し）か ``CALCULATED``（確定前の計算値）。計画の値（ガントの
+    バー、マイルストーンの予定日・見込み日・ずれ）はどちらも表示した時点の最新計画（7.4。設計書 1.2・CR-013）。
     ``kpi`` は委託先だけで読む利用者（``restricted``）には返さない（プロジェクト全体の値のため）。
     """
 

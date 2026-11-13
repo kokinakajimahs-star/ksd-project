@@ -222,6 +222,43 @@ def test_create_change_request_rejects_bad_input_and_roles(world: World) -> None
     assert world.count(ChangeRequest) == 0
 
 
+def test_requested_start_rolls_to_working_day_on_create_update_and_apply(world: World) -> None:
+    """API-CHG-001・003・006：変更内容の希望開始日は起票・更新の時点で次の稼働日へ寄せて保存し、反映でその値を書く
+    （BR-04。活動を足す・変える API-SCH-002・003 と同じ寄せ。OQ-42 (16)）。12/05（土）→ 12/07（月）、12/13（日）→ 12/14（月）。
+    """
+    direct = world.client.post(world.url("/activities"), json={"work_package_id": world.wp2, "name": "直接",
+                                                                "duration_days": 1, "requested_start": "2026-12-05"},
+                               headers=world.h["planner"])
+    assert direct.status_code == 201, direct.text
+    assert direct.json()["requested_start"] == "2026-12-07"  # API-SCH-002 の寄せ
+
+    world.baseline_wbs()
+    operations = [{"op": "add_activity", "wp_code": world.wp1_code, "name": "C", "duration_days": 2,
+                   "estimate_hours": 16, "ref": "c", "requested_start": "2026-12-05"}]
+    created = world.create(operations=operations)
+    assert created["operations"][0]["requested_start"] == "2026-12-07"
+    url = world.url(f"/change-requests/{created['id']}")
+    patched = world.client.patch(url, json={"operations": [
+        *operations,
+        {"op": "update_activity", "activity_id": world.b, "fields": {"requested_start": "2026-12-13"}},
+    ]}, headers=world.h["planner"])
+    assert patched.status_code == 200, patched.text
+    assert [patched.json()["operations"][0]["requested_start"],
+            patched.json()["operations"][1]["fields"]["requested_start"]] == ["2026-12-07", "2026-12-14"]
+    world.session.expire_all()
+    stored = world.session.get(ChangeRequest, created["id"])
+    assert stored is not None and stored.operations[0]["requested_start"] == "2026-12-07"
+
+    submitted = world.submit(created["id"])
+    world.decide(submitted["approval_request_id"], "APPROVE")
+    world.apply(created["id"])
+    world.session.expire_all()
+    c = world.session.scalar(select(Activity).where(Activity.project_id == world.pid, Activity.name == "C"))
+    b = world.session.get(Activity, world.b)
+    assert c is not None and b is not None
+    assert (str(c.requested_start), str(b.requested_start)) == ("2026-12-07", "2026-12-14")
+
+
 # ---------------------------------------------------------------------------
 # API-CHG-002 変更要求の一覧
 # ---------------------------------------------------------------------------

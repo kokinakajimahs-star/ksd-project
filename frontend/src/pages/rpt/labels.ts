@@ -1,8 +1,8 @@
 // レポート・共有の画面（UI-RPT-001・002）の呼び名と小さな書式
-import type { ReportSource, ShareLink, ShareLinkFailure, ShareScope } from "../../api/rpt";
+import type { ReportSource, ShareLink, ShareScope } from "../../api/rpt";
 import { serverTime } from "../../lib/format";
 
-/** 値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値 */
+/** 進捗の値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値。計画の値は常に最新計画（CR-013） */
 export function sourceLabel(source: ReportSource): string {
   return source === "SNAPSHOT" ? "確定時の写し" : "計算値（確定前）";
 }
@@ -15,12 +15,11 @@ export const SHARE_SCOPE_LABELS: Record<ShareScope, string> = {
 
 export const SHARE_SCOPES: ShareScope[] = ["REPORT", "GANTT"];
 
-/** 共有リンクを閲覧できない理由（API-RPT-004 の 404 の details の reason） */
-export const SHARE_FAILURE_LABELS: Record<ShareLinkFailure, string> = {
-  NOT_FOUND: "リンクが正しくありません。共有した人に確かめてください",
-  REVOKED: "このリンクは失効しています",
-  EXPIRED: "このリンクは有効期限が切れています",
-};
+/**
+ * 共有リンクで閲覧できないときの案内（API-RPT-004 の 404）。サーバは無い・失効・期限切れを同じ応答で返し、
+ * どれに当たったかを返さないので、画面も 1 つの案内だけを出す
+ */
+export const SHARE_UNAVAILABLE_HINT = "リンクが正しいか、まだ有効かを、共有した人に確かめてください";
 
 /** 共有リンクの今の状態（一覧の表示用。閲覧の可否の正はサーバの RULE-AUTH-002） */
 export type ShareLinkState = "ACTIVE" | "REVOKED" | "EXPIRED";

@@ -65,9 +65,11 @@ SORT_ORDER = {1: 1, 2: 2, 3: 3, 5: 4, 4: 1}
 ESTIMATES: dict[int, Decimal | None] = {1: Decimal(160), 2: Decimal(80), 3: Decimal(40), 4: Decimal(64), 5: None}
 
 
-def gantt_for(rows: list[SnapshotActivity], schedule: list[ScheduleActivity] = SCHEDULE) -> GanttChart:
+def gantt_for(
+    rows: list[SnapshotActivity], schedule: list[ScheduleActivity] = SCHEDULE, deps: list[tuple[int, int]] = DEPS,
+) -> GanttChart:
     """今の計画のガント（RULE-SCH-005）。日付・クリティカル・フロートは日程計算（RULE-SCH-002・003）の値。"""
-    result = calculate_schedule(schedule, DEPS, calendar=ALL_DAYS, project_start=ORIGIN)
+    result = calculate_schedule(schedule, deps, calendar=ALL_DAYS, project_start=ORIGIN)
     ids = {a.id for a in schedule}
     return build_gantt(
         ELEMENTS,
@@ -89,7 +91,7 @@ def gantt_for(rows: list[SnapshotActivity], schedule: list[ScheduleActivity] = S
             for a in rows
             if a.activity_id in ids
         ],
-        [dep for dep in DEPS if dep[0] in ids and dep[1] in ids],
+        [dep for dep in deps if dep[0] in ids and dep[1] in ids],
         calendar=ALL_DAYS,
         project_start=ORIGIN,
         report_date=REPORT,
@@ -216,8 +218,9 @@ def test_milestone_forecast_from_delay_impact() -> None:
     report = open_report()
 
     # 資料作成の見込みの終了 10 + ceil(21 × 0.75) = 26 → 公開判定は 12/21 から 12/26 へ
+    # 行は最新計画のガントの行（WBS ID は置き場の WP の 1.0。CR-013）
     (milestone,) = report.milestones
-    assert (milestone.activity_id, milestone.wbs_code, milestone.name) == (5, "1.4", "公開判定")
+    assert (milestone.activity_id, milestone.wbs_code, milestone.name) == (5, "1.0", "公開判定")
     assert milestone.planned_date == d(21)
     assert milestone.forecast_date == d(26)
     assert milestone.slip_days == 5
@@ -376,6 +379,64 @@ def test_finalized_report_uses_snapshot_not_current_values() -> None:
     assert [(row.activity_id, row.deviation) for row in report.delays] == [(1, Decimal("-4.75"))]
     assert report.kpi.behind_count == 1
     assert report.kpi.overall_progress == Decimal("44.19")  # 写しの進捗率（25%）で重み付けする
+
+
+def test_finalized_report_takes_plan_values_from_latest_plan() -> None:
+    """RULE-RPT-001：確定済みでも計画の値（マイルストーンの予定日・見込み日・ずれ）は最新計画から求め、進捗の値は写しのまま（7.4・CR-013）。
+
+    確定の後に資料作成を 21 日から 25 日へ延ばした。公開判定の予定日は最新計画の 12/25（写しの 12/21 ではない）、見込み日は
+    写しの進捗率 25% を最新計画へ当てた 10 + ceil(25 × 0.75) = 29 → 12/29、ずれは 4 稼働日（写しの予定日と混ぜると 8 になる）。
+    """
+    snapshot = snapshot_of()
+    schedule = [ScheduleActivity(1, 25) if a.id == 1 else a for a in SCHEDULE]
+    report = build_meeting_report(
+        status=StatusReportStatus.FINALIZED,
+        report_date=REPORT,
+        snapshot=snapshot,
+        calendar=ALL_DAYS,
+        project_start=ORIGIN,
+        gantt=gantt_for(ROWS, schedule),
+        schedule_activities=schedule,
+        dependencies=DEPS,
+        estimate_hours=ESTIMATES,
+    )
+
+    (milestone,) = report.milestones
+    milestone_row = next(r for r in report.gantt.rows if r.activity_id == 5)
+    assert milestone_row.planned is not None and milestone_row.planned.end_date == d(25)  # ガントのバーも最新計画
+    assert (milestone.activity_id, milestone.planned_date, milestone.forecast_date, milestone.slip_days) == (
+        5, d(25), d(29), 4)
+    # 進捗の値は写しのまま：線の頂点・判定、遅延一覧（予定の終了も写し）、KPI の進捗率と遅れの件数
+    vertex = report.lightning.vertices[0]
+    assert (vertex.activity_id, vertex.point, vertex.judgement) == (1, Decimal("5.25"), Judgement.BEHIND)
+    assert [(r.activity_id, r.deviation, r.planned_finish) for r in report.delays] == [(1, Decimal("-4.75"), d(21))]
+    assert (report.kpi.overall_progress, report.kpi.behind_count) == (Decimal("44.19"), 1)
+
+    # 確定の後に消したマイルストーンは最新計画に無いので出さない
+    without = [a for a in SCHEDULE if a.id != 5]
+    gone = build_meeting_report(
+        status=StatusReportStatus.FINALIZED,
+        report_date=REPORT,
+        snapshot=snapshot,
+        calendar=ALL_DAYS,
+        project_start=ORIGIN,
+        gantt=gantt_for(ROWS, without, []),
+        schedule_activities=without,
+        dependencies=[],
+    )
+    assert gone.milestones == ()
+    assert gone.missing_activity_ids == (5,)
+
+
+def test_milestone_without_planned_date_in_latest_plan_is_rejected() -> None:
+    """RULE-RPT-001：最新計画のマイルストーンに予定日（日程の計算結果）が無ければ、推測せずに拒む（CR-013）。"""
+    plain = open_report()
+    unscheduled = replace(
+        plain.gantt,
+        rows=tuple(replace(r, planned=None) if r.activity_id == 5 else r for r in plain.gantt.rows),
+    )
+    with pytest.raises(ReportError, match="予定日"):
+        open_report(gantt=unscheduled)
 
 
 def test_finalized_requires_matching_snapshot_only() -> None:

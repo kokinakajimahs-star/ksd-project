@@ -3,10 +3,11 @@
 
 - 権限（RULE-AUTH-001）：会議レポートを読むは project.view、共有リンクを作る・失効させるは share.manage。
   共有リンクで閲覧する（API-RPT-004）だけは認証を要らず、トークンを RULE-AUTH-002 で検証する
-- 会議レポート（RULE-RPT-001）の値の源は API-PRG-006・009 と同じ：確定済みの報告日はスナップショットの写しだけ（BR-13）、
-  確定前は今の計画とその報告日の入力から確定と同じ計算で求めた値（保存しない）。ガントは今の計画を、その報告日の進捗
-  （確定済みは写しの進捗率・実績日付）で描く。工数（EAC・基準）は RULE-EFF-002 の報告日以前の実績で求め、是正措置は今の状態
-  （A-35・OQ-32 (3)）
+- 会議レポート（RULE-RPT-001）の進捗の値の源は API-PRG-006・009 と同じ：確定済みの報告日はスナップショットの写しだけ（BR-13）、
+  確定前は今の計画とその報告日の入力から確定と同じ計算で求めた値（保存しない）。計画の値（ガントのバー、マイルストーンの
+  予定日・見込み日・ずれ）は確定済みかどうかにかかわらず表示した時点の最新計画（API-SCH-010 と同じ。7.4・設計書 1.2・CR-013）。
+  ガントは今の計画を、その報告日の進捗（確定済みは写しの進捗率・実績日付）で描く。工数（EAC・基準）は RULE-EFF-002 の
+  報告日以前の実績で求め、是正措置は今の状態（A-35・OQ-32 (3)）
 - 委託先だけで読む利用者（9.2 の注記）には、自分の割当の活動の行・頂点・遅延・マイルストーンだけを返し、プロジェクト全体の値の
   KPI は返さない（``restricted``）
 - 共有リンクのトークンは作った応答でだけ返し、DB には SHA-256 のハッシュだけを保存する（4.2・NFR-04）。閲覧はガント
@@ -24,9 +25,10 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.domain.authz import ShareLinkRecord, ShareLinkStatus, ViewLevel, hash_token, project_view_level, verify_share_link
+from app.domain.authz import ShareLinkRecord, ViewLevel, hash_token, project_view_level, verify_share_link
 from app.domain.effort import EffortValues
 from app.domain.gantt import GanttChart
+from app.domain.lightning import Judgement
 from app.domain.progress import round_percent
 from app.domain.report import (
     REPORT_WINDOW,
@@ -41,7 +43,8 @@ from app.domain.snapshot import Snapshot, SnapshotActivity, SnapshotItem, Status
 from app.errors import AppError
 from app.infra.security import generate_token
 from app.models.chg import CorrectiveAction
-from app.models.cmn import ShareLink, User
+from app.models.cmn import ShareLink as ShareLink  # API 層は共有リンクの型をここから取る（1.3：API はモデルを直接 import しない）
+from app.models.cmn import User
 from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem, StatusReport
 from app.models.prj import Project
 from app.models.sch import Activity, ScheduleBaseline
@@ -144,7 +147,8 @@ def _snapshot_of(session: Session, report: StatusReport) -> Snapshot:
             is_milestone=i.is_milestone, is_critical=i.is_critical, percent_complete=i.percent_complete,
             actual_start=i.actual_start, actual_finish=i.actual_finish, actual_hours=i.actual_hours,
             etc_hours=i.etc_hours, point=i.point, deviation=i.deviation,
-            judgement=i.judgement,  # type: ignore[arg-type]
+            # DB の文字列を判定の列挙へ直す（KPI の遅れの件数は列挙で数える。7.4・CR-013 の進捗の値は写しのまま）
+            judgement=Judgement(i.judgement),
         )
         for i in rows
     )
@@ -192,6 +196,8 @@ def _build(
     snapshot: Snapshot | None = None
     activities: list[SnapshotActivity] = []
     gantt_progress: dict[int, ActivityProgress] = {}
+    # 計画の値は確定済みでも最新計画から求めるので、どちらの報告日も最新計画の日程が要る（7.4。設計書 1.2・CR-013）
+    _require_schedule(ordered)
     if report.status == StatusReportStatus.FINALIZED.value:
         source = SOURCE_SNAPSHOT
         snapshot = _snapshot_of(session, report)
@@ -204,7 +210,6 @@ def _build(
                     actual_finish=item.actual_finish)
     else:
         source = SOURCE_CALCULATED
-        _require_schedule(ordered)
         exact = report_exact_percents(session, project, ordered, entries)  # P は丸める前の値から（5.6）
         percents = {k: round_percent(v) for k, v in exact.items()}
         elements = plan.element_by_id
@@ -274,7 +279,8 @@ def meeting_report(
 ) -> MeetingReportView:
     """報告日の定例会議レポートのデータ（project.view。RPT-01。RULE-RPT-001）。
 
-    無いプロジェクト・報告日（他のプロジェクトの報告日を含む）は 404。確定前の報告日で日程が計算されていない活動があれば 409。
+    無いプロジェクト・報告日（他のプロジェクトの報告日を含む）は 404。日程が計算されていない活動があれば 409（計画の値は
+    確定済みの報告日でも最新計画から求めるため。CR-013）。
     """
     table = authorize_project(session, access, actor, project_id, PROJECT_VIEW)
     report = _report_of(session, project_id, report_id)
@@ -368,8 +374,9 @@ class SharedView:
 def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: datetime) -> SharedView:
     """共有リンクのトークンで、リンクの範囲を読むだけで見せる（認証なし。RPT-03。RULE-AUTH-002）。
 
-    トークンが無い・合わない・失効した・期限が切れたリンクは、どれも 404（``details`` の ``reason`` に
-    ``NOT_FOUND``・``REVOKED``・``EXPIRED``）。``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
+    トークンが無い・合わない・失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が
+    全て同じ。どれに当たったかは返さない。リンクの有無・失効・期限を外から見分けさせない）。
+    ``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
     ``REPORT`` は 4.2 の最新の報告日の会議レポート（API-RPT-001 と同じ。報告日が無ければ空）。
     """
     row = session.scalar(select(ShareLink).where(ShareLink.token_hash == hash_token(token))) if token else None
@@ -379,8 +386,7 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
                                  expires_at=row.expires_at, revoked_at=row.revoked_at)
     verdict = verify_share_link(token, record, now=now)
     if not verdict.valid or row is None:
-        reason = verdict.status.value if verdict.status is not ShareLinkStatus.VALID else ShareLinkStatus.NOT_FOUND.value
-        raise AppError(404, "NOT_FOUND", "共有リンクが見つからないか、失効・期限切れです", details=[{"reason": reason}])
+        raise AppError(404, "NOT_FOUND", "共有リンクが見つからないか、失効・期限切れです")
     plan = load_plan(session, row.project_id)
     if verdict.can_view(SCOPE_GANTT):
         progress = links.latest_progress(session, row.project_id)

@@ -57,9 +57,13 @@ from app.errors import AppError
 from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry, VarianceNote
-from app.models.prg import StatusReport
+from app.models.prg import StatusReport as StatusReport  # API 層は報告日の型をここから取る（1.3：API はモデルを直接 import しない）
 from app.models.prj import Project, ProjectMember
-from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
+from app.models.sch import (  # API 層はスケジュールベースラインの型をここから取る（1.3：API はモデルを直接 import しない）
+    Activity,
+    ScheduleBaseline as ScheduleBaseline,
+    ScheduleBaselineItem,
+)
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of, project_not_found
 from app.services.progress import entries_of_report, percents_at_report, project_settings, report_percents
@@ -331,7 +335,7 @@ class TimeEntriesWritten:
     day_totals: Mapping[date, Decimal]
 
 
-# RULE-EFF-005 の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
+# 実績工数の入力検査（RULE-EFF-005）の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
 _PROBLEM_STATUS: tuple[tuple[frozenset[TimeEntryProblemCode], int, str, str], ...] = (
     (frozenset({TimeEntryProblemCode.INVALID_HOURS, TimeEntryProblemCode.NEGATIVE_HOURS, TimeEntryProblemCode.DUPLICATE}),
      400, "VALIDATION_ERROR", "入力に誤りがあるため、全件を保存しませんでした"),

@@ -34,6 +34,7 @@ from app.domain.change import (
     PlanModel,
     analyze_impact,
     apply_operations,
+    roll_requested_starts,
 )
 from app.domain.estimate import ElementKind
 from app.domain.scheduling import ScheduleCycleError
@@ -69,7 +70,7 @@ from app.models.wbs import (
 from app.services.auth import User, authorize_project, principal_of
 from app.services.project_access import ProjectAccess
 from app.services.schedule import calculate_and_store, load_plan, work_calendar
-from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, _rule_row
+from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, numbering_rule_row
 
 # 4.1 の schedule_baselines.name の列の長さ（A-19）
 _BASELINE_NAME_LIMIT = 200
@@ -231,6 +232,15 @@ def _apply(plan: PlanModel, operations: Sequence[Mapping[str, Any]]) -> AppliedC
         raise _change_error(exc) from exc
 
 
+def _roll_starts(session: Session, project_id: int, operations: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """変更内容の希望開始日を、起票・更新の時点のカレンダーで次の稼働日へ寄せる（BR-04。API-SCH-002・003 が入力を寄せて
+    保存するのと同じ。承認する内容と反映する内容を一致させる。OQ-42 (16)）。"""
+    try:
+        return roll_requested_starts(operations, work_calendar(session, project_id))
+    except ChangeError as exc:
+        raise _change_error(exc) from exc
+
+
 def _analyze(session: Session, project: Project, operations: Sequence[Mapping[str, Any]]) -> ImpactAnalysis:
     try:
         return analyze_impact(_plan_model(session, project.id), operations,
@@ -292,12 +302,14 @@ def create_change_request(
     """変更要求を作る（change.create。CHG-01）。番号はプロジェクトの中の連番、状態は DRAFT。
 
     対象の WBS ID は今の ID か旧 ID で解決できること（422 ``REFERENCE_NOT_FOUND``）。変更内容は今の計画へ当てて検査する
-    （RULE-CHG-001。形の誤りは 400、参照・業務ルールの違反は 422。本計画には書かない）。
+    （RULE-CHG-001。形の誤りは 400、参照・業務ルールの違反は 422。本計画には書かない）。希望開始日は次の稼働日へ寄せて
+    保存する（BR-04。API-SCH-002・003 と同じ）。
     """
     authorize_project(session, access, actor, project_id, "change.create")
     codes = _check_targets(session, project_id, target_codes)
     ops = [dict(op) for op in operations]
     _apply(_plan_model(session, project_id), ops)
+    ops = _roll_starts(session, project_id, ops)
     latest = session.scalar(select(func.max(ChangeRequest.number)).where(ChangeRequest.project_id == project_id))
     change_request = ChangeRequest(project_id=project_id, number=(latest or 0) + 1, title=title, reason=reason,
                                    target_codes=codes, operations=ops, created_by=actor.id)
@@ -366,7 +378,7 @@ def update_change_request(
     if "operations" in changes:
         ops = [dict(op) for op in changes["operations"]]
         _apply(_plan_model(session, project_id), ops)
-        change_request.operations = ops
+        change_request.operations = _roll_starts(session, project_id, ops)
     for name in ("title", "reason"):
         if name in changes:
             setattr(change_request, name, changes[name])
@@ -566,7 +578,7 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
         row.needs_renumber = element.needs_renumber
     # 第 1 階層の数え（設計書 1.1 の 4.1・5.2。第 1 階層へ足したら進む。減らさない）
     if applied.plan.top_last_child_seq is not None:
-        rule_row = _rule_row(session, project_id)
+        rule_row = numbering_rule_row(session, project_id)
         rule_row.top_last_child_seq = max(rule_row.top_last_child_seq, applied.plan.top_last_child_seq)
 
     # 活動：足す・変える（日程の計算結果の列は後で計算し直す）

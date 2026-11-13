@@ -1,40 +1,29 @@
 // UI-RPT-002 共有ビュー（ログイン不要）（設計書 7.1 のルート /shared/:token）。RPT-03。
 // 共有リンク（API-RPT-004。認証を要らない唯一の API。6.1）で、リンクの範囲だけを読むだけで見せる：
 // GANTT は最新の進捗・最新の基準のガント、REPORT は最新の報告日の定例会議レポート（7.4。報告日が無ければ無い旨）。
-// 無い・失効した・期限の切れたリンクはサーバが 404 で返し、その理由（details の reason）を出す。書き込みの部品は置かない
+// 無い・失効した・期限の切れたリンクはサーバがどれも同じ 404 で返す（どれに当たったかは返さない）。画面もサーバの文言と
+// 1 つの案内だけを出し、理由を見分けない。書き込みの部品は置かない
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
 import { toErrorView, type ErrorView } from "../../api/errors";
-import { getSharedView, type SharedView, type ShareLinkFailure } from "../../api/rpt";
+import { getSharedView, type SharedView } from "../../api/rpt";
 import ErrorAlert from "../../components/ErrorAlert";
 import GanttChart from "../../components/gantt/GanttChart";
 import type { GanttUnit } from "../../components/gantt/scale";
 import { formatDateTime } from "../../lib/format";
 import MeetingReportView, { UnitSelect } from "./MeetingReportView";
-import { SHARE_FAILURE_LABELS, SHARE_SCOPE_LABELS } from "./labels";
+import { SHARE_SCOPE_LABELS, SHARE_UNAVAILABLE_HINT } from "./labels";
 
-/** 閲覧できない理由（404 の details の reason）を読む。無ければ null */
-export function shareFailureReason(error: unknown): ShareLinkFailure | null {
-  if (!(error instanceof ApiError) || error.status !== 404) {
-    return null;
-  }
-  for (const detail of error.details) {
-    if (typeof detail === "object" && detail !== null && "reason" in detail) {
-      const reason = (detail as { reason: unknown }).reason;
-      if (reason === "NOT_FOUND" || reason === "REVOKED" || reason === "EXPIRED") {
-        return reason;
-      }
-    }
-  }
-  return null;
+/** 共有リンクで閲覧できない（API-RPT-004 の 404。無い・失効・期限切れのどれかで、どれかは見分けない） */
+export function isShareUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
 }
 
 function toSharedError(error: unknown): ErrorView {
-  const reason = shareFailureReason(error);
   const view = toErrorView(error);
-  return reason === null ? view : { message: view.message, details: [SHARE_FAILURE_LABELS[reason]] };
+  return isShareUnavailable(error) ? { message: view.message, details: [SHARE_UNAVAILABLE_HINT] } : view;
 }
 
 export default function SharedViewPage() {

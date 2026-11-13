@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.domain.gantt import AxisPoint, GanttBar, GanttChart
-from app.models.sch import ActivityDependency, ScheduleBaseline
 from app.schemas.schedule import (
     ActivityBulkUpdate,
     ActivityCreate,
@@ -41,7 +40,14 @@ from app.services import schedule as schedule_service
 from app.services.auth import User
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
-from app.services.schedule import ActivityView, BaselineView, ScheduleLinks, ScheduleView
+from app.services.schedule import (
+    ActivityDependency,
+    ActivityView,
+    BaselineView,
+    ScheduleBaseline,
+    ScheduleLinks,
+    ScheduleView,
+)
 
 router = APIRouter(tags=["schedule"])
 

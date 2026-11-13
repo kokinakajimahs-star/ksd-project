@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.api.schedule import gantt_out, get_schedule_links
-from app.models.cmn import ShareLink
 from app.schemas.progress import OverlaidVertexOut
 from app.schemas.report import (
     MeetingReportOut,
@@ -32,7 +31,7 @@ from app.services import report as report_service
 from app.services.auth import User
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
-from app.services.report import MeetingReportView
+from app.services.report import MeetingReportView, ShareLink
 from app.services.schedule import ScheduleLinks
 
 router = APIRouter(tags=["report"])
@@ -114,8 +113,10 @@ def get_meeting_report(
     """API-RPT-001 定例会議用レポートのデータ。
 
     権限は project.view。7.4 の 5 つの欄（上段：ガント＋イナズマ線と表示の範囲＝報告日の前後 4 週、下段：遅延一覧・
-    マイルストーンの状況・主要 KPI）を RULE-RPT-001 で組み立てて返す。確定済みの報告日は写しの値（``SNAPSHOT``。BR-13）、
-    確定前は計算値（``CALCULATED``）。無い報告日・他のプロジェクトの報告日は 404、確定前で日程が計算されていない活動があれば 409。
+    マイルストーンの状況・主要 KPI）を RULE-RPT-001 で組み立てて返す。進捗の値は、確定済みの報告日は写しの値（``SNAPSHOT``。
+    BR-13）、確定前は計算値（``CALCULATED``）。計画の値（ガントのバー、マイルストーンの予定日・見込み日・ずれ）はどちらも
+    表示した時点の最新計画（7.4。設計書 1.2・CR-013）。無い報告日・他のプロジェクトの報告日は 404、日程が計算されていない活動が
+    あれば 409。
     委託先だけで読む利用者には自分の割当の活動だけを返し、KPI は返さない（``restricted``）。
     """
     view = report_service.meeting_report(session, access, user, links, project_id, report_id)
@@ -189,7 +190,7 @@ def get_shared(
 
     認証を要らない唯一の API（6.1）。トークンを RULE-AUTH-002 で検証し、リンクの範囲だけを見せる：GANTT は最新の進捗・
     最新の基準のガント、REPORT は 4.2 の最新の報告日の会議レポート（報告日が無ければ null）。トークンが無い・合わない・
-    失効した・期限が切れたリンクは 404（``details`` の ``reason``）。
+    失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が同じ。理由は返さない）。
     """
     view = report_service.shared_view(session, links, token, now=now)
     project = view.project

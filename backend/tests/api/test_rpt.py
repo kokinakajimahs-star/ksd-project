@@ -280,6 +280,53 @@ def test_meeting_report_of_finalized_report_uses_snapshot(world: World, client: 
     assert kpi["baseline_hours"] == 120.0 and kpi["eac_variance_hours"] == kpi["eac_hours"] - 120.0
 
 
+def test_meeting_report_of_finalized_report_takes_plan_values_from_latest_plan(
+    world: World, client: TestClient, db_session: Session,
+) -> None:
+    """API-RPT-001：確定済みでも計画の値（マイルストーンの予定日・見込み日・ずれ）は表示した時点の最新計画から求め、進捗の値は
+    写しのまま（7.4。設計書 1.2・CR-013）。共有リンクの会議レポート（API-RPT-004）も同じ。
+
+    報告日 12/05：A は完了見込み 12/14 → M は 12/15 から 12/19 へ（4 稼働日）。確定の後に B を 5 日から 8 日へ延ばすと、M の予定日は
+    最新計画の 12/18、見込み日は 12/14 + 8 日の 12/22、ずれは 4（写しの予定日 12/15 と混ぜると 7 になる）。
+    """
+    report = world.delayed_report()
+    before = world.meeting(report)
+    (planned_before,) = before["milestones"]
+    assert (planned_before["planned_date"], planned_before["forecast_date"], planned_before["slip_days"]) == (
+        "2026-12-15", "2026-12-19", 4)
+    finalized = client.post(world.url(f"/status-reports/{report}/finalize"), headers=world.h["pm"])
+    assert finalized.status_code == 200, finalized.text
+    patched = client.patch(world.url(f"/activities/{world.b}"), json={"duration_days": 8}, headers=world.h["planner"])
+    assert patched.status_code == 200, patched.text
+
+    after = world.meeting(report)
+    assert (after["status"], after["source"]) == ("FINALIZED", "SNAPSHOT")
+    rows = {r["activity_id"]: r for r in after["gantt"]["rows"]}
+    assert rows[world.m]["planned"]["end_date"] == "2026-12-18"  # ガントのバーは最新計画（API-SCH-010 と同じ）
+    (milestone,) = after["milestones"]
+    assert (milestone["activity_id"], milestone["planned_date"], milestone["forecast_date"], milestone["slip_days"]) == (
+        world.m, "2026-12-18", "2026-12-22", 4)
+    assert milestone["planned_date"] == rows[world.m]["planned"]["end_date"]
+    # 進捗の値は写しのまま：線の頂点・判定、遅延一覧、KPI の進捗率と遅れの件数
+    assert vertices_of(after) == vertices_of(before)
+    assert after["delays"] == before["delays"]
+    assert (after["kpi"]["overall_progress"], after["kpi"]["behind_count"]) == (
+        before["kpi"]["overall_progress"], before["kpi"]["behind_count"])
+
+    # 共有リンクの会議レポートも同じもの
+    token = world.share("REPORT")["token"]
+    shared = client.get(f"/api/v1/shared/{token}").json()
+    assert shared["meeting_report"] == after
+
+    # 計画の値を最新計画から求めるので、確定済みでも日程が計算されていない活動があれば 409
+    activity = db_session.get(Activity, world.b)
+    assert activity is not None
+    activity.start_date = None
+    db_session.commit()
+    unscheduled = client.get(world.url(f"/status-reports/{report}/meeting-report"), headers=world.h["viewer"])
+    assert unscheduled.status_code == 409 and error_code(unscheduled) == "INVALID_STATE"
+
+
 def test_meeting_report_permissions_and_errors(app: FastAPI, world: World, client: TestClient,
                                                db_session: Session) -> None:
     report = world.delayed_report()
@@ -378,6 +425,7 @@ def test_shared_view_shows_scope_without_login(world: World, client: TestClient)
 
 def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world: World, client: TestClient,
                                                            db_session: Session) -> None:
+    """失効した・期限が切れた・無いリンクは、どれも同じ 404（状態・コード・メッセージ・details。理由を返さない）。"""
     link = world.share("GANTT")
     token, link_id = link["token"], link["id"]
     url = world.url(f"/share-links/{link_id}")
@@ -397,10 +445,10 @@ def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world:
     again = client.delete(url, headers=world.h["pm"])
     assert again.status_code == 409 and error_code(again) == "INVALID_STATE"
     gone = client.get(f"/api/v1/shared/{token}")
-    assert gone.status_code == 404 and gone.json()["error"]["details"] == [{"reason": "REVOKED"}]
+    assert gone.status_code == 404 and error_code(gone) == "NOT_FOUND"
 
     unknown = client.get(f"/api/v1/shared/{generate_token()}")
-    assert unknown.status_code == 404 and unknown.json()["error"]["details"] == [{"reason": "NOT_FOUND"}]
+    assert unknown.status_code == 404 and error_code(unknown) == "NOT_FOUND"
 
     # 有効期限の時刻ちょうどで見られなくなる（RULE-AUTH-002）
     expiring = world.share("REPORT", expires_at="2026-12-06T09:00:00Z")["token"]
@@ -408,7 +456,13 @@ def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world:
     assert client.get(f"/api/v1/shared/{expiring}").status_code == 200
     app.dependency_overrides[get_now] = lambda: datetime(2026, 12, 6, 9, 0, tzinfo=UTC)
     expired = client.get(f"/api/v1/shared/{expiring}")
-    assert expired.status_code == 404 and expired.json()["error"]["details"] == [{"reason": "EXPIRED"}]
+    assert expired.status_code == 404 and error_code(expired) == "NOT_FOUND"
+
+    # 3 つの応答は同じ（リンクがあるか・失効か・期限切れかを外から見分けられない）
+    bodies = [(r.status_code, r.json()) for r in (gone, unknown, expired)]
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0] == (404, {"error": {"code": "NOT_FOUND", "message": "共有リンクが見つからないか、失効・期限切れです",
+                                         "details": []}})
 
 
 def test_list_share_links_without_tokens(world: World, client: TestClient, db_session: Session) -> None:

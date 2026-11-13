@@ -94,19 +94,19 @@ from app.models.eff import TimeEntry, VarianceNote
 from app.models.est import EstimateRecord
 from app.models.prj import Project, ProjectMember, ScopeItem
 from app.models.sch import Activity
-from app.models.wbs import (
+from app.models.wbs import (  # API 層は as を付けた型をここから取る（1.3：API はモデルを直接 import しない）
     COMMENT_STATUS_INITIAL,
     REVIEW_STATUS_CLOSED,
     REVIEW_STATUS_INITIAL,
     ApprovalRequest,
-    ScopeBaseline,
+    ScopeBaseline as ScopeBaseline,
     ScopeBaselineElement,
     WbsCodeHistory,
-    WbsDictionaryEntry,
-    WbsElement,
-    WbsNumberingRule,
-    WbsReview,
-    WbsReviewComment,
+    WbsDictionaryEntry as WbsDictionaryEntry,
+    WbsElement as WbsElement,
+    WbsNumberingRule as WbsNumberingRule,
+    WbsReview as WbsReview,
+    WbsReviewComment as WbsReviewComment,
     WbsScopeLink,
 )
 from app.services.auth import authorize_project, load_role_permission_table, principal_of
@@ -342,7 +342,7 @@ class WbsContext:
         )
 
 
-def _rule_row(session: Session, project_id: int) -> WbsNumberingRule:
+def numbering_rule_row(session: Session, project_id: int) -> WbsNumberingRule:
     row = session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == project_id))
     if row is None:
         # API-PRJ-001 を通らずに作られたプロジェクト。4.1 の既定の行を作る（同じトランザクション）。
@@ -358,7 +358,7 @@ def _rule_row(session: Session, project_id: int) -> WbsNumberingRule:
     return row
 
 
-def _load(session: Session, project_id: int, activities: ActivitiesReader) -> WbsContext:
+def load_wbs_context(session: Session, project_id: int, activities: ActivitiesReader) -> WbsContext:
     project = session.get(Project, project_id)
     if project is None:  # authorize_project が先に 404 を返すので、ここへは来ない
         raise AppError(404, "NOT_FOUND", "プロジェクトが見つかりません", details=[{"project_id": project_id}])
@@ -367,11 +367,11 @@ def _load(session: Session, project_id: int, activities: ActivitiesReader) -> Wb
         project=project,
         elements=elements,
         activities=activities.activities(session, project_id),
-        rule_row=_rule_row(session, project_id),
+        rule_row=numbering_rule_row(session, project_id),
     )
 
 
-def _coded(element: WbsElement, **overrides: Any) -> CodedElement:
+def coded_element(element: WbsElement, **overrides: Any) -> CodedElement:
     values: dict[str, Any] = {
         "id": element.id,
         "parent_id": element.parent_id,
@@ -409,7 +409,7 @@ def _ensure_tree(nodes: Sequence[WbsNode], activities: Sequence[ActivityEstimate
         raise AppError(422, exc.code, str(exc), details=details) from exc
 
 
-def _mark_edited(project: Project) -> None:
+def mark_wbs_edited(project: Project) -> None:
     """WBS を変えたときの状態（RULE-WBS-006 の EDIT）。承認待ちの間は 409 ``INVALID_STATE``。"""
     try:
         transition = transition_wbs(project.wbs_status, WbsAction.EDIT)
@@ -456,7 +456,7 @@ def _visible_element_ids(
     return scope.element_ids
 
 
-def _preorder(elements: Sequence[WbsElement]) -> list[tuple[WbsElement, int]]:
+def preorder_elements(elements: Sequence[WbsElement]) -> list[tuple[WbsElement, int]]:
     """先行順（兄弟は表示順）と深さ（最上位が 1）。"""
     children: dict[int | None, list[WbsElement]] = {}
     for element in elements:
@@ -540,7 +540,7 @@ def get_validation(
 ) -> tuple[WbsContext, ValidationResult, frozenset[int] | None]:
     """100% ルールと完了条件の検査の結果（project.view）。委託先には見える要素の結果だけを返す。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     visible = _visible_element_ids(session, access, actor, context, table)
     result = validate(session, context)
     if visible is not None:
@@ -571,7 +571,7 @@ def get_tree(
 ) -> TreeView:
     """WBS の木（先行順）と集計値・改番待ち・検査の件数（project.view）。"""
     context, validation, visible = get_validation(session, access, actor, activities, project_id)
-    rows = _preorder(context.elements)
+    rows = preorder_elements(context.elements)
     if visible is not None:
         rows = [(element, depth) for element, depth in rows if element.id in visible]
     session.commit()  # 採番規則の既定の行を作ったときだけ書く
@@ -581,8 +581,8 @@ def get_tree(
 
 def element_summary(session: Session, activities: ActivitiesReader, element: WbsElement) -> tuple[int, Decimal, str]:
     """要素 1 件の深さ（最上位が 1）・集計値・集計の元（書いた後の応答に使う。木と同じ求め方）。"""
-    context = _load(session, element.project_id, activities)
-    depth = {e.id: d for e, d in _preorder(context.elements)}[element.id]
+    context = load_wbs_context(session, element.project_id, activities)
+    depth = {e.id: d for e, d in preorder_elements(context.elements)}[element.id]
     result = _rollup(context).elements[element.id]
     return depth, result.hours, result.source.value
 
@@ -596,7 +596,7 @@ def _editing(
     session: Session, access: ProjectAccess, actor: User, activities: ActivitiesReader, project_id: int
 ) -> WbsContext:
     authorize_project(session, access, actor, project_id, "wbs.edit")
-    return _load(session, project_id, activities)
+    return load_wbs_context(session, project_id, activities)
 
 
 def add_element(
@@ -630,7 +630,7 @@ def add_element(
                  context.activities)
     try:
         code = new_element_code(
-            None if parent is None else _coded(parent),
+            None if parent is None else coded_element(parent),
             context.rule,
             top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None,
         )
@@ -655,7 +655,7 @@ def add_element(
         context.rule_row.top_last_child_seq = code.parent_last_child_seq
     else:
         parent.last_child_seq = code.parent_last_child_seq
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.add(element)
     session.commit()
     return element
@@ -689,7 +689,7 @@ def update_element(
                      context.activities)
     for name, value in changes.items():
         setattr(element, name, value)
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return element
 
@@ -715,14 +715,14 @@ def move(
     by_id = context.by_id
     if parent_id is not None and parent_id not in by_id:
         raise _validation_error([{"loc": ["body", "parent_id"], "message": "このプロジェクトの WBS 要素ではありません"}])
-    if parent_id is not None and parent_id in subtree_ids([_coded(e) for e in context.elements], element_id):
+    if parent_id is not None and parent_id in subtree_ids([coded_element(e) for e in context.elements], element_id):
         raise AppError(422, "PARENT_CYCLE", "要素を自分か配下の下へは移せません",
                        details=[{"element_id": element_id, "parent_id": parent_id}])
     _ensure_tree([_node(e, parent_id=parent_id) if e.id == element_id else _node(e) for e in context.elements],
                  context.activities)
     try:
         result = move_element(
-            [_coded(e) for e in context.elements],
+            [coded_element(e) for e in context.elements],
             element_id,
             parent_id,
             context.rule,
@@ -748,7 +748,7 @@ def move(
     siblings.insert(index, element)
     for order, sibling in enumerate(siblings, start=1):
         sibling.sort_order = order
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return element
 
@@ -765,7 +765,7 @@ def remove_element(
     """
     context = _editing(session, access, actor, activities, project_id)
     _element_of(context, element_id)
-    ids = list(subtree_ids([_coded(e) for e in context.elements], element_id))
+    ids = list(subtree_ids([coded_element(e) for e in context.elements], element_id))
     with_activities = sorted({a.work_package_id for a in context.activities if a.work_package_id in set(ids)})
     if with_activities:
         raise AppError(422, "ELEMENT_HAS_ACTIVITIES", "活動のある WP は消せません（先に活動を消します）",
@@ -785,7 +785,7 @@ def remove_element(
     session.execute(delete(WbsCodeHistory).where(WbsCodeHistory.element_id.in_(ids)))
     for node_id in reversed(ids):  # 子から消す（親子の外部キー）
         session.execute(delete(WbsElement).where(WbsElement.id == node_id))
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
 
 
@@ -820,7 +820,7 @@ def replace_numbering_rule(
             errors.append({"loc": ["body", name], "message": "「/」は使えません（WBS ID を URL のパスに入れるため）"})
     if errors:
         raise _validation_error(errors)
-    row = _rule_row(session, project_id)
+    row = numbering_rule_row(session, project_id)
     row.separator, row.min_digits, row.prefix, row.pad_first_level = separator, min_digits, prefix, pad_first_level
     session.commit()
     return row
@@ -847,7 +847,7 @@ def renumber_wbs(
     """
     context = _editing(session, access, actor, activities, project_id)
     try:
-        result = renumber([_coded(e) for e in context.elements], context.rule,
+        result = renumber([coded_element(e) for e in context.elements], context.rule,
                           top_last_child_seq=context.rule_row.top_last_child_seq)
     except WbsCodeError as exc:
         raise AppError(422, "WBS_CODE_INVALID", str(exc)) from exc
@@ -864,7 +864,7 @@ def renumber_wbs(
     for change in result.changes:
         session.add(WbsCodeHistory(project_id=project_id, element_id=change.element_id, old_code=change.old_code,
                                    new_code=change.new_code, renumbered_at=now, renumbered_by=actor.id))
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return RenumberView(renumbered_at=now, changes=[(c.element_id, c.old_code, c.new_code) for c in result.changes])
 
@@ -881,7 +881,7 @@ def list_code_history(
 ) -> tuple[list[tuple[WbsCodeHistory, str]], int]:
     """WBS ID の新旧対応（新しい順）と総数（project.view）。委託先には見える要素の対応だけを返す。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     visible = _visible_element_ids(session, access, actor, context, table)
     condition = [WbsCodeHistory.project_id == project_id]
     if visible is not None:
@@ -905,7 +905,7 @@ def get_dictionary(
 ) -> tuple[WbsElement, WbsDictionaryEntry | None]:
     """要素の WBS 辞書（project.view）。辞書の行が無ければ 4 項目は空。委託先に見えない要素は 404。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     element = _element_of(context, element_id)
     visible = _visible_element_ids(session, access, actor, context, table)
     if visible is not None and element_id not in visible:
@@ -932,7 +932,7 @@ def put_dictionary(
         session.add(entry)
     for name in DICTIONARY_FIELDS:
         setattr(entry, name, values.get(name))
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return element, entry
 
@@ -942,7 +942,7 @@ def get_scope_links(
 ) -> list[int]:
     """要素とスコープ項目の紐付け（project.view。項目の ID の順）。委託先に見えない要素は 404（API-WBS-026。設計書 1.1・CR-004）。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     _element_of(context, element_id)
     visible = _visible_element_ids(session, access, actor, context, table)
     if visible is not None and element_id not in visible:
@@ -978,7 +978,7 @@ def replace_scope_links(
     session.execute(delete(WbsScopeLink).where(WbsScopeLink.element_id == element_id))
     for item_id in scope_item_ids:
         session.add(WbsScopeLink(element_id=element_id, scope_item_id=item_id))
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return list(scope_item_ids)
 
@@ -1078,7 +1078,7 @@ def get_review(
     comments = list(session.scalars(
         select(WbsReviewComment).where(WbsReviewComment.review_id == review_id).order_by(WbsReviewComment.id)
     ))
-    visible = _visible_element_ids(session, access, actor, _load(session, project_id, activities), table)
+    visible = _visible_element_ids(session, access, actor, load_wbs_context(session, project_id, activities), table)
     if visible is not None:
         comments = [c for c in comments if c.element_id is not None and c.element_id in visible]
     session.commit()
@@ -1170,7 +1170,7 @@ def get_baseline(
         select(ScopeBaselineElement).where(ScopeBaselineElement.scope_baseline_id == baseline_id)
         .order_by(ScopeBaselineElement.id)
     ))
-    visible = _visible_element_ids(session, access, actor, _load(session, project_id, activities), table)
+    visible = _visible_element_ids(session, access, actor, load_wbs_context(session, project_id, activities), table)
     if visible is not None:
         elements = [e for e in elements if e.element_id in visible]
     session.commit()
@@ -1205,12 +1205,12 @@ def responsibility_matrix(
     行は WP を木の先行順（兄弟は表示順）、列はメンバー（加えた順）。委託先には見える WP の行だけを返す。
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     visible = _visible_element_ids(session, access, actor, context, table)
     member_ids = list(session.scalars(
         select(ProjectMember.user_id).where(ProjectMember.project_id == project_id).order_by(ProjectMember.id)
     ))
-    ordered = [element for element, _ in _preorder(context.elements)]
+    ordered = [element for element, _ in preorder_elements(context.elements)]
     try:
         matrix = build_responsibility_matrix(
             [
@@ -1276,9 +1276,9 @@ def trace_code(
       見える要素か自分の割当の活動に当たるものだけ。EAC は配下の見えない分を含むので返さない
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     visible = _visible_element_ids(session, access, actor, context, table)
-    coded = [_coded(e) for e in context.elements]
+    coded = [coded_element(e) for e in context.elements]
     history = [
         CodeHistoryEntry(id=row.id, element_id=row.element_id, old_code=row.old_code, new_code=row.new_code,
                          renumbered_at=row.renumbered_at)
@@ -1317,7 +1317,7 @@ def trace_code(
     session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return TraceView(
         trace=trace,
-        elements=[element for element, _ in _preorder(context.elements) if element.id in in_scope],
+        elements=[element for element, _ in preorder_elements(context.elements) if element.id in in_scope],
         restricted=visible is not None,
     )
 
@@ -1371,7 +1371,7 @@ def submit_wbs(
       レビューが開いたまま残らないように。OQ-18 (2)・A-18）
     """
     authorize_project(session, access, actor, project_id, "wbs.edit")
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     project = context.project
     readiness = readiness_of(session, context)
     try:
@@ -1455,7 +1455,7 @@ def decide(
     baseline: ScopeBaseline | None = None
     count = 0
     if approval.target_type == TARGET_WBS:
-        context = _load(session, approval.project_id, activities)
+        context = load_wbs_context(session, approval.project_id, activities)
         project = context.project
         latest = session.scalar(select(func.max(ScopeBaseline.version)).where(ScopeBaseline.project_id == project.id))
         action = WbsAction.APPROVE if ApprovalDecision(decision) is ApprovalDecision.APPROVE else WbsAction.SEND_BACK

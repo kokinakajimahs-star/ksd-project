@@ -67,10 +67,8 @@ from app.services.wbs import (
     ChangeRequestApprovals,
     CrossGroupReaders,
     MatrixView,
-    ValidationResult,
-)
-from app.models.wbs import (
     ScopeBaseline,
+    ValidationResult,
     WbsDictionaryEntry,
     WbsElement,
     WbsNumberingRule,

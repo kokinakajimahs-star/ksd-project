@@ -76,6 +76,7 @@ def create_change_request(
 
     権限は change.create。番号はプロジェクトの中の連番、状態は DRAFT。対象の WBS ID（旧 ID も可）が解決できなければ 422
     ``REFERENCE_NOT_FOUND``。変更内容（5.9）は今の計画へ当てて検査する（形の誤りは 400、参照・業務ルールの違反は 422。本計画は変えない）。
+    活動の希望開始日（``requested_start``）は次の稼働日へ寄せて保存し、寄せた値を返す（BR-04。API-SCH-002・003 と同じ）。
     """
     view = change_service.create_change_request(session, access, user, project_id, title=body.title,
                                                 reason=body.reason, target_codes=body.target_codes,
@@ -113,7 +114,7 @@ def update_change_request(
 ) -> ChangeRequestOut:
     """API-CHG-003 変更要求を直す（DRAFT のときだけ）。
 
-    権限は change.create。DRAFT でなければ 409 ``INVALID_STATE``。載せた項目だけを変え、検査は起票と同じ。
+    権限は change.create。DRAFT でなければ 409 ``INVALID_STATE``。載せた項目だけを変え、検査と希望開始日の寄せは起票と同じ。
     """
     changes = body.model_dump(exclude_unset=True)
     for name in ("title", "reason", "target_codes", "operations"):
