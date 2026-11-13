@@ -1,6 +1,6 @@
 WBS・工数・進捗管理システム（PMT）設計書
 
-作成日：2026年11月10日　改訂日：2026年11月12日　版：1.1　対象：リリース1（要求仕様書5章の64件）
+作成日：2026年11月10日　改訂日：2026年11月13日　版：1.2　対象：リリース1（要求仕様書5章の64件）
 
 # 0. 本書について
 
@@ -43,6 +43,7 @@ WBS・工数・進捗管理システム（PMT）設計書
 |---|---|---|---|
 | 1.0 | 2026-11-10 | 初版（設計ID 187 件） | — |
 | 1.1 | 2026-11-12 | 下の CR-001〜009 を反映した（設計ID 193 件。API を 6 件足した） | `docs/instruction-change-requests.md` の CR-001〜009（2026-11-12 に推奨案で承認） |
+| 1.2 | 2026-11-13 | 下の CR-010〜013 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-010〜013（2026-11-13 に推奨案で承認。未確定事項 OQ-08・09・10・42 を決めた） |
 
 1.1 の変更の内訳：
 
@@ -61,6 +62,15 @@ WBS・工数・進捗管理システム（PMT）設計書
 - CR-009 の提案は「P は丸める前の進捗率から求める」を 5.4 に足すとしていたが、P を定める節は 5.6 なので 5.6 に書いた。
 - CR-007 の提案の「消した活動の基準は桶に置く」は、どの軸でも基準の合計が版の合計に一致するよう（EFF-09）、消した WP にも同じ扱いを当て、子の無い WP 以外の要素の基準を 0 とした（「追加」から外す）。
 - CR-008 の 7.2 の追加に合わせ、UI-SCH-002 の関連要求に PRG-01 を足した（11 章の PRG-01 の行も同じ）。
+
+1.2 の変更の内訳：
+
+| CR | 変えた箇所 | 内容 |
+|---|---|---|
+| CR-010 | 4.1 DB-CMN-001・6.2 API-CMN-001・005・007・008・8 NFR-04・05・10・9.1・9.2 | project.create の許可の列 `can_create_project`、パスワードの方針とログインの試行の制限（`failed_login_count`・`locked_until`）、変更履歴のハッシュの伏せ方とログインの変更者、システム管理者の `me`、permission.manage を持つロールを残すこと |
+| CR-011 | 6.2 API-PRG-004・9.2 | 委託先に返す集計値・件数・依存の相手を見える範囲から求めること、見えないものは 404、算定項目の `approved` は progress.enter_all だけが変えること |
+| CR-012 | 4.2・5.10 | 全てのテーブルの内部キーを再利用しないこと、閉じたレビューの指摘も更新できること |
+| CR-013 | 7.4 | 会議レポートの計画の値は最新計画から、進捗の値は確定済みなら写しから求めること |
 
 # 1. 方式設計
 
@@ -264,7 +274,7 @@ erDiagram
 | DB-CHG-001 | `change_requests` | 変更要求 | id, project_id, number（プロジェクト内の連番）, title, reason, target_codes（JSON）, operations（JSON：5.9）, status, impact（JSON）, created_by, submitted_at, applied_by, applied_at | CHG-01, CHG-02, CHG-03, CHG-04 |
 | DB-CHG-002 | `corrective_actions` | 是正措置 | id, project_id, element_id, activity_id, status_report_id, cause, action, owner_user_id, due_date, status（NOT_STARTED/IN_PROGRESS/DONE）, effect | CHG-06 |
 | DB-CHG-003 | `audit_logs` | 変更履歴 | id, occurred_at, user_id, project_id, entity_type, entity_id, wbs_code, action（CREATE/UPDATE/DELETE）, before（JSON）, after（JSON） | CHG-09 |
-| DB-CMN-001 | `users` | ユーザー | id, login_id（一意）, display_name, email, password_hash, is_system_admin, is_active, organization | CMN-01, PRJ-06 |
+| DB-CMN-001 | `users` | ユーザー | id, login_id（一意）, display_name, email, password_hash, is_system_admin, can_create_project（既定 false）, is_active, organization, failed_login_count（既定 0）, locked_until | CMN-01, PRJ-06 |
 | DB-CMN-002 | `role_permissions` | ロールの権限 | id, project_id, role, permission（3つの組で一意） | CMN-01 |
 | DB-CMN-003 | `share_links` | 共有リンク | id, project_id, token_hash, scope（GANTT/REPORT）, expires_at, revoked_at, created_by, created_at | RPT-03 |
 | DB-CMN-004 | `auth_sessions` | 認証セッション | id, user_id, token_hash, expires_at, revoked_at, created_at | CMN-01 |
@@ -275,7 +285,7 @@ erDiagram
 
 - 全てのテーブルは整数の主キー `id` を持つ。外部キーは `<テーブルの単数形>_id` とし、DB の外部キー制約を張る。
 - ただし、ベースライン・スナップショットの写しの表（`scope_baseline_elements`・`schedule_baseline_items`・`progress_snapshot_items`）の、写した時点の要素・活動を指す列（`element_id`・`parent_element_id`・`activity_id`）は、写しの値として持ち、外部キー制約を張らない（基準の後に要素・活動を消しても版は変わらない。WBS-22）。写しの表から版・スナップショットの親（`scope_baseline_id`・`schedule_baseline_id`・`snapshot_id`）への外部キー制約は張る。
-- 要素・活動の内部キー（`wbs_elements.id`・`activities.id`）は再利用しない（SQLite は `AUTOINCREMENT`。写しの値が後から作った別の行を指さないため）。
+- 全てのテーブルの内部キー `id` は再利用しない（SQLite は `AUTOINCREMENT`。写しの値と、外部キーの無い `target_id`・`entity_id`（見積の記録・承認申請・変更履歴）が、後から作った別の行を指さないため）。
 - `projects.settings` の既定値：`{"progress_method_default": "DIRECT", "delay_tolerance_days": 0.5, "delay_extract_days": 2, "variance_rate": 0.10, "variance_hours": 8, "hundred_percent_tolerance": 0.0}`（要求仕様書 BR-03・09・11）。
 - `activities` の日程の列のうち、`requested_start`・`duration_days`・`is_milestone` が利用者の入力で、`start_date` 以降は RULE-SCH-002・003 の計算結果である。マイルストーンは `duration_days = 0`。
 - `progress_entries` は報告日ごとに持つ。最新の値は「確定していない最新の報告日、無ければ最新の確定済みの報告日」の行である。
@@ -483,7 +493,7 @@ stateDiagram-v2
 
 - 申請の前提：完了条件の欠け0件（RULE-WBS-005）・未対応の指摘0件・100%ルールの ERROR 0件。
 - 基準化の後もWBSは編集できる。編集すると `DRAFT` に戻り、基準（版）との差は画面で示す。改めて承認すると reason＝RE_APPROVAL の新しい版になる。
-- レビューを閉じる（API-WBS-024）：OPEN のレビューを CLOSED にし（`closed_at`）、WBS を `IN_REVIEW` から `DRAFT` に戻す。指摘はそのまま残る。
+- レビューを閉じる（API-WBS-024）：OPEN のレビューを CLOSED にし（`closed_at`）、WBS を `IN_REVIEW` から `DRAFT` に戻す。指摘はそのまま残る。閉じたレビューの指摘も API-WBS-017 で状態・対応を更新できる（申請の前提の未対応の指摘に数えるため）。新しい指摘を書く（API-WBS-016）のは開いているレビューだけ。
 
 変更要求（RULE-CHG-003）：
 
@@ -577,7 +587,7 @@ stateDiagram-v2
 | API-PRG-001 | `POST /api/v1/projects/{project_id}/status-reports` | 報告日を作る | status_report.manage | PRG-01 |
 | API-PRG-002 | `GET /api/v1/projects/{project_id}/status-reports` | 報告日の一覧 | project.view | PRG-01 |
 | API-PRG-003 | `PUT /api/v1/projects/{project_id}/status-reports/{report_id}/progress/{activity_id}` | 進捗率・実績日付・残工数・遅延理由・完了見込みを書く | progress.enter_own か progress.enter_all | PRG-02, PRG-03, EFF-06 |
-| API-PRG-004 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-items` | 進捗の算定項目を置き換える | progress.enter_own か progress.enter_all | PRG-05 |
+| API-PRG-004 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-items` | 進捗の算定項目を置き換える（`approved` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人が変えると 403） | progress.enter_own か progress.enter_all | PRG-05 |
 | API-PRG-005 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-method` | 活動の進捗率の算定方式を変える | schedule.edit | PRG-05 |
 | API-PRG-006 | `GET /api/v1/projects/{project_id}/status-reports/{report_id}/lightning-line` | 報告日のイナズマ線（報告日線・ポイント・判定） | project.view | PRG-08, PRG-09, PRG-10, PRG-11, PRG-12, PRG-13 |
 | API-PRG-007 | `POST /api/v1/projects/{project_id}/status-reports/{report_id}/finalize` | 報告日を確定してスナップショットを作る | status_report.manage | PRG-17 |
@@ -609,14 +619,14 @@ stateDiagram-v2
 | API-RPT-005 | `GET /api/v1/projects/{project_id}/share-links` | 共有リンクの一覧（トークンは返さない） | share.manage | RPT-03 |
 | API-INT-001 | `GET /api/v1/projects/{project_id}/export` | 出力する（`target`＝wbs/activities/time-entries、`format`＝csv/xlsx） | data.export | INT-01 |
 | API-INT-002 | `POST /api/v1/projects/{project_id}/import` | 取り込む（`target`・`format`・`dry_run`。検査が全て通ったときだけ書く） | data.import と対象の書く権限（`wbs`：wbs.edit、`activities`：schedule.edit。どちらも見積の列を変えるなら estimate.edit も。`time-entries`：data.import のみ） | INT-01 |
-| API-CMN-001 | `POST /api/v1/auth/login` | ログインしてトークンを得る | （なし） | CMN-01 |
+| API-CMN-001 | `POST /api/v1/auth/login` | ログインしてトークンを得る（連続して誤るとロックする。NFR-04） | （なし） | CMN-01 |
 | API-CMN-002 | `POST /api/v1/auth/logout` | トークンを失効させる | （ログイン） | CMN-01 |
 | API-CMN-003 | `GET /api/v1/users` | ユーザーの一覧 | user.admin か member.manage | CMN-01, PRJ-06 |
 | API-CMN-004 | `POST /api/v1/users` | ユーザーを作る | user.admin | CMN-01 |
-| API-CMN-005 | `PATCH /api/v1/users/{user_id}` | ユーザーを変える・無効にする | user.admin | CMN-01 |
+| API-CMN-005 | `PATCH /api/v1/users/{user_id}` | ユーザーを変える・無効にする（パスワードを設定し直すとロックを解く） | user.admin | CMN-01 |
 | API-CMN-006 | `GET /api/v1/projects/{project_id}/role-permissions` | プロジェクトのロール×権限の表 | project.view | CMN-01 |
-| API-CMN-007 | `PUT /api/v1/projects/{project_id}/role-permissions` | ロール×権限の表を置き換える | permission.manage | CMN-01 |
-| API-CMN-008 | `GET /api/v1/me` | 自分の情報とプロジェクトごとの権限 | （ログイン） | CMN-01 |
+| API-CMN-007 | `PUT /api/v1/projects/{project_id}/role-permissions` | ロール×権限の表を置き換える（permission.manage を持つロールが無くなる表は 422 `NO_PERMISSION_MANAGER`） | permission.manage | CMN-01 |
+| API-CMN-008 | `GET /api/v1/me` | 自分の情報とプロジェクトごとの権限（システム管理者は全てのプロジェクト） | （ログイン） | CMN-01 |
 
 件数：96。
 
@@ -706,7 +716,7 @@ flowchart LR
 
 ## 7.4 定例会議レポート（UI-RPT-001）
 
-A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週。この表示範囲を API-SCH-010 の `range_start`・`range_end` に渡し、範囲の非稼働日を灰色にする）、下段左：遅延一覧（ずれの大きい順・遅延理由・完了見込み）、下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要KPI（全体の進捗率＝見積で重み付けした進捗率の平均、遅れの件数、EACと基準の差、クリティカルパスの最小フロート、是正措置の期限超過の件数）。印刷用の CSS（`@page { size: A3 landscape; }`）を持つ。
+A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週。この表示範囲を API-SCH-010 の `range_start`・`range_end` に渡し、範囲の非稼働日を灰色にする）、下段左：遅延一覧（ずれの大きい順・遅延理由・完了見込み）、下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要KPI（全体の進捗率＝見積で重み付けした進捗率の平均、遅れの件数、EACと基準の差、クリティカルパスの最小フロート、是正措置の期限超過の件数）。計画の値（ガントのバー、マイルストーンの予定日・見込み日・ずれ）はレポートを開いた時点の最新計画から求め（D-05）、進捗の値（イナズマ線の頂点・判定・遅延一覧・KPI の進捗率と遅れの件数）は、確定済みの報告日なら確定時の写し、確定していなければ今の値から求める。レポートに「計画は表示した時点の最新計画」と書く。印刷用の CSS（`@page { size: A3 landscape; }`）を持つ。
 
 # 8. 非機能設計
 
@@ -715,12 +725,12 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | NFR-01 | 日程計算は O(活動＋依存)。性能の試験（活動 2,000・依存 5,000 の合成データ）を `backend/tests/perf/` に置き、1秒を上限に測る |
 | NFR-02 | 縦方向の仮想化、ガントのデータは1回の API（API-SCH-010）で取る |
 | NFR-03 | スナップショットは報告日ごとに活動の行を写すだけで、計算し直さない |
-| NFR-04 | 認証は Bearer トークン（SHA-256 のハッシュだけを保存）。パスワードは scrypt（n=2^14, r=8, p=1, 塩16バイト）。権限は全てサービス層で RULE-AUTH-001 を通す |
-| NFR-05 | 変更履歴は SQLAlchemy の `before_flush` のイベントで全てのモデルの追加・更新・削除を捕まえる（`audit_logs` 自身は除く）。更新・削除の口を作らない |
+| NFR-04 | 認証は Bearer トークン（SHA-256 のハッシュだけを保存）。パスワードは scrypt（n=2^14, r=8, p=1, 塩16バイト）。権限は全てサービス層で RULE-AUTH-001 を通す。パスワードは長さ 12 以上 1024 以下で、ログイン ID と同じ文字列は不可（文字種・有効期限は課さない）。API-CMN-004・005 と最初のシステム管理者で確かめる。ログインを連続 10 回誤ると 15 分ロックし（`users.failed_login_count`・`locked_until`）、ロック中も誤りと同じ 401 を返す（ログイン ID の有無とロックを明かさない）。成功で数えを 0 に戻し、user.admin がパスワードを設定し直すとロックを解く |
+| NFR-05 | 変更履歴は SQLAlchemy の `before_flush` のイベントで全てのモデルの追加・更新・削除を捕まえる（`audit_logs` 自身は除く）。更新・削除の口を作らない。ハッシュの列（`password_hash`・`token_hash`）は値を `***` に伏せて記録する（変わったことは残る）。`auth_sessions` も記録し、ログイン・ログアウトの変更者は本人、ログインの失敗で変わる行の変更者は空（認証されていない試行） |
 | NFR-06 | PostgreSQL の `pg_dump` を日次で取り、7世代を残す（運用の手順書は R1 の受入の前に書く） |
 | NFR-08 | ドメイン層は純粋。今日の日付・乱数を引数で受ける |
 | NFR-09 | 画面の文言は日本語。日付の表示は `YYYY-MM-DD` |
-| NFR-10 | 設定は環境変数（`PMT_DATABASE_URL`・`PMT_TOKEN_TTL_HOURS`・`PMT_INITIAL_ADMIN_LOGIN`・`PMT_INITIAL_ADMIN_PASSWORD`） |
+| NFR-10 | 設定は環境変数（`PMT_DATABASE_URL`・`PMT_TOKEN_TTL_HOURS`・`PMT_INITIAL_ADMIN_LOGIN`・`PMT_INITIAL_ADMIN_PASSWORD`・`PMT_PASSWORD_MIN_LENGTH`（既定 12）・`PMT_LOGIN_MAX_FAILURES`（既定 10）・`PMT_LOGIN_LOCK_MINUTES`（既定 15）） |
 
 # 9. 権限設計
 
@@ -728,7 +738,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 
 | 権限 | 内容 |
 |---|---|
-| project.create | プロジェクトを作る（システムの権限：システム管理者と、システム管理者が許したユーザー） |
+| project.create | プロジェクトを作る（システムの権限：システム管理者と、システム管理者が許したユーザー＝`users.can_create_project`。API-CMN-004・005 で設定する） |
 | project.view | プロジェクトの計画・進捗を読む |
 | project.manage | 基本情報・スコープ・カレンダーを変える |
 | member.manage | メンバーとロールを変える |
@@ -786,7 +796,9 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | data.import | ○ | ○ | | | | | |
 | data.export | ○ | ○ | | ○ | | | ○ |
 
-- 委託先（CONTRACTOR）の project.view は、自分の割当の活動とその WBS の経路だけに絞る（RULE-AUTH-001）。
+- 委託先（CONTRACTOR）の project.view は、自分の割当の活動とその WBS の経路だけに絞る（RULE-AUTH-001）。委託先に返す集計値・件数は見える要素・活動だけから求め、依存の相手の ID は見える活動だけを返す。委託先に見えない要素・活動は、有無を明かさないため無いものと同じ 404 にする（自分の割当かの 403 より先に判定しない）。
+- システム管理者は全てのプロジェクトで全ての権限を持ち、API-CMN-008 は全てのプロジェクトを返す。
+- ロール×権限の表は、permission.manage を持つロールを少なくとも 1 つ残す（API-CMN-007）。
 - 自分の申請・提出したものは、承認の権限を持っていても判断できない（5.10）。
 
 # 10. 構成管理と開発の進め方
@@ -941,6 +953,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | D-07 | 基準化の後も WBS を直接編集でき、編集で DRAFT に戻る | 小さな直しのたびに変更要求を通す負担を避ける。正式の変更は変更要求（CHG-04）で版を作る | 2026-11-10 |
 | D-08 | ガントの描画は自前の SVG | イナズマ線を描ける部品は商用のみ | 2026-11-10 |
 | D-09 | 実装の中で見つかった設計書の欠け・食い違い（CR-001〜009）を、本書を直す側で解き、版 1.1 にした（0.4） | 記載どおりでは成り立たない・両立しない・権限を迂回できる箇所で、実装の側では直せないため（`docs/instruction-change-requests.md`） | 2026-11-12 |
+| D-10 | 未確定事項 OQ-08・09・10・42 のうち本書の変更が要るもの（CR-010〜013）を推奨案で決め、版 1.2 にした（0.4） | 保存先が無い・セキュリティの方針が無い・見える範囲と出どころが両立しない箇所で、実装の側では決められないため | 2026-11-13 |
 
 未確定事項は要求仕様書11章を正とする（写さない）。
 
