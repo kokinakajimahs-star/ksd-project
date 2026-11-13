@@ -425,6 +425,7 @@ def test_shared_view_shows_scope_without_login(world: World, client: TestClient)
 
 def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world: World, client: TestClient,
                                                            db_session: Session) -> None:
+    """失効した・期限が切れた・無いリンクは、どれも同じ 404（状態・コード・メッセージ・details。理由を返さない）。"""
     link = world.share("GANTT")
     token, link_id = link["token"], link["id"]
     url = world.url(f"/share-links/{link_id}")
@@ -444,10 +445,10 @@ def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world:
     again = client.delete(url, headers=world.h["pm"])
     assert again.status_code == 409 and error_code(again) == "INVALID_STATE"
     gone = client.get(f"/api/v1/shared/{token}")
-    assert gone.status_code == 404 and gone.json()["error"]["details"] == [{"reason": "REVOKED"}]
+    assert gone.status_code == 404 and error_code(gone) == "NOT_FOUND"
 
     unknown = client.get(f"/api/v1/shared/{generate_token()}")
-    assert unknown.status_code == 404 and unknown.json()["error"]["details"] == [{"reason": "NOT_FOUND"}]
+    assert unknown.status_code == 404 and error_code(unknown) == "NOT_FOUND"
 
     # 有効期限の時刻ちょうどで見られなくなる（RULE-AUTH-002）
     expiring = world.share("REPORT", expires_at="2026-12-06T09:00:00Z")["token"]
@@ -455,7 +456,13 @@ def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world:
     assert client.get(f"/api/v1/shared/{expiring}").status_code == 200
     app.dependency_overrides[get_now] = lambda: datetime(2026, 12, 6, 9, 0, tzinfo=UTC)
     expired = client.get(f"/api/v1/shared/{expiring}")
-    assert expired.status_code == 404 and expired.json()["error"]["details"] == [{"reason": "EXPIRED"}]
+    assert expired.status_code == 404 and error_code(expired) == "NOT_FOUND"
+
+    # 3 つの応答は同じ（リンクがあるか・失効か・期限切れかを外から見分けられない）
+    bodies = [(r.status_code, r.json()) for r in (gone, unknown, expired)]
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0] == (404, {"error": {"code": "NOT_FOUND", "message": "共有リンクが見つからないか、失効・期限切れです",
+                                         "details": []}})
 
 
 def test_list_share_links_without_tokens(world: World, client: TestClient, db_session: Session) -> None:

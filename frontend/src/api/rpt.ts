@@ -121,9 +121,6 @@ export interface SharedView {
   meeting_report: MeetingReport | null;
 }
 
-/** 共有リンクを閲覧できない理由（API-RPT-004 の 404 の details の reason） */
-export type ShareLinkFailure = "NOT_FOUND" | "REVOKED" | "EXPIRED";
-
 export function getMeetingReport(projectId: number, reportId: number): Promise<MeetingReport> {
   return apiFetch<MeetingReport>(`/projects/${projectId}/status-reports/${reportId}/meeting-report`);
 }

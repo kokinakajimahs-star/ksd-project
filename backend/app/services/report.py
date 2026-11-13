@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.domain.authz import ShareLinkRecord, ShareLinkStatus, ViewLevel, hash_token, project_view_level, verify_share_link
+from app.domain.authz import ShareLinkRecord, ViewLevel, hash_token, project_view_level, verify_share_link
 from app.domain.effort import EffortValues
 from app.domain.gantt import GanttChart
 from app.domain.lightning import Judgement
@@ -374,8 +374,9 @@ class SharedView:
 def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: datetime) -> SharedView:
     """共有リンクのトークンで、リンクの範囲を読むだけで見せる（認証なし。RPT-03。RULE-AUTH-002）。
 
-    トークンが無い・合わない・失効した・期限が切れたリンクは、どれも 404（``details`` の ``reason`` に
-    ``NOT_FOUND``・``REVOKED``・``EXPIRED``）。``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
+    トークンが無い・合わない・失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が
+    全て同じ。どれに当たったかは返さない。リンクの有無・失効・期限を外から見分けさせない）。
+    ``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
     ``REPORT`` は 4.2 の最新の報告日の会議レポート（API-RPT-001 と同じ。報告日が無ければ空）。
     """
     row = session.scalar(select(ShareLink).where(ShareLink.token_hash == hash_token(token))) if token else None
@@ -385,8 +386,7 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
                                  expires_at=row.expires_at, revoked_at=row.revoked_at)
     verdict = verify_share_link(token, record, now=now)
     if not verdict.valid or row is None:
-        reason = verdict.status.value if verdict.status is not ShareLinkStatus.VALID else ShareLinkStatus.NOT_FOUND.value
-        raise AppError(404, "NOT_FOUND", "共有リンクが見つからないか、失効・期限切れです", details=[{"reason": reason}])
+        raise AppError(404, "NOT_FOUND", "共有リンクが見つからないか、失効・期限切れです")
     plan = load_plan(session, row.project_id)
     if verdict.can_view(SCOPE_GANTT):
         progress = links.latest_progress(session, row.project_id)

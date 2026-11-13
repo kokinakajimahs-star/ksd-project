@@ -190,7 +190,7 @@ def get_shared(
 
     認証を要らない唯一の API（6.1）。トークンを RULE-AUTH-002 で検証し、リンクの範囲だけを見せる：GANTT は最新の進捗・
     最新の基準のガント、REPORT は 4.2 の最新の報告日の会議レポート（報告日が無ければ null）。トークンが無い・合わない・
-    失効した・期限が切れたリンクは 404（``details`` の ``reason``）。
+    失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が同じ。理由は返さない）。
     """
     view = report_service.shared_view(session, links, token, now=now)
     project = view.project
