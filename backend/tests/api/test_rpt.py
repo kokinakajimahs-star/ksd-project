@@ -423,6 +423,26 @@ def test_shared_view_shows_scope_without_login(world: World, client: TestClient)
     assert client.post(f"/api/v1/shared/{gantt_token}").status_code == 405
 
 
+def test_shared_meeting_report_409_does_not_reveal_activity_ids(world: World, client: TestClient,
+                                                               db_session: Session) -> None:
+    """API-RPT-004：日程が計算されていない活動があると、共有リンクの会議レポートも API-RPT-001 と同じ 409 INVALID_STATE（文言も
+    同じ）だが、認証の無い閲覧者には ``details`` に活動の ID を載せない。ログインした人の API-RPT-001 は今どおり ID を載せる。"""
+    report = world.delayed_report()
+    token = world.share("REPORT")["token"]
+    activity = db_session.get(Activity, world.b)
+    assert activity is not None
+    activity.start_date = None
+    db_session.commit()
+
+    shared = client.get(f"/api/v1/shared/{token}")  # 認証なし
+    logged_in = client.get(world.url(f"/status-reports/{report}/meeting-report"), headers=world.h["viewer"])
+    assert (shared.status_code, error_code(shared)) == (409, "INVALID_STATE")
+    assert (logged_in.status_code, error_code(logged_in)) == (409, "INVALID_STATE")
+    assert shared.json()["error"]["message"] == logged_in.json()["error"]["message"]
+    assert shared.json()["error"]["details"] == []
+    assert logged_in.json()["error"]["details"] == [{"activity_ids": [world.b]}]
+
+
 def test_revoked_expired_and_unknown_links_cannot_be_viewed(app: FastAPI, world: World, client: TestClient,
                                                            db_session: Session) -> None:
     """失効した・期限が切れた・無いリンクは、どれも同じ 404（状態・コード・メッセージ・details。理由を返さない）。"""

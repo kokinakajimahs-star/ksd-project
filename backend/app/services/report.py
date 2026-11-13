@@ -164,12 +164,15 @@ def _filter_snapshot(snapshot: Snapshot, visible: frozenset[int]) -> Snapshot:
                     plan_basis=snapshot.plan_basis, items=shown)
 
 
-def _require_schedule(activities: Sequence[Activity]) -> None:
-    """全ての活動に日程の計算結果（開始日・終了日）があること。無ければ 409（API-SCH-008 で計算し直す）。"""
+def _require_schedule(activities: Sequence[Activity], *, with_ids: bool = True) -> None:
+    """全ての活動に日程の計算結果（開始日・終了日）があること。無ければ 409（API-SCH-008 で計算し直す）。
+
+    ``details`` に活動の ID を載せる。認証の無い共有リンクの閲覧（``with_ids`` が偽）は載せない（文言は同じ）。
+    """
     missing = [a.id for a in activities if a.start_date is None or a.finish_date is None]
     if missing:
         raise _invalid_state("日程が計算されていない活動があります（日程を計算し直してください）",
-                             details=[{"activity_ids": missing}])
+                             details=[{"activity_ids": missing}] if with_ids else [])
 
 
 def _effort_of(session: Session, project_id: int, report: StatusReport) -> EffortValues:
@@ -187,8 +190,12 @@ def _corrective_actions(session: Session, project_id: int) -> list[CorrectiveAct
 
 def _build(
     session: Session, links: ScheduleLinks, plan: Plan, report: StatusReport, *, visible: frozenset[int] | None,
+    shared: bool = False,
 ) -> MeetingReportView:
-    """報告日の会議レポートを組み立てる（RULE-RPT-001。権限は呼び手が確かめる）。"""
+    """報告日の会議レポートを組み立てる（RULE-RPT-001。権限は呼び手が確かめる）。
+
+    ``shared`` は認証の無い共有リンクの閲覧（API-RPT-004）：日程が計算されていない活動の 409 の ``details`` に ID を載せない。
+    """
     project = plan.project
     entries: dict[int, ProgressEntry] = entries_of_report(session, report.id)
     ordered = [a for a in plan.ordered_activities() if visible is None or a.id in visible]
@@ -197,7 +204,7 @@ def _build(
     activities: list[SnapshotActivity] = []
     gantt_progress: dict[int, ActivityProgress] = {}
     # 計画の値は確定済みでも最新計画から求めるので、どちらの報告日も最新計画の日程が要る（7.4。設計書 1.2・CR-013）
-    _require_schedule(ordered)
+    _require_schedule(ordered, with_ids=not shared)
     if report.status == StatusReportStatus.FINALIZED.value:
         source = SOURCE_SNAPSHOT
         snapshot = _snapshot_of(session, report)
@@ -377,7 +384,8 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
     トークンが無い・合わない・失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が
     全て同じ。どれに当たったかは返さない。リンクの有無・失効・期限を外から見分けさせない）。
     ``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
-    ``REPORT`` は 4.2 の最新の報告日の会議レポート（API-RPT-001 と同じ。報告日が無ければ空）。
+    ``REPORT`` は 4.2 の最新の報告日の会議レポート（API-RPT-001 と同じ。報告日が無ければ空）。日程が計算されていない活動が
+    あれば API-RPT-001 と同じ 409 だが、``details`` は空（認証の無い閲覧者に活動の ID を見せない）。
     """
     row = session.scalar(select(ShareLink).where(ShareLink.token_hash == hash_token(token))) if token else None
     record = None
@@ -395,7 +403,7 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
                           gantt_baseline=baseline, meeting_report=None)
     if verdict.can_view(SCOPE_REPORT):
         report = _latest_report(session, row.project_id)
-        view = None if report is None else _build(session, links, plan, report, visible=None)
+        view = None if report is None else _build(session, links, plan, report, visible=None, shared=True)
         return SharedView(link=row, project=plan.project, gantt=None, gantt_report_date=None, gantt_baseline=None,
                           meeting_report=view)
     raise RuntimeError(f"共有リンク {row.id} の範囲 {row.scope!r} を見せる口が無い")  # 4.1 の CHECK 制約で起きない
