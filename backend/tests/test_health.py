@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
 from app.errors import AppError
@@ -147,3 +150,48 @@ def test_unhandled_exception_returns_error_shape_without_internals(app: FastAPI)
         "error": {"code": "INTERNAL_ERROR", "message": "サーバの内部でエラーが起きました", "details": []}
     }
     assert "内部の秘密の情報" not in response.text
+
+
+@pytest.mark.parametrize("kind", ["unique", "primary_key"])
+def test_unique_violation_is_409_conflict(app: FastAPI, integrity_error: Callable[[str], IntegrityError],
+                                          kind: str) -> None:
+    """書き込みが一意制約（主キーを含む）に当たったら、500 でなく 409 CONFLICT（6.1 の形。同時の操作が同じ行を先に作った。
+    A-49 の 3）。SQL・制約の名前は応答に出さない。"""
+    error = integrity_error(kind)
+
+    @app.post("/api/v1/_probe/unique")
+    def probe() -> None:
+        raise error
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/v1/_probe/unique")
+    assert response.status_code == 409
+    assert response.json() == {"error": {
+        "code": "CONFLICT",
+        "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+        "details": [],
+    }}
+    assert "INSERT" not in response.text and "UNIQUE" not in response.text.upper()
+
+
+@pytest.mark.parametrize("kind", ["check", "foreign_key", "not_null"])
+def test_other_integrity_errors_stay_500(app: FastAPI, integrity_error: Callable[[str], IntegrityError],
+                                         kind: str) -> None:
+    """CHECK・外部キー・NOT NULL の違反は 409 にしない（実装の誤り。想定外の例外として 500 INTERNAL_ERROR。中身は出さない）。"""
+    error = integrity_error(kind)
+
+    @app.post("/api/v1/_probe/integrity")
+    def probe() -> None:
+        raise error
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/v1/_probe/integrity")
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {"code": "INTERNAL_ERROR", "message": "サーバの内部でエラーが起きました", "details": []}
+    }
+    assert "INSERT" not in response.text
+
+    # 例外は握りつぶさずに投げ直す（サーバのログ・試験の TestClient に届く）
+    with TestClient(app) as raising, pytest.raises(type(error)):
+        raising.post("/api/v1/_probe/integrity")

@@ -8,10 +8,10 @@ SQLite の一時ファイルの DB と TestClient で、正常系と 401・403�
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -23,10 +23,13 @@ from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, User
 from app.models.eff import TimeEntry
-from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem
+from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem, StatusReport
 from app.services.clock import get_now
 from app.services.progress import ComputedEtcEffort, EffortTablesAbsent, TimeEntriesEffort
 from app.services.project_access import ProjectMembersTable
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -770,6 +773,112 @@ def test_delays_extract_and_impact(app: FastAPI, world: World, client: TestClien
     assert limited["delays"][0]["project_finish"] is None and limited["combined_project_finish"] is None
     assert client.get(world.url(f"/status-reports/{MISSING}/delays"), headers=world.h["viewer"]).status_code == 404
     assert client.get(world.url(f"/status-reports/{report}/delays"), headers=world.h["outsider"]).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 同時実行（OQ-42 (3)。A-49 の 3）：入力・確定は報告日の行をロックして読み直した状態で判定する。
+# 一意制約の違反は 409 CONFLICT（conftest の race）
+# ---------------------------------------------------------------------------
+
+CONFLICT_ERROR = {"code": "CONFLICT",
+                  "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+                  "details": []}
+
+
+def _finalize_by_other(world: World, report_id: int) -> Callable[[Session], None]:
+    """先に終わった確定（別のセッション）：報告日を FINALIZED にする。"""
+    def finalize(other: Session) -> None:
+        report = other.get(StatusReport, report_id)
+        assert report is not None
+        report.status = "FINALIZED"
+        report.finalized_by = world.users["pm"].id
+        report.finalized_at = NOW
+    return finalize
+
+
+def test_progress_after_concurrent_finalize_is_409_and_writes_nothing(world: World, db_session: Session,
+                                                                      race: RaceProbe) -> None:
+    """API-PRG-003：入力と確定の同時実行（OQ-42 (3)）。報告日の行をロックして読み直した状態で判定するので、先の確定がコミットした
+    後の入力は 409 INVALID_STATE で、確定済みの報告日に入力を書かない（BR-13。A-49 の 3）。"""
+    a = world.add("A", duration_days=4)
+    report = world.report("2026-12-03")["id"]
+    race.before_lock("status_reports", _finalize_by_other(world, report))
+    race.locked.clear()
+
+    body = world.progress(report, a, expect=409, percent_complete=30)
+    assert body["error"]["code"] == "INVALID_STATE"
+    assert body["error"]["details"] == [{"status_report_id": report, "status": "FINALIZED"}]
+    assert race.locked == ["status_reports"]
+    assert db_session.scalars(select(ProgressEntry).where(ProgressEntry.status_report_id == report)).all() == []
+
+
+def test_finalize_after_concurrent_finalize_is_409_and_makes_no_second_snapshot(world: World, db_session: Session,
+                                                                                race: RaceProbe) -> None:
+    """API-PRG-007：二重の確定（OQ-42 (3)）。報告日の行をロックして読み直した状態で判定するので、先の確定がコミットした後の確定は
+    409 INVALID_STATE で、スナップショットを作らない（確定は二度しない。A-49 の 3）。"""
+    world.all_days_working()
+    a = world.add("A", requested_start="2026-12-01", duration_days=10)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, percent_complete=20, actual_start="2026-12-01")
+    race.before_lock("status_reports", _finalize_by_other(world, report))
+    race.locked.clear()
+
+    body = world.finalize(report, expect=409)
+    assert body["error"]["code"] == "INVALID_STATE"
+    assert body["error"]["details"] == [{"status_report_id": report, "status": "FINALIZED"}]
+    assert race.locked == ["status_reports"]
+    assert db_session.scalars(select(ProgressSnapshot).where(ProgressSnapshot.status_report_id == report)).all() == []
+
+    # 競わない確定も同じく報告日の行をロックしてから判定する
+    other = world.report("2026-12-04")["id"]
+    race.locked.clear()
+    assert world.finalize(other)["report"]["status"] == "FINALIZED"
+    assert race.locked == ["status_reports"]
+
+
+def test_items_and_method_lock_open_reports_before_refreshing_entries(world: World, client: TestClient,
+                                                                      race: RaceProbe) -> None:
+    """API-PRG-004・005：算定項目・算定方式を変えたときの求め直しは、入力のある OPEN の報告日の行をロックしてから入力を変える
+    （``FOR UPDATE OF status_reports``。確定と競わせない。A-49 の 3）。
+
+    この経路は活動・項目を書いた後にロックを取るので、ロックの直前に別のセッションで確定をコミットする再現は SQLite ではできない
+    （書き込みは 1 つずつ）。ここでは PostgreSQL の方言で ``FOR UPDATE OF status_reports`` を出すことだけを確かめる。"""
+    a = world.add("A", duration_days=4)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, actual_start="2026-12-01")
+
+    race.locked.clear()
+    method = client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                        headers=world.h["pm"])
+    assert method.status_code == 200, method.text
+    assert race.locked == ["status_reports"]
+
+    race.locked.clear()
+    items = client.put(world.url(f"/activities/{a}/progress-items"),
+                       json={"items": [{"item_type": "CHECK", "title": "単体試験", "done": True}]}, headers=world.h["pm"])
+    assert items.status_code == 200, items.text
+    assert items.json()["percent_complete"] == 100.0
+    assert race.locked == ["status_reports"]
+
+
+def test_status_report_created_at_once_is_409_conflict(world: World, client: TestClient, db_session: Session,
+                                                       race: RaceProbe) -> None:
+    """API-PRG-001：同じ日付の報告日の同時の作成。先の作成がコミットした後の INSERT が一意制約（project_id＋report_date）に
+    当たったら、500 でなく 409 CONFLICT（6.1）で、報告日は 1 つだけ（A-49 の 3）。"""
+    pm = world.users["pm"].id
+
+    def create(other: Session) -> None:
+        other.add(StatusReport(project_id=world.pid, report_date=date(2026, 12, 3), status="OPEN", created_by=pm,
+                               created_at=NOW))
+
+    race.before_insert(StatusReport, create)
+    response = client.post(world.url("/status-reports"), json={"report_date": "2026-12-03"}, headers=world.h["pm"])
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == CONFLICT_ERROR
+    reports = db_session.scalars(select(StatusReport).where(StatusReport.project_id == world.pid)).all()
+    assert [(r.report_date, r.status) for r in reports] == [(date(2026, 12, 3), "OPEN")]
+    # 競わない 2 度目の作成は、これまでどおり事前の確認で 409 DUPLICATE_STATUS_REPORT
+    assert world.report("2026-12-03", expect=409)["error"]["code"] == "DUPLICATE_STATUS_REPORT"
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -25,6 +25,9 @@ from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import ApprovalRequest, ScopeBaseline, ScopeBaselineElement, WbsElement, WbsNumberingRule
 from app.services.change import ChangeRequestStateMachine
 from app.services.clock import get_now
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -751,3 +754,120 @@ def test_audit_logs_record_writes_and_search(world: World) -> None:
     count = world.count(AuditLog)
     world.client.get(url, headers=world.h["pm"])
     assert world.count(AuditLog) == count
+
+
+
+# ---------------------------------------------------------------------------
+# 同時実行（A-49 の 3。OQ-42 (3)・(24)）
+# SQLite は FOR UPDATE を無視するので、ロックの直前に別のセッションで状態を変えてコミットし（先に終わった同時の操作）、
+# 判定がロックの後に読み直した値で行われることを見る（conftest の race）
+# ---------------------------------------------------------------------------
+
+
+def _approve_by_other(world: World, change_request_id: int, approval_id: int) -> Any:
+    """先に終わった承認（別のセッション）：承認申請と変更要求を APPROVED にする。"""
+    def approve(other: Session) -> None:
+        approval = other.get(ApprovalRequest, approval_id)
+        change_request = other.get(ChangeRequest, change_request_id)
+        assert approval is not None and change_request is not None
+        approval.status, approval.decided_by, approval.decided_at = "APPROVED", world.uid("approver"), NOW
+        change_request.status = "APPROVED"
+    return approve
+
+
+def test_withdraw_after_concurrent_approval_is_409_and_keeps_decision(world: World, race: RaceProbe) -> None:
+    """API-CHG-011：取り下げと承認の判断の同時実行（OQ-42 (24)）。変更要求の行をロックして読み直した状態で判定するので、
+    先の承認がコミットした後の取り下げは 409 INVALID_STATE で、承認済みの申請を消さない（A-49 の 3）。"""
+    created = world.create()
+    approval_id = world.submit(created["id"])["approval_request_id"]
+    race.before_lock("change_requests", _approve_by_other(world, created["id"], approval_id))
+    race.locked.clear()
+
+    response = world.client.post(world.url(f"/change-requests/{created['id']}/withdraw"), headers=world.h["planner"])
+    assert response.status_code == 409 and error_code(response) == "INVALID_STATE"
+    assert race.locked == ["change_requests"]
+    world.session.expire_all()
+    approval = world.session.get(ApprovalRequest, approval_id)
+    change_request = world.session.get(ChangeRequest, created["id"])
+    assert approval is not None and approval.status == "APPROVED"
+    assert change_request is not None and change_request.status == "APPROVED"
+
+
+def test_decision_after_concurrent_withdraw_is_404_and_leaves_draft(world: World, race: RaceProbe) -> None:
+    """API-WBS-019（変更要求の申請）：判断と取り下げの同時実行（OQ-42 (24)）。変更要求の行を先に、承認申請の行を後にロックし
+    （取り下げと同じ順）、読み直すと申請は取り下げで消えているので 404。変更要求は DRAFT のまま（A-49 の 3）。"""
+    created = world.create()
+    approval_id = world.submit(created["id"])["approval_request_id"]
+
+    def withdraw_by_other(other: Session) -> None:
+        approval = other.get(ApprovalRequest, approval_id)
+        change_request = other.get(ChangeRequest, created["id"])
+        assert approval is not None and change_request is not None
+        other.delete(approval)
+        change_request.status, change_request.submitted_at = "DRAFT", None
+
+    race.before_lock("change_requests", withdraw_by_other)
+    race.locked.clear()
+    world.decide(approval_id, "APPROVE", expect=404)
+    assert race.locked == ["change_requests", "approval_requests"]
+    world.session.expire_all()
+    change_request = world.session.get(ChangeRequest, created["id"])
+    assert change_request is not None and change_request.status == "DRAFT"
+
+    # 同時の操作が無ければ、判断も同じ順（変更要求 → 承認申請）でロックする
+    resubmitted = world.submit(created["id"])
+    race.locked.clear()
+    world.decide(resubmitted["approval_request_id"], "APPROVE")
+    assert race.locked[:2] == ["change_requests", "approval_requests"]
+
+
+def test_update_submit_and_apply_judge_status_after_locking_change_request(world: World, race: RaceProbe) -> None:
+    """API-CHG-003・005・006：修正・提出・反映は変更要求の行をロックして読み直した状態で判定する。先の提出・反映がコミットした後は
+    409 INVALID_STATE で、二重の承認申請・二重の再基準化を作らない（A-49 の 3）。"""
+    created = world.create()
+
+    def submit_by_other(other: Session) -> None:
+        change_request = other.get(ChangeRequest, created["id"])
+        assert change_request is not None
+        change_request.status, change_request.submitted_at = "SUBMITTED", NOW
+        other.add(ApprovalRequest(project_id=world.pid, target_type="CHANGE_REQUEST", target_id=created["id"],
+                                  requested_by=world.uid("pm"), requested_at=NOW))
+
+    race.before_lock("change_requests", submit_by_other)
+    race.locked.clear()
+    world.submit(created["id"], expect=409)
+    assert race.locked == ["change_requests"]
+    assert world.count(ApprovalRequest) == 1
+
+    other_draft = world.create()
+
+    def submit_other_draft(other: Session) -> None:
+        change_request = other.get(ChangeRequest, other_draft["id"])
+        assert change_request is not None
+        change_request.status, change_request.submitted_at = "SUBMITTED", NOW
+
+    race.before_lock("change_requests", submit_other_draft)
+    race.locked.clear()
+    patched = world.client.patch(world.url(f"/change-requests/{other_draft['id']}"), json={"title": "直した"},
+                                 headers=world.h["planner"])
+    assert patched.status_code == 409 and error_code(patched) == "INVALID_STATE"
+    assert race.locked == ["change_requests"]
+    world.session.expire_all()
+    unchanged = world.session.get(ChangeRequest, other_draft["id"])
+    assert unchanged is not None and unchanged.title == "C を足す"
+
+    world.baseline_wbs()
+    approved = world.approved()
+    baselines = (world.count(ScopeBaseline), world.count(ScheduleBaseline))
+
+    def apply_by_other(other: Session) -> None:
+        change_request = other.get(ChangeRequest, approved["id"])
+        assert change_request is not None
+        change_request.status, change_request.applied_by, change_request.applied_at = "APPLIED", world.uid("pm"), NOW
+
+    race.before_lock("change_requests", apply_by_other)
+    race.locked.clear()
+    response = world.apply(approved["id"], expect=409)
+    assert response["error"]["code"] == "INVALID_STATE"
+    assert race.locked == ["change_requests"]
+    assert (world.count(ScopeBaseline), world.count(ScheduleBaseline)) == baselines

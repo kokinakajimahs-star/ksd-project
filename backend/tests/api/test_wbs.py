@@ -10,12 +10,12 @@ import importlib.util
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.estimate import ActivityEstimate
@@ -40,6 +40,7 @@ from app.models.wbs import (
     WbsCodeHistory,
     WbsDictionaryEntry,
     WbsElement,
+    WbsNumberingRule,
     WbsReview,
     WbsReviewComment,
     WbsScopeLink,
@@ -53,6 +54,9 @@ from app.services.wbs import (
     CrossGroupReaders,
     eac_not_available,
 )
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -1286,3 +1290,187 @@ def test_change_request_approvals_apply_transition_once_change_api_exists(app: F
         ), "API-CHG-005 ができたので、app.main.create_app の app.state.change_request_approvals を RULE-CHG-003 を通す実装へ差し替える"
     else:
         assert isinstance(app.state.change_request_approvals, ChangeRequestTransitionNotWired)
+
+
+# ---------------------------------------------------------------------------
+# 同時実行と採番規則の行（A-49 の 3。OQ-42 (3)・(24)）
+# SQLite は FOR UPDATE を無視するので、ロックの直前に別のセッションで状態を変えてコミットし（先に終わった同時の操作）、
+# 判定がロックの後に読み直した値で行われること・一意制約の違反が 409 CONFLICT になることを見る（conftest の race）
+# ---------------------------------------------------------------------------
+
+
+def _row_counts(session: Session) -> dict[str, int]:
+    session.expire_all()
+    return {table.name: int(session.scalar(select(func.count()).select_from(table)) or 0)
+            for table in Base.metadata.sorted_tables}
+
+
+def _project_without_numbering_rule(world: World, db_session: Session) -> tuple[Project, WbsElement]:
+    """採番規則の行が無いプロジェクト（API-PRJ-001 を通らずに作られた）。第 1 階層に順番 1 と 3 の要素がある（2 は消した）。"""
+    raw = Project(code="RAW", name="行だけ", start_date=NOW.date(), owner_user_id=world.admin.id)
+    db_session.add(raw)
+    db_session.flush()
+    first = WbsElement(project_id=raw.id, kind="DELIVERABLE", name="一", wbs_code="1.0", sibling_seq=1, sort_order=1)
+    db_session.add_all([first, WbsElement(project_id=raw.id, kind="DELIVERABLE", name="三", wbs_code="3.0",
+                                          sibling_seq=3, sort_order=2)])
+    db_session.commit()
+    assert db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)) is None
+    return raw, first
+
+
+def test_reads_do_not_create_numbering_rule_row_and_first_write_does(world: World, db_session: Session) -> None:
+    """API-WBS-001・008・009・011・012・015・021・023・026（読むだけ）は採番規則の行が無くても行を作らない（DB のどの表の行も増えない）。
+    4.1 の既定の値と第 1 階層の順番の最大で読み、最初の書く操作（API-WBS-002）がその値で行を作る（A-49 の 3）。"""
+    raw, first = _project_without_numbering_rule(world, db_session)
+    review = WbsReview(project_id=raw.id, requested_by=world.admin.id, requested_at=NOW, reviewer_ids=[])
+    db_session.add(review)
+    db_session.commit()
+    before = _row_counts(db_session)
+
+    base = f"/api/v1/projects/{raw.id}"
+    for path in ("/wbs", "/wbs/code-history", f"/wbs/elements/{first.id}/dictionary", "/wbs/responsibility-matrix",
+                 "/wbs/validation", f"/wbs/reviews/{review.id}", "/scope-baselines", "/wbs-codes/1.0/trace",
+                 f"/wbs/elements/{first.id}/scope-links"):
+        response = world.client.get(base + path, headers=world.admin_h)
+        assert response.status_code == 200, (path, response.text)
+    tree = world.client.get(base + "/wbs", headers=world.admin_h).json()
+    assert tree["numbering_rule"] == {"separator": ".", "min_digits": 1, "prefix": "", "pad_first_level": True}
+    assert _row_counts(db_session) == before
+
+    added = world.client.post(base + "/wbs/elements", json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"},
+                              headers=world.admin_h)
+    assert added.status_code == 201, added.text
+    assert added.json()["wbs_code"] == "4.0"  # 消した 2 も、今ある 1・3 も使わない（top_last_child_seq は 3 から）
+    rule = db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id))
+    assert rule is not None
+    assert (rule.separator, rule.min_digits, rule.prefix, rule.pad_first_level, rule.top_last_child_seq) == (
+        ".", 1, "", True, 4)
+
+
+def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_session: Session,
+                                                            race: RaceProbe) -> None:
+    """API-WBS-002：採番規則の行が無いプロジェクトで、同時の操作が先に行を作った（一意制約の違反）。500 でなく 409 CONFLICT で、
+    何も書かない（A-49 の 3）。"""
+    raw, _ = _project_without_numbering_rule(world, db_session)
+    race.before_insert(WbsNumberingRule, lambda other: other.add(WbsNumberingRule(project_id=raw.id)))
+    elements_before = _row_counts(db_session)["wbs_elements"]
+    race.locked.clear()
+
+    response = world.client.post(f"/api/v1/projects/{raw.id}/wbs/elements",
+                                 json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"}, headers=world.admin_h)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "CONFLICT",
+        "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+        "details": [],
+    }
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    assert _row_counts(db_session)["wbs_elements"] == elements_before
+    rules = db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all()
+    assert [r.top_last_child_seq for r in rules] == [0]  # 先に作った方の行だけが残る
+
+
+def _pending_by_other(world: World, requested_by: str = "pm") -> Any:
+    """先に終わった申請（別のセッション）：WBS を PENDING_APPROVAL にし、承認申請を 1 つ作る。"""
+    def submit(other: Session) -> None:
+        project = other.get(Project, world.pid)
+        assert project is not None
+        project.wbs_status = "PENDING_APPROVAL"
+        other.add(ApprovalRequest(project_id=world.pid, target_type="WBS", target_id=world.pid,
+                                  requested_by=world.users[requested_by].id, requested_at=NOW))
+    return submit
+
+
+def test_submit_judges_wbs_status_after_locking_project(world: World, db_session: Session, race: RaceProbe) -> None:
+    """API-WBS-018：同時の 2 つの申請。プロジェクトの行をロックして読み直した状態で判定するので、先の申請がコミットした後の申請は
+    409 INVALID_STATE になり、承認申請は 1 つだけ（WBS の承認申請の二重化。OQ-42 (3)・A-49 の 3）。"""
+    make_ready_wp(world)
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+
+    response = world.client.post(world.url("/approval-requests"), headers=world.headers["planner"])
+    assert (response.status_code, response.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    assert response.json()["error"]["details"] == [{"wbs_status": "PENDING_APPROVAL"}]
+    assert len(db_session.scalars(select(ApprovalRequest)).all()) == 1
+
+
+def test_edit_and_reviews_judge_wbs_status_after_locking_project(world: World, db_session: Session,
+                                                                 race: RaceProbe) -> None:
+    """API-WBS-003・014・016・024：要素の変更・レビューを始める・指摘を書く・レビューを閉じるは、プロジェクトの行をロックして
+    読み直した WBS・レビューの状態で判定する。先に申請・レビューを閉じる操作がコミットしていれば 409 INVALID_STATE（A-49 の 3）。"""
+    wp = make_ready_wp(world)
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    changed = world.client.patch(world.url(f"/elements/{wp['id']}"), json={"name": "変えた"},
+                                 headers=world.headers["planner"])
+    assert (changed.status_code, changed.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    db_session.expire_all()
+    element = db_session.get(WbsElement, wp["id"])
+    assert element is not None and element.name == "WP"
+
+    world.set_status("DRAFT")
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    started = world.client.post(world.url("/reviews"), json={"reviewer_ids": [world.users["pm"].id]},
+                                headers=world.headers["planner"])
+    assert (started.status_code, started.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects"]
+    assert db_session.scalars(select(WbsReview)).all() == []
+
+    world.set_status("DRAFT")
+    review = world.client.post(world.url("/reviews"), json={"reviewer_ids": [world.users["pm"].id]},
+                               headers=world.headers["planner"]).json()
+
+    def close_by_other(other: Session) -> None:
+        row = other.get(WbsReview, review["id"])
+        project = other.get(Project, world.pid)
+        assert row is not None and project is not None
+        row.status, row.closed_at, project.wbs_status = "CLOSED", NOW, "DRAFT"
+
+    race.before_lock("projects", close_by_other)
+    race.locked.clear()
+    comment = world.client.post(world.url(f"/reviews/{review['id']}/comments"),
+                                json={"element_id": wp["id"], "category": "OTHER", "body": "b"}, headers=world.headers["pm"])
+    assert (comment.status_code, comment.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_reviews"]
+    assert db_session.scalars(select(WbsReviewComment)).all() == []
+
+    db_session.expire_all()
+    reopened = db_session.get(WbsReview, review["id"])
+    assert reopened is not None
+    reopened.status, reopened.closed_at = "OPEN", None
+    db_session.commit()
+    world.set_status("IN_REVIEW")
+    race.before_lock("projects", close_by_other)
+    race.locked.clear()
+    closed = world.client.post(world.url(f"/reviews/{review['id']}/close"), headers=world.headers["planner"])
+    assert (closed.status_code, closed.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert closed.json()["error"]["details"] == [{"review_id": review["id"], "status": "CLOSED"}]
+    assert race.locked == ["projects", "wbs_reviews"]
+
+
+def test_decision_judges_after_locking_target_then_request(world: World, db_session: Session, race: RaceProbe) -> None:
+    """API-WBS-019：同時の 2 つの判断。申請の対象（projects）を先に、申請の行を後にロックし、読み直した申請の状態で判定する。
+    先の承認がコミットした後の判断は 409 INVALID_STATE で、版を作らない（同時の承認。OQ-42 (3)・A-49 の 3）。"""
+    add_member(world, "approver", "APPROVER")
+    make_ready_wp(world)
+    approval_id = world.client.post(world.url("/approval-requests"), headers=world.headers["pm"]).json()["id"]
+
+    def approve_by_other(other: Session) -> None:
+        approval = other.get(ApprovalRequest, approval_id)
+        project = other.get(Project, world.pid)
+        assert approval is not None and project is not None
+        approval.status, approval.decided_by, approval.decided_at = "APPROVED", world.admin.id, NOW
+        project.wbs_status = "BASELINED"
+
+    race.before_lock("projects", approve_by_other)
+    race.locked.clear()
+    response = world.client.post(f"/api/v1/approval-requests/{approval_id}/decision", json={"decision": "REJECT"},
+                                 headers=world.headers["approver"])
+    assert (response.status_code, response.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert response.json()["error"]["details"] == [{"approval_id": approval_id, "status": "APPROVED"}]
+    assert race.locked == ["projects", "wbs_numbering_rules", "approval_requests"]
+    assert db_session.scalars(select(ScopeBaseline)).all() == []
+    assert world.tree()["wbs_status"] == "BASELINED"

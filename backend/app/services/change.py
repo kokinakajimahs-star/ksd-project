@@ -10,6 +10,10 @@
 権限は 9 章（RULE-AUTH-001）を ``authorize_project`` で判定する。委託先だけで読む利用者（9.2 の注記）には、自分の割当の活動と
 その WBS の経路に関わる変更要求・是正措置だけを見せる。1 つの操作を 1 つのトランザクションにする（1.3）。
 判断の記録は docs/decisions/ASSUMPTIONS.md A-37。
+
+**同時実行**（A-49 の 3）：変更要求の状態を判定して変える操作（修正・提出・取り下げ・判断・反映）は、``change_requests`` の行を
+``SELECT … FOR UPDATE``（``app.infra.db.lock_row``）で読み直してから判定する。関わる承認申請の行はその後にロックする
+（承認の判断の API-WBS-019 と同じ順）。反映は続けて ``projects``・採番規則の行をロックする。
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from app.domain.workflow import (
     transition_corrective_action,
 )
 from app.errors import AppError
+from app.infra.db import lock_row, lock_rows
 from app.models.chg import AuditLog, ChangeRequest, CorrectiveAction
 from app.models.eff import Assignment, TimeEntry, VarianceNote
 from app.models.prg import ProgressEntry, ProgressItem, StatusReport
@@ -105,8 +110,12 @@ def _cycle_error(exc: ScheduleCycleError) -> AppError:
     return AppError(422, "SCHEDULE_CYCLE", "依存が循環しています", details=[{"activity_ids": list(exc.activity_ids)}])
 
 
-def _change_request_of(session: Session, project_id: int, change_request_id: int) -> ChangeRequest:
-    change_request = session.get(ChangeRequest, change_request_id)
+def _change_request_of(
+    session: Session, project_id: int, change_request_id: int, *, for_update: bool = False
+) -> ChangeRequest:
+    """変更要求（無い・他のプロジェクトのものは 404）。状態を変える操作は ``for_update``（行をロックして読み直す。A-49 の 3）。"""
+    change_request = (lock_row(session, ChangeRequest, change_request_id) if for_update
+                      else session.get(ChangeRequest, change_request_id))
     if change_request is None or change_request.project_id != project_id:
         raise AppError(404, "NOT_FOUND", "変更要求が見つかりません", details=[{"change_request_id": change_request_id}])
     return change_request
@@ -368,7 +377,7 @@ def update_change_request(
     載せた項目（title・reason・target_codes・operations）だけを変える。検査は起票と同じ。
     """
     authorize_project(session, access, actor, project_id, "change.create")
-    change_request = _change_request_of(session, project_id, change_request_id)
+    change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         ensure_change_request_editable(change_request.status)
     except WorkflowError as exc:
@@ -423,7 +432,7 @@ def submit_change_request(
     申請者は提出した人（承認・却下は別の人だけ。5.10）。DRAFT でなければ 409、変更内容を当てられなければ 400・422。
     """
     authorize_project(session, access, actor, project_id, "change.create")
-    change_request = _change_request_of(session, project_id, change_request_id)
+    change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         transition = transition_change_request(change_request.status, ChangeRequestAction.SUBMIT)
     except WorkflowError as exc:
@@ -451,19 +460,20 @@ def withdraw_change_request(
     SUBMITTED でなければ 409。
     """
     authorize_project(session, access, actor, project_id, "change.create")
-    change_request = _change_request_of(session, project_id, change_request_id)
+    # 承認の判断と競わせない（OQ-42 (24)）：変更要求の行を先に、保留中の承認申請の行を後にロックして読み直す（A-49 の 3）
+    change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         transition = transition_change_request(change_request.status, ChangeRequestAction.WITHDRAW)
     except WorkflowError as exc:
         raise _workflow_error(exc, [{"change_request_id": change_request.id, "status": change_request.status}]) from exc
-    pending = session.scalars(
+    pending = session.scalars(lock_rows(
         select(ApprovalRequest)
         .where(ApprovalRequest.project_id == project_id,
                ApprovalRequest.target_type == TARGET_CHANGE_REQUEST,
                ApprovalRequest.target_id == change_request.id,
                ApprovalRequest.status == ApprovalStatus.PENDING.value)
         .order_by(ApprovalRequest.id)
-    ).all()
+    )).all()
     for approval in pending:
         session.delete(approval)
     change_request.status = transition.to_status.value
@@ -483,7 +493,8 @@ class ChangeRequestStateMachine:
     def decide(
         self, session: Session, approval: ApprovalRequest, status: ApprovalStatus, actor: User, now: datetime
     ) -> None:
-        change_request = session.get(ChangeRequest, approval.target_id)
+        # 状態はロックして読み直した値で判定する（呼び手の API-WBS-019 が申請の行より先にこの行をロックしている。A-49 の 3）
+        change_request = lock_row(session, ChangeRequest, approval.target_id)
         if change_request is None or change_request.project_id != approval.project_id:
             # 変更要求の承認申請は提出（API-CHG-005）でしか作られない。指す先が無いのは申請と変更要求の食い違い（fail fast）
             raise RuntimeError(
@@ -578,7 +589,7 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
         row.needs_renumber = element.needs_renumber
     # 第 1 階層の数え（設計書 1.1 の 4.1・5.2。第 1 階層へ足したら進む。減らさない）
     if applied.plan.top_last_child_seq is not None:
-        rule_row = numbering_rule_row(session, project_id)
+        rule_row = numbering_rule_row(session, project_id, for_update=True)
         rule_row.top_last_child_seq = max(rule_row.top_last_child_seq, applied.plan.top_last_child_seq)
 
     # 活動：足す・変える（日程の計算結果の列は後で計算し直す）
@@ -719,12 +730,13 @@ def apply_change_request(
     基準の写しは変えない（版に入った要素・活動も消せる。設計書 1.1 の 4.2。CR-002）。どこかで止まれば何も書かない。
     """
     authorize_project(session, access, actor, project_id, "change.apply")
-    change_request = _change_request_of(session, project_id, change_request_id)
+    # 二重の反映・WBS の承認の操作と競わせない：変更要求、プロジェクトの順に行をロックし、読み直した値で判定する（A-49 の 3）
+    change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         transition = transition_change_request(change_request.status, ChangeRequestAction.APPLY)
     except WorkflowError as exc:
         raise _workflow_error(exc, [{"change_request_id": change_request.id, "status": change_request.status}]) from exc
-    project = session.get(Project, project_id)
+    project = lock_row(session, Project, project_id)
     assert project is not None
     if project.wbs_status != WbsStatus.BASELINED.value:
         raise AppError(409, "INVALID_STATE", "WBS が承認済み（BASELINED）のときだけ変更を反映できます",

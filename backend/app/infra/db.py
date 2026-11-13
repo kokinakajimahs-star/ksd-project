@@ -7,6 +7,8 @@
 - ``create_session_factory``：セッションの生成器
 - ``get_session``：FastAPI の依存。1 つの要求に 1 つのセッションを渡し、終われば閉じる
   （コミットはサービス層が 1 操作 1 トランザクションで行う）
+- ``lock_row``・``lock_rows``：状態を変える操作が、判定の前に親の行を ``SELECT … FOR UPDATE`` で読み直す（同時実行。A-49 の 3）
+- ``is_unique_violation``：``IntegrityError`` が一意制約の違反か（方言ごとに見分ける。``app.main`` が 409 ``CONFLICT`` にする）
 
 PostgreSQL（本番。設計書 1.1）の接続先は ``postgresql://…`` と書けばよい（ドライバは psycopg 3 を使う）。
 """
@@ -17,7 +19,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import Connection, Engine, MetaData, create_engine, event
+from sqlalchemy import Connection, Engine, MetaData, Select, create_engine, event
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -97,6 +100,38 @@ def check_foreign_keys(connection: Connection) -> None:
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     """セッションの生成器を作る。"""
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def lock_row[M](session: Session, model: type[M], row_id: int) -> M | None:
+    """行を ``SELECT … FOR UPDATE`` で読み直す。状態を変える操作は、判定の前に対象の親の行をこれで読む（A-49 の 3）。
+
+    PostgreSQL は行をロックし、同じ行を同時に変える操作をこちらのトランザクションが終わるまで待たせる（待った側は先のコミットの後の
+    値を読む）。SQLite は ``FOR UPDATE`` を無視する（書き込みはファイル全体で 1 つずつ）。セッションに既にある行も DB の値で
+    上書きする（``populate_existing``。上書きしないと、ロックの前に読んだ古い値で判定してしまう）。行が無ければ ``None``。
+    """
+    return session.get(model, row_id, with_for_update=True, populate_existing=True)
+
+
+def lock_rows[S: Select[Any]](query: S) -> S:
+    """問い合わせを ``SELECT … FOR UPDATE`` にし、セッションに既にある行も DB の値で上書きさせる（``lock_row`` の複数行版）。"""
+    return query.with_for_update().execution_options(populate_existing=True)
+
+
+# 一意制約の違反の見分け方（方言ごと）。PostgreSQL（psycopg 3 の ``sqlstate``・psycopg2 の ``pgcode``）は SQLSTATE 23505
+# （unique_violation。主キーの重なりも同じ）。SQLite は拡張エラーコードの名前（Python 3.11 からの ``sqlite_errorname``）。
+# CHECK（PostgreSQL 23514・SQLITE_CONSTRAINT_CHECK）・外部キー（23503・SQLITE_CONSTRAINT_FOREIGNKEY）・NOT NULL（23502・
+# SQLITE_CONSTRAINT_NOTNULL）は一意制約の違反ではない
+_PG_UNIQUE_VIOLATION = "23505"
+_SQLITE_UNIQUE_VIOLATIONS = frozenset({"SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY"})
+
+
+def is_unique_violation(exc: IntegrityError) -> bool:
+    """``IntegrityError`` が一意制約（主キーを含む）の違反か。CHECK・外部キー・NOT NULL の違反は偽。"""
+    orig = exc.orig
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if sqlstate is not None:
+        return bool(sqlstate == _PG_UNIQUE_VIOLATION)
+    return getattr(orig, "sqlite_errorname", None) in _SQLITE_UNIQUE_VIOLATIONS
 
 
 def get_session(request: Request) -> Iterator[Session]:

@@ -17,12 +17,13 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings, get_settings
 from app.errors import AppError
 from app.infra.audit_listener import register_audit_listener
-from app.infra.db import create_db_engine, create_session_factory
+from app.infra.db import create_db_engine, create_session_factory, is_unique_violation
 from app.services.change import ChangeRequestStateMachine
 from app.services.effort import CorrectiveActionsTable, EffortLinks, eac_by_element
 from app.services.progress import ComputedEtcEffort, ProgressLinks
@@ -53,6 +54,8 @@ _HTTP_ERRORS: dict[int, tuple[str, str]] = {
     500: ("INTERNAL_ERROR", "サーバの内部でエラーが起きました"),
 }
 _DEFAULT_HTTP_ERROR = ("HTTP_ERROR", "要求を処理できません")
+# 一意制約の違反（同時に行われた操作が同じ行を先に作った）。6.1 の 409。A-49 の 3
+_CONFLICT = ("CONFLICT", "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください")
 
 
 def error_body(code: str, message: str, details: list[Any] | None = None) -> dict[str, Any]:
@@ -96,6 +99,18 @@ def _http_error_handler(_request: Request, exc: Exception) -> JSONResponse:
         content=jsonable_encoder(error_body(code, message, details)),
         headers=getattr(exc, "headers", None),
     )
+
+
+def _integrity_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+    # 書き込み（flush・commit）が一意制約に当たった：同時の承認・確定・作成で同じ行が 2 つできようとした。500 でなく
+    # 409 CONFLICT（6.1。A-49 の 3）。サービスが自分で捕まえて別のコードにするもの（DUPLICATE_PROJECT_CODE など）はここへ来ない。
+    # CHECK・外部キー・NOT NULL の違反は実装の誤りなので投げ直し、想定外の例外（500。ログに残る）として扱う。
+    # セッションは get_session が閉じる（巻き戻る）
+    assert isinstance(exc, IntegrityError)
+    if not is_unique_violation(exc):
+        raise exc
+    code, message = _CONFLICT
+    return JSONResponse(status_code=409, content=error_body(code, message))
 
 
 def _unhandled_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
@@ -182,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(AppError, _app_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, _http_error_handler)
+    app.add_exception_handler(IntegrityError, _integrity_error_handler)
     app.add_exception_handler(Exception, _unhandled_error_handler)
 
     api = APIRouter(prefix=API_PREFIX)
