@@ -1,6 +1,7 @@
 """ユーザーの管理のユースケース（設計書 6.2 の API-CMN-003〜005・9 章・NFR-10）。
 
-- 一覧は user.admin か、どれかのプロジェクトでの member.manage（メンバーを選ぶため）
+- 一覧は user.admin か、どれかのプロジェクトでの member.manage（メンバーを選ぶため）。ロックの状態（``locked_until``）と
+  作成の許可（``can_create_project``）は user.admin を持つ人にだけ見せる（CR-019）
 - 作る・変える・無効にするは user.admin（システム管理者だけが持つ。9.1）。プロジェクトの作成の許可（``can_create_project``。
   9.1 の project.create）もここで設定する
 - パスワードの方針（NFR-04）：長さは ``min_length``（設定の ``PMT_PASSWORD_MIN_LENGTH``。既定 12）以上 1024 以下、
@@ -72,15 +73,17 @@ def _duplicate_login_id(login_id: str) -> AppError:
 
 def list_users(
     session: Session, access: ProjectAccess, actor: User, *, limit: int, offset: int
-) -> tuple[list[User], int]:
-    """ユーザーの一覧（ID の順）と総数。user.admin か、どれかのプロジェクトで member.manage を持つ利用者だけが読める。"""
-    if not authorize(principal_of(actor), "user.admin").allowed and not holds_in_any_project(
-        session, access, actor, "member.manage"
-    ):
+) -> tuple[list[User], int, bool]:
+    """ユーザーの一覧（ID の順）と総数。user.admin か、どれかのプロジェクトで member.manage を持つ利用者だけが読める。
+
+    3 つ目は、読む人が user.admin を持つか（持たなければ ``locked_until``・``can_create_project`` を見せない。CR-019）。
+    """
+    user_admin = authorize(principal_of(actor), "user.admin").allowed
+    if not user_admin and not holds_in_any_project(session, access, actor, "member.manage"):
         raise forbidden()
     total = session.scalar(select(func.count()).select_from(User)) or 0
     users = list(session.scalars(select(User).order_by(User.id).limit(limit).offset(offset)))
-    return users, total
+    return users, total, user_admin
 
 
 def create_user(

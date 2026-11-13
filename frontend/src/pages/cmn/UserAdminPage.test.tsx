@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAuthToken } from "../../api/client";
-import type { User } from "../../api/cmn";
+import type { User, UserListItem } from "../../api/cmn";
 import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall } from "../../test/mockApi";
 import UserAdminPage, { collectChanges, isLocked } from "./UserAdminPage";
@@ -17,7 +17,7 @@ const PLANNER = makeUser({
   is_system_admin: false,
 });
 
-function usersPage(items: User[], total = items.length, offset = 0) {
+function usersPage(items: UserListItem[], total = items.length, offset = 0) {
   return { items, total, limit: 100, offset };
 }
 
@@ -79,6 +79,22 @@ describe("UI-CMN-002 ユーザー管理", () => {
     expect(screen.queryByRole("form", { name: "ユーザーの作成" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /を変更する$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "操作" })).not.toBeInTheDocument();
+  });
+
+  it("member.manage だけの利用者に返る null（ロックの状態・作成の許可。CR-019）は「—」とし、ロック中を出さない", async () => {
+    const hidden = { locked_until: null, can_create_project: null };
+    mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, PM_ME),
+      "GET /api/v1/users": () => jsonResponse(200, usersPage([{ ...ADMIN, ...hidden }, { ...PLANNER, ...hidden }])),
+    });
+
+    renderPage();
+
+    const table = await screen.findByRole("table", { name: "ユーザーの一覧" });
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[2] as HTMLElement).getAllByRole("cell")[5]).toHaveTextContent("—");
+    expect(within(rows[2] as HTMLElement).getAllByRole("cell")[6]).toHaveTextContent("有効");
+    expect(table).not.toHaveTextContent("ロック中");
   });
 
   it("一覧を見る権限が無ければ（403）サーバの文言を出す", async () => {

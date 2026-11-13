@@ -1,5 +1,7 @@
 """ユーザーの入出力（API-CMN-003〜005・008）。パスワードのハッシュとログインの誤りの数えは出力に載せない。
 
+一覧（API-CMN-003）のロックの状態と作成の許可は user.admin を持つ人にだけ返す（``UserListItemOut``。CR-019）。
+
 長さの上限は ``users`` の列（docs/decisions/ASSUMPTIONS.md A-08）に合わせる。
 パスワードの最小の長さ・ログイン名と同じでないことは設定に依るので、サービス層が確かめる（NFR-04）。
 """
@@ -37,10 +39,29 @@ class UserOut(BaseModel):
     locked_until: datetime | None
 
 
+class UserListItemOut(BaseModel):
+    """ユーザーの一覧（API-CMN-003）の 1 件。``UserOut`` と同じ項目。
+
+    ``locked_until``・``can_create_project`` は user.admin を持つ人にだけ返し、member.manage だけで読む人には null（CR-019）。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    login_id: str
+    display_name: str
+    email: str | None
+    organization: str | None
+    is_system_admin: bool
+    can_create_project: bool | None
+    is_active: bool
+    locked_until: datetime | None
+
+
 class UserList(BaseModel):
     """ユーザーの一覧（``limit``・``offset`` の範囲）と総数。"""
 
-    items: list[UserOut]
+    items: list[UserListItemOut]
     total: int
     limit: int
     offset: int

@@ -16,6 +16,15 @@ export interface User {
   locked_until: string | null;
 }
 
+/**
+ * ユーザーの一覧（API-CMN-003）の 1 件。locked_until・can_create_project は user.admin を持つ人にだけ値が返り、
+ * member.manage だけで読む人には null（CR-019）
+ */
+export interface UserListItem extends Omit<User, "can_create_project"> {
+  /** user.admin を持たない人が読むと null（許しているかを見せない） */
+  can_create_project: boolean | null;
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: "bearer";
@@ -102,8 +111,8 @@ export function getMe(): Promise<Me> {
   return apiFetch<Me>("/me");
 }
 
-export function listUsers(query: PageQuery = {}): Promise<Page<User>> {
-  return apiFetch<Page<User>>("/users", { query: { limit: query.limit, offset: query.offset } });
+export function listUsers(query: PageQuery = {}): Promise<Page<UserListItem>> {
+  return apiFetch<Page<UserListItem>>("/users", { query: { limit: query.limit, offset: query.offset } });
 }
 
 export function createUser(input: UserCreateInput): Promise<User> {

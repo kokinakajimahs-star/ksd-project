@@ -3,7 +3,7 @@
 // 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの
 import { useEffect, useState, type FormEvent } from "react";
 
-import type { User } from "../../../api/cmn";
+import type { UserListItem } from "../../../api/cmn";
 import { toErrorView, type ErrorView } from "../../../api/errors";
 import { fetchAllPages } from "../../../api/pages";
 import { listMembers, removeMember, upsertMember, type Member, type MemberList } from "../../../api/prj";
@@ -30,7 +30,7 @@ function MemberForm({
 }: {
   /** 変えるメンバー（足すときは null） */
   member: Member | null;
-  candidates: User[];
+  candidates: UserListItem[];
   onSubmit: (userId: number, roles: string[], organization: string | null, team: string | null) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -138,7 +138,7 @@ export default function MembersSection({
   const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<User[] | null>(null);
+  const [candidates, setCandidates] = useState<UserListItem[] | null>(null);
   /** 全ての頁のメンバーの利用者 ID（足す候補から除く）。読むまで・読めなければ null */
   const [allMemberIds, setAllMemberIds] = useState<ReadonlySet<number> | null>(null);
   const [allMembersError, setAllMembersError] = useState<ErrorView | null>(null);
