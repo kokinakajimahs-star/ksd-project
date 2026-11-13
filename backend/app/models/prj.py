@@ -1,6 +1,9 @@
 """プロジェクト基盤（PRJ）の群のテーブル（設計書 3 章・4.1・4.2）：プロジェクト・スコープ項目・稼働カレンダー・休日・メンバー。
 
-- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）
+- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）。
+  内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
+- JSON の列の ``None`` は SQL の NULL で持つ（``none_as_null``。JSON の ``null`` を保存しない。ASSUMPTIONS.md A-49 の 5）。
+  NOT NULL の列の ``None`` は、ORM の挿入なら既定値（``default``）になり、既定値の無い列・更新・SQL の挿入では DB が拒む
 - 日付は ``Date``（ISO 8601 の日付。2.4）。1 日の稼働時間は人時の小数 ``Numeric(10,2)``（2.4 の工数と同じ型）
 - 値の一覧が設計書に書かれている列（``projects.wbs_status``・``scope_items.kind``・``calendars.working_weekdays`` の形）は
   DB の検査（CHECK）でも拒む。ロールのコード（``project_members.roles``）の検査はドメイン（RULE-AUTH-001 の ``ROLES``）が持つ
@@ -65,7 +68,7 @@ class Project(Base):
     """
 
     __tablename__ = "projects"
-    __table_args__ = (CheckConstraint(in_list("wbs_status", WBS_STATUSES), name="wbs_status"),)
+    __table_args__ = (CheckConstraint(in_list("wbs_status", WBS_STATUSES), name="wbs_status"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     code: Mapped[str] = mapped_column(String(50), unique=True)
@@ -79,7 +82,7 @@ class Project(Base):
     wbs_status: Mapped[str] = mapped_column(
         String(32), default=WBS_STATUS_INITIAL, server_default=text(f"'{WBS_STATUS_INITIAL}'")
     )
-    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_project_settings)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON(none_as_null=True), default=default_project_settings)
 
 
 # DB-PRJ-002
@@ -87,7 +90,7 @@ class ScopeItem(Base):
     """スコープ項目（要求 PRJ-02）。対象内（IN）・対象外（OUT）の区分を持ち、100% ルール（RULE-WBS-004）の基準になる。"""
 
     __tablename__ = "scope_items"
-    __table_args__ = (CheckConstraint(in_list("kind", SCOPE_ITEM_KINDS), name="kind"),)
+    __table_args__ = (CheckConstraint(in_list("kind", SCOPE_ITEM_KINDS), name="kind"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -113,6 +116,7 @@ class Calendar(Base):
             name="working_weekdays",
         ),
         CheckConstraint("hours_per_day > 0 AND hours_per_day <= 24", name="hours_per_day"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -130,7 +134,7 @@ class CalendarHoliday(Base):
     """稼働カレンダーの休日（日付）。同じカレンダーに同じ日付は 1 つ（``calendar_id``＋``holiday_date`` で一意）。"""
 
     __tablename__ = "calendar_holidays"
-    __table_args__ = (UniqueConstraint("calendar_id", "holiday_date"),)
+    __table_args__ = (UniqueConstraint("calendar_id", "holiday_date"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     calendar_id: Mapped[int] = mapped_column(ForeignKey("calendars.id"))
@@ -146,11 +150,11 @@ class ProjectMember(Base):
     """
 
     __tablename__ = "project_members"
-    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    __table_args__ = (UniqueConstraint("project_id", "user_id"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    roles: Mapped[list[str]] = mapped_column(JSON)
+    roles: Mapped[list[str]] = mapped_column(JSON(none_as_null=True))
     organization: Mapped[str | None] = mapped_column(String(200))
     team: Mapped[str | None] = mapped_column(String(200))

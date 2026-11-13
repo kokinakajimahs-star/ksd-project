@@ -202,8 +202,15 @@ def test_change_requests_number_is_unique_per_project(db_session: Session) -> No
 
 @pytest.mark.parametrize("status", CHANGE_REQUEST_STATUSES)
 def test_change_requests_accept_every_status(db_session: Session, status: str) -> None:
-    """DB-CHG-001 change_requests：5.10 の 5 つの状態はどれも保存できる。"""
-    _change_request(db_session, _project(db_session), _user(db_session), status=status)
+    """DB-CHG-001 change_requests：5.10 の 5 つの状態はどれも保存できる。
+
+    提出の後の状態は提出の時刻を、APPLIED は反映した人・時刻を持つ（``submitted_at``・``applied_pair``。A-49 の 6）。
+    """
+    creator = _user(db_session)
+    times: dict[str, Any] = {} if status == "DRAFT" else {"submitted_at": AT}
+    if status == "APPLIED":
+        times.update(applied_by=creator.id, applied_at=AT)
+    _change_request(db_session, _project(db_session), creator, status=status, **times)
     db_session.commit()
 
 
@@ -224,14 +231,89 @@ def test_change_requests_rejections(db_session: Session, field: str, value: Any)
 
 @pytest.mark.parametrize("field", ["project_id", "created_by", "applied_by"])
 def test_change_requests_foreign_keys(db_session: Session, field: str) -> None:
-    """DB-CHG-001 change_requests：プロジェクト・起票者・反映した人は実在する行を指す。"""
+    """DB-CHG-001 change_requests：プロジェクト・起票者・反映した人は実在する行を指す。
+
+    反映した人を持てるのは APPLIED だけ（``applied_pair``）なので、反映済みの行で外部キーだけが拒むことを見る。
+    """
     project = _project(db_session)
     creator = _user(db_session)
     db_session.commit()
-    fields: dict[str, Any] = {"project_id": project.id, "number": 1, "title": "t", "reason": "r", "created_by": creator.id}
+    fields: dict[str, Any] = {
+        "project_id": project.id, "number": 1, "title": "t", "reason": "r", "created_by": creator.id,
+        "status": "APPLIED", "submitted_at": AT, "applied_by": creator.id, "applied_at": AT,
+    }
     fields[field] = MISSING
     db_session.add(ChangeRequest(**fields))
-    _flush_fails(db_session)
+    with pytest.raises(IntegrityError, match="(?i)foreign key"):
+        db_session.flush()
+    db_session.rollback()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "DRAFT", "submitted_at": AT},
+        {"status": "SUBMITTED"},
+        {"status": "APPROVED"},
+        {"status": "REJECTED"},
+        {"status": "APPLIED", "applied_by": "creator", "applied_at": AT},
+    ],
+    ids=["draft-with-time", "submitted-without-time", "approved-without-time", "rejected-without-time",
+         "applied-without-time"],
+)
+def test_change_requests_submitted_at_follows_status(db_session: Session, state: dict[str, Any]) -> None:
+    """DB-CHG-001 change_requests：5.10 の変更要求の状態から、DRAFT は提出の時刻が空（取り下げで空に戻す）、SUBMITTED 以降は提出の時刻を持つ
+    （``ck_change_requests_submitted_at``。A-49 の 6）。"""
+    project = _project(db_session)
+    creator = _user(db_session)
+    values = {k: creator.id if v == "creator" else v for k, v in state.items()}
+    db_session.add(ChangeRequest(project_id=project.id, number=1, title="t", reason="r", created_by=creator.id, **values))
+    with pytest.raises(IntegrityError, match="ck_change_requests_submitted_at"):
+        db_session.flush()
+    db_session.rollback()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "APPLIED"},
+        {"status": "APPLIED", "applied_by": "creator"},
+        {"status": "APPLIED", "applied_at": AT},
+        {"status": "DRAFT", "submitted_at": None, "applied_by": "creator"},
+        {"status": "SUBMITTED", "applied_at": AT},
+        {"status": "APPROVED", "applied_by": "creator", "applied_at": AT},
+        {"status": "REJECTED", "applied_by": "creator", "applied_at": AT},
+    ],
+    ids=["applied-without-both", "applied-without-time", "applied-without-applier", "draft-with-applier",
+         "submitted-with-time", "approved-with-both", "rejected-with-both"],
+)
+def test_change_requests_applied_pair_follows_status(db_session: Session, state: dict[str, Any]) -> None:
+    """DB-CHG-001 change_requests：反映した人・時刻は APPLIED だけが両方を持ち、ほかの状態では両方とも空
+    （``ck_change_requests_applied_pair``。5.10 の APPLIED への遷移（CHG-04 の反映）から。A-49 の 6）。"""
+    project = _project(db_session)
+    creator = _user(db_session)
+    values: dict[str, Any] = {"submitted_at": AT}
+    values.update({k: creator.id if v == "creator" else v for k, v in state.items()})
+    db_session.add(ChangeRequest(project_id=project.id, number=1, title="t", reason="r", created_by=creator.id, **values))
+    with pytest.raises(IntegrityError, match="ck_change_requests_applied_pair"):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_change_requests_withdraw_and_apply_round_trip(db_session: Session) -> None:
+    """DB-CHG-001 change_requests：5.10 の遷移（提出 → 取り下げで DRAFT・時刻を空 → 再提出 → 承認 → 反映）の各段は DB の検査を通る。"""
+    project = _project(db_session)
+    creator = _user(db_session)
+    request = _change_request(db_session, project, creator)
+    for status, submitted_at in (("SUBMITTED", AT), ("DRAFT", None), ("SUBMITTED", AT), ("APPROVED", AT)):
+        request.status, request.submitted_at = status, submitted_at
+        db_session.flush()
+    request.status, request.applied_by, request.applied_at = "APPLIED", creator.id, AT
+    db_session.commit()
+    db_session.expunge_all()
+    loaded = db_session.get(ChangeRequest, request.id)
+    assert loaded is not None
+    assert (loaded.status, loaded.submitted_at, loaded.applied_by, loaded.applied_at) == ("APPLIED", AT, creator.id, AT)
 
 
 def test_baselines_point_at_existing_change_requests(db_session: Session) -> None:
@@ -496,6 +578,17 @@ def test_migration_enforces_chg_constraints(tmp_path: Path) -> None:
             session.add(ChangeRequest(project_id=project.id, number=2, title="t", reason="r", created_by=creator.id,
                                       status="CANCELLED"))
             _flush_fails(session)
+            # 状態と提出・反映の組（0012。A-49 の 6）
+            session.add(ChangeRequest(project_id=project.id, number=2, title="t", reason="r", created_by=creator.id,
+                                      status="SUBMITTED"))
+            with pytest.raises(IntegrityError, match="ck_change_requests_submitted_at"):
+                session.flush()
+            session.rollback()
+            session.add(ChangeRequest(project_id=project.id, number=2, title="t", reason="r", created_by=creator.id,
+                                      status="APPROVED", submitted_at=AT, applied_by=creator.id, applied_at=AT))
+            with pytest.raises(IntegrityError, match="ck_change_requests_applied_pair"):
+                session.flush()
+            session.rollback()
             session.add(CorrectiveAction(project_id=project.id, cause="c", action="a", status="CANCELLED"))
             _flush_fails(session)
             session.add(AuditLog(entity_type="projects", entity_id=1, action="UPSERT"))
