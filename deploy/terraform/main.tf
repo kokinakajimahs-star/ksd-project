@@ -40,6 +40,27 @@ resource "google_artifact_registry_repository" "images" {
   format        = "DOCKER"
   description   = "PMT のイメージ（サーバ pmt・試験 pmt-test）"
 
+  # 古いイメージを消す（A-51）。イメージ（pmt・pmt-test）ごとに新しい registry_keep_recent 個は残し（KEEP が DELETE に勝つ）、
+  # それより古く registry_delete_older_than_days 日を過ぎたものを消す。前のイメージへ戻す（README 5 章）のは残した範囲から選ぶ
+  cleanup_policy_dry_run = false
+
+  cleanup_policies {
+    id     = "keep-recent"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = var.registry_keep_recent
+    }
+  }
+
+  cleanup_policies {
+    id     = "delete-old"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "${var.registry_delete_older_than_days * 86400}s"
+    }
+  }
+
   depends_on = [google_project_service.enabled]
 }
 
