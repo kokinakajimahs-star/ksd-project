@@ -31,7 +31,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, make_url, text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import ORMExecuteState, Session, sessionmaker
 
 import app.models as _all_models  # noqa: F401  全てのモデルを Base.metadata に載せる
@@ -42,12 +42,15 @@ from app.main import create_app
 
 # PostgreSQL で試験を流すときの接続先（管理用。試験ごとのデータベースをここから作って消す）。無ければ SQLite で流す
 TEST_DATABASE_URL_ENV = "PMT_TEST_DATABASE_URL"
-# データベースを消せないときのやり直し。Cloud SQL では管理用のスーパーユーザー（cloudsqladmin）が試験のデータベースに
-# つなぐことがあり、その接続は ``WITH (FORCE)`` でも切れない（SQLSTATE 42501 insufficient_privilege）。少し待てば離れるので、
-# 待つ時間を延ばしながら 10 回まで試す（待つのは最長で 0.5 秒 × (1 + 2 + … + 9) ＝ 22.5 秒）
-_DROP_ATTEMPTS = 10
-_DROP_WAIT_SECONDS = 0.5
+# 他の接続が残っていてデータベースを作れない・消せないときのやり直し。Cloud SQL では管理用のスーパーユーザー（cloudsqladmin）が
+# データベースにつなぐことがある。その接続は ``DROP DATABASE … WITH (FORCE)`` でも切れず（SQLSTATE 42501 insufficient_privilege）、
+# 雛形につながっている間は ``CREATE DATABASE … TEMPLATE`` が失敗する（55006 object_in_use）。少し待てば離れるので、待つ時間を
+# 延ばしながら 10 回まで試す（待つのは最長で 0.5 秒 × (1 + 2 + … + 9) ＝ 22.5 秒）。42501 は所有者でないときにも出るが、ここで
+# 消すのは自分で作ったデータベースだけなので、待っても直らない 42501 は起こらない（起これば待った後に名前を挙げて誤りにする）
+_RETRY_ATTEMPTS = 10
+_RETRY_WAIT_SECONDS = 0.5
 _PG_INSUFFICIENT_PRIVILEGE = "42501"
+_PG_OBJECT_IN_USE = "55006"
 
 
 class PostgresDatabases:
@@ -77,6 +80,19 @@ class PostgresDatabases:
         with self._admin.connect() as connection:
             connection.exec_driver_sql(sql)
 
+    def _execute_retrying(self, sql: str, sqlstate: str) -> bool:
+        """``sql`` を流す。``sqlstate`` で失敗する間は、待ってやり直す。やり直しても失敗すれば偽（他の誤りはそのまま上げる）。"""
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            try:
+                self._execute(sql)
+                return True
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) != sqlstate:
+                    raise
+                if attempt < _RETRY_ATTEMPTS:
+                    time.sleep(_RETRY_WAIT_SECONDS * attempt)
+        return False
+
     def url_of(self, database: str) -> str:
         return self._url.set(database=database).render_as_string(hide_password=False)
 
@@ -84,21 +100,13 @@ class PostgresDatabases:
         """新しいデータベースを作って URL を返す（既定は雛形の複製。``empty`` なら空）。"""
         name = f"{self._prefix}_{uuid.uuid4().hex[:12]}"
         template = "template0" if empty else self.template
-        self._execute(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
+        if not self._execute_retrying(f'CREATE DATABASE "{name}" TEMPLATE "{template}"', _PG_OBJECT_IN_USE):
+            raise RuntimeError(f"雛形 {template} に他の接続が残り、試験のデータベースを作れませんでした")
         return self.url_of(name)
 
     def _drop(self, name: str) -> bool:
         """データベースを消す。スーパーユーザーの接続が残っていて消せなければ、待ってやり直す。やり直しても消せなければ偽。"""
-        for attempt in range(1, _DROP_ATTEMPTS + 1):
-            try:
-                self._execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-                return True
-            except ProgrammingError as exc:
-                if getattr(exc.orig, "sqlstate", None) != _PG_INSUFFICIENT_PRIVILEGE:
-                    raise
-                if attempt < _DROP_ATTEMPTS:
-                    time.sleep(_DROP_WAIT_SECONDS * attempt)
-        return False
+        return self._execute_retrying(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)', _PG_INSUFFICIENT_PRIVILEGE)
 
     def drop(self, database_url: str) -> None:
         """試験のデータベースを消す。やり直しても消せなければ、流れの終わり（``close``）にもう一度消す（試験は落とさない）。"""
@@ -109,8 +117,14 @@ class PostgresDatabases:
 
     def close(self) -> None:
         """雛形と、消し残したデータベースを消す。それでも消せないものがあれば、名前を挙げて誤りにする（Cloud SQL に残さない）。"""
+        remaining: list[str] = []
         try:
-            remaining = [name for name in [*self._leftovers, self.template] if not self._drop(name)]
+            for name in [*self._leftovers, self.template]:
+                try:
+                    if not self._drop(name):
+                        remaining.append(name)
+                except DBAPIError as exc:  # 1 つが別の誤りで消せなくても、残りを消す
+                    remaining.append(f"{name}（{type(exc.orig).__name__}）")
         finally:
             self._admin.dispose()
         if remaining:

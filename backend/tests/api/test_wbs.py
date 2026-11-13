@@ -1404,9 +1404,10 @@ def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_ses
     """API-WBS-002：採番規則の行が無いプロジェクトで、同時の操作が先に行を作った（一意制約の違反）。500 でなく 409 CONFLICT で、
     何も書かない（A-49 の 3）。
 
-    PostgreSQL では、この割り込みは起こらない：WBS を変える操作はプロジェクトの行を ``FOR UPDATE`` でロックしてから採番規則の行を
-    読んで作り、同時の操作の INSERT は外部キーの確認（プロジェクトの行の ``FOR KEY SHARE``）でそのロックを待つ。そこで PostgreSQL
-    では、別のセッションの INSERT がプロジェクトの行のロックを待って lock_timeout になり、何も書かれないことを確かめる。
+    PostgreSQL では、この割り込みは起こらない：要素の操作（``load_wbs_context(for_update=True)``）はプロジェクトの行を ``FOR UPDATE``
+    でロックしてから採番規則の行を読んで作り、同時の操作の INSERT は外部キーの確認（プロジェクトの行の ``FOR KEY SHARE``）でその
+    ロックを待つ。そこで PostgreSQL では、別のセッションの INSERT がプロジェクトの行のロックを待って lock_timeout（SQLSTATE 55P03）に
+    なり、何も書かれないことを確かめる。PostgreSQL でも 409 に届く経路は、次の試験（API-WBS-006）が確かめる。
     """
     raw, _ = _project_without_numbering_rule(world, db_session)
     race.before_insert(WbsNumberingRule, lambda other: other.add(WbsNumberingRule(project_id=raw.id)))
@@ -1418,8 +1419,10 @@ def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_ses
                                  json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"}, headers=world.admin_h)
 
     if db_session.get_bind().dialect.name == "postgresql":
-        with pytest.raises(OperationalError, match=r'(?s)lock timeout.*relation "projects"'):
+        with pytest.raises(OperationalError) as caught:
             post()
+        orig: Any = caught.value.orig
+        assert orig.sqlstate == "55P03" and '"projects"' in orig.diag.context  # プロジェクトの行のロックを待った
         assert race.locked == ["projects", "wbs_numbering_rules"]
         assert _row_counts(db_session)["wbs_elements"] == elements_before
         assert db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all() == []
@@ -1436,6 +1439,31 @@ def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_ses
     assert _row_counts(db_session)["wbs_elements"] == elements_before
     rules = db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all()
     assert [r.top_last_child_seq for r in rules] == [0]  # 先に作った方の行だけが残る
+
+
+def test_numbering_rule_put_on_row_created_at_once_is_409_conflict(world: World, db_session: Session,
+                                                                 race: RaceProbe) -> None:
+    """API-WBS-006：採番規則の行が無いプロジェクトで規則を変える間に、同時の操作が先に行を作った（一意制約の違反）。500 でなく
+    409 CONFLICT で、規則を書かない（A-49 の 3）。この操作はプロジェクトの行をロックしないので、PostgreSQL でも同じ割り込みが起こる
+    （別のセッションの INSERT は待たない）。"""
+    raw, _ = _project_without_numbering_rule(world, db_session)
+    race.before_insert(WbsNumberingRule, lambda other: other.add(WbsNumberingRule(project_id=raw.id)))
+    race.locked.clear()
+
+    response = world.client.put(f"/api/v1/projects/{raw.id}/wbs/numbering-rule",
+                                json={"separator": "-", "min_digits": 2, "prefix": "X", "pad_first_level": False},
+                                headers=world.admin_h)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "CONFLICT",
+        "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+        "details": [],
+    }
+    assert race.locked == ["wbs_numbering_rules"]
+    db_session.expire_all()
+    rules = db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all()
+    # 先に作った方の行（4.1 の既定の値）だけが残る
+    assert [(r.separator, r.min_digits, r.prefix, r.pad_first_level) for r in rules] == [(".", 1, "", True)]
 
 
 def _pending_by_other(world: World, requested_by: str = "pm") -> Any:

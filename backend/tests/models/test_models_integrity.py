@@ -304,33 +304,38 @@ def _not_null_json_row(session: Session, table: str) -> Any:
     return rows[table]()
 
 
-def _not_null_violation(session: Session, table: str, column: str) -> str:
-    """その列の NOT NULL の違反の DB の文言（正規表現。方言ごと）。"""
-    if session.get_bind().dialect.name == "postgresql":
-        return f'null value in column "{column}" of relation "{table}" violates not-null constraint'
-    return f"NOT NULL constraint failed: {table}.{column}"
+def _assert_not_null_violation(dialect: str, error: IntegrityError, table: str, column: str) -> None:
+    """その列の NOT NULL の違反か。SQLite は文言、PostgreSQL は SQLSTATE 23502（not_null_violation）と表・列の名前で見る
+    （サーバの文言の言語に依らない）。"""
+    if dialect == "postgresql":
+        orig: Any = error.orig
+        assert (orig.sqlstate, orig.diag.table_name, orig.diag.column_name) == ("23502", table, column)
+    else:
+        assert f"NOT NULL constraint failed: {table}.{column}" in str(error)
 
 
 @pytest.mark.parametrize(("table", "column"), sorted(NOT_NULL_JSON))
 def test_none_in_not_null_json_columns_is_refused(db_session: Session, table: str, column: str) -> None:
     """A-49 の 5：NOT NULL の JSON の列に ``None`` を書くと、JSON の ``null`` で通らず DB が拒む（SQL の挿入・ORM の更新）。"""
-    violation = _not_null_violation(db_session, table, column)
+    dialect = db_session.get_bind().dialect.name
     row = _not_null_json_row(db_session, table)
     db_session.add(row)
     db_session.flush()
     values = {c.name: getattr(row, c.key) for c in row.__table__.columns if c.name != "id"}
     db_session.rollback()
 
-    with pytest.raises(IntegrityError, match=violation):
+    with pytest.raises(IntegrityError) as inserted:
         db_session.execute(sa.insert(row.__table__).values({**values, column: None}))
+    _assert_not_null_violation(dialect, inserted.value, table, column)
     db_session.rollback()
 
     row = _not_null_json_row(db_session, table)
     db_session.add(row)
     db_session.commit()
     setattr(row, column, None)
-    with pytest.raises(IntegrityError, match=violation):
+    with pytest.raises(IntegrityError) as updated:
         db_session.flush()
+    _assert_not_null_violation(dialect, updated.value, table, column)
     db_session.rollback()
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
@@ -61,9 +62,13 @@ def test_foreign_keys_are_enforced(app: FastAPI) -> None:
     if engine.dialect.name == "sqlite":
         with engine.connect() as connection:
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
-    with pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed|violates foreign key constraint"), \
-            engine.begin() as connection:
+    with pytest.raises(IntegrityError) as caught, engine.begin() as connection:
         connection.execute(insert(Calendar).values(project_id=999_999, working_weekdays="1111100", hours_per_day=8))
+    if engine.dialect.name == "postgresql":  # SQLSTATE 23503（foreign_key_violation。サーバの文言の言語に依らない）
+        orig: Any = caught.value.orig
+        assert (orig.sqlstate, orig.diag.table_name) == ("23503", "calendars")
+    else:
+        assert "FOREIGN KEY constraint failed" in str(caught.value)
 
 
 def test_settings_defaults(monkeypatch) -> None:
