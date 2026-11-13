@@ -117,6 +117,14 @@ export function itemDraftsFrom(items: ProgressItem[], keyFrom: number): ItemDraf
   }));
 }
 
+/**
+ * progress.enter_own だけの人が外せず種類を変えられない項目（保存済みの値で承認済みか作業項目。API-PRG-004・CR-014）。
+ * 入力欄で種類を変えても、保存するまでは保存済みの値で決める（サーバも保存済みの値で判定する）
+ */
+export function guardedItemIds(items: ProgressItem[]): Set<number> {
+  return new Set(items.filter((i) => i.approved || i.item_type === "WORK").map((i) => i.id));
+}
+
 /** 算定項目の入力欄を API-PRG-004 の本体にする。名前の空・重みが正の数でないものは理由を返す */
 export function buildItemsInput(drafts: ItemDraft[]): { items: ProgressItemInput[]; errors: string[] } {
   const errors: string[] = [];
@@ -156,6 +164,8 @@ interface EntryEditorProps {
   row: LightningRow & { activity_id: number };
   canEnter: boolean;
   canEditMethod: boolean;
+  /** 算定項目の承認済みを変えられるか（progress.enter_all だけ。API-PRG-004）。偽なら承認済みの項目と作業項目の削除・種類の変更も出さない（CR-014） */
+  canApprove: boolean;
   /** 保存した後に呼ぶ（画面はイナズマ線を読み直す） */
   onSaved: (message: string) => void;
   onClose: () => void;
@@ -167,6 +177,7 @@ export default function EntryEditor({
   row,
   canEnter,
   canEditMethod,
+  canApprove,
   onSaved,
   onClose,
 }: EntryEditorProps) {
@@ -214,6 +225,7 @@ export default function EntryEditor({
           projectId={projectId}
           activityId={activityId}
           itemType={itemType}
+          canApprove={canApprove}
           onSaved={onSaved}
         />
       )}
@@ -378,14 +390,18 @@ function ProgressItemsEditor({
   projectId,
   activityId,
   itemType,
+  canApprove,
   onSaved,
 }: {
   projectId: number;
   activityId: number;
   itemType: ProgressItemType;
+  canApprove: boolean;
   onSaved: (message: string) => void;
 }) {
   const [drafts, setDrafts] = useState<ItemDraft[]>([]);
+  /** 外せず種類を変えられない保存済みの項目の id（canApprove が偽の人だけに効く） */
+  const [guarded, setGuarded] = useState<Set<number>>(() => new Set());
   const [nextKey, setNextKey] = useState(1);
   /** 今の項目（API-PRG-010）を読めたか。読めるまでは編集を出さない（空から始めて保存すると今の項目が消える） */
   const [loaded, setLoaded] = useState(false);
@@ -399,6 +415,7 @@ function ProgressItemsEditor({
       (result) => {
         if (!cancelled) {
           setDrafts(itemDraftsFrom(result.items, 1));
+          setGuarded(guardedItemIds(result.items));
           setNextKey(result.items.length + 1);
           setLoaded(true);
         }
@@ -438,6 +455,7 @@ function ProgressItemsEditor({
     try {
       const result = await replaceProgressItems(projectId, activityId, built.items);
       setDrafts(itemDraftsFrom(result.items, nextKey));
+      setGuarded(guardedItemIds(result.items));
       setNextKey(nextKey + result.items.length);
       const percent = result.percent_complete === null ? "未算定" : `${result.percent_complete}%`;
       onSaved(`算定項目を ${result.items.length} 件で保存した。進捗率 ${percent}`);
@@ -463,6 +481,11 @@ function ProgressItemsEditor({
       <p className="note">
         今の項目から始める。保存すると、ここに並べた項目で活動の算定項目を置き換える（並べなかった既存の項目は消える）
       </p>
+      {!canApprove && (
+        <p className="note">
+          承認済みを変えられるのは、全ての活動の進捗を入力できる人だけ（今の値のまま保存する）。承認済みの項目と作業の項目を外す・種類を変えるのも同じ
+        </p>
+      )}
       <ErrorAlert error={error} />
       {drafts.length === 0 ? (
         <p>項目がありません（項目が 0 件の活動の進捗率は未算定になる）</p>
@@ -479,62 +502,74 @@ function ProgressItemsEditor({
             </tr>
           </thead>
           <tbody>
-            {drafts.map((d, i) => (
-              <tr key={d.key}>
-                <td>
-                  <select
-                    aria-label={`${i + 1} 行目の種類`}
-                    value={d.itemType}
-                    onChange={(e) => update(d.key, { itemType: e.target.value as ProgressItemType })}
-                  >
-                    {ITEM_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {ITEM_TYPE_LABELS[t]}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  <input
-                    aria-label={`${i + 1} 行目の名前`}
-                    maxLength={ITEM_TITLE_MAX}
-                    value={d.title}
-                    onChange={(e) => update(d.key, { title: e.target.value })}
-                  />
-                </td>
-                <td>
-                  <input
-                    aria-label={`${i + 1} 行目の重み`}
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={d.weight}
-                    onChange={(e) => update(d.key, { weight: e.target.value })}
-                  />
-                </td>
-                <td>
-                  <input
-                    aria-label={`${i + 1} 行目の完了`}
-                    type="checkbox"
-                    checked={d.done}
-                    onChange={(e) => update(d.key, { done: e.target.checked })}
-                  />
-                </td>
-                <td>
-                  <input
-                    aria-label={`${i + 1} 行目の承認済み`}
-                    type="checkbox"
-                    checked={d.approved}
-                    onChange={(e) => update(d.key, { approved: e.target.checked })}
-                  />
-                </td>
-                <td>
-                  <button type="button" onClick={() => setDrafts((ds) => ds.filter((x) => x.key !== d.key))}>
-                    {`${i + 1} 行目を外す`}
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {drafts.map((d, i) => {
+              const locked = !canApprove && d.id !== null && guarded.has(d.id);
+              return (
+                <tr key={d.key}>
+                  <td>
+                    {locked ? (
+                      ITEM_TYPE_LABELS[d.itemType]
+                    ) : (
+                      <select
+                        aria-label={`${i + 1} 行目の種類`}
+                        value={d.itemType}
+                        onChange={(e) => update(d.key, { itemType: e.target.value as ProgressItemType })}
+                      >
+                        {ITEM_TYPES.map((t) => (
+                          <option key={t} value={t}>
+                            {ITEM_TYPE_LABELS[t]}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </td>
+                  <td>
+                    <input
+                      aria-label={`${i + 1} 行目の名前`}
+                      maxLength={ITEM_TITLE_MAX}
+                      value={d.title}
+                      onChange={(e) => update(d.key, { title: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      aria-label={`${i + 1} 行目の重み`}
+                      type="number"
+                      min={0}
+                      step="any"
+                      value={d.weight}
+                      onChange={(e) => update(d.key, { weight: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      aria-label={`${i + 1} 行目の完了`}
+                      type="checkbox"
+                      checked={d.done}
+                      onChange={(e) => update(d.key, { done: e.target.checked })}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      aria-label={`${i + 1} 行目の承認済み`}
+                      type="checkbox"
+                      checked={d.approved}
+                      disabled={!canApprove}
+                      onChange={(e) => update(d.key, { approved: e.target.checked })}
+                    />
+                  </td>
+                  <td>
+                    {locked ? (
+                      "—"
+                    ) : (
+                      <button type="button" onClick={() => setDrafts((ds) => ds.filter((x) => x.key !== d.key))}>
+                        {`${i + 1} 行目を外す`}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

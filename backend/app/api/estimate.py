@@ -102,8 +102,9 @@ def get_estimate_rollup(
 ) -> EstimateRollupOut:
     """API-EST-003 ボトムアップの集計。
 
-    権限は project.view（委託先は自分の割当の経路だけ。``restricted`` が真）。RULE-EST-001：活動→WP→上位→プロジェクトへ合計し、
-    活動の無い WP は自分の見積を使う（5.8）。要素は先行順（兄弟は表示順。API-WBS-001 と同じ）、活動は WP の中の表示順。
+    権限は project.view（委託先は自分の割当の経路だけ。``restricted`` が真。集計値も見える要素・活動だけから求める）。
+    RULE-EST-001：活動→WP→上位→プロジェクトへ合計し、活動の無い WP は自分の見積を使う（5.8）。
+    要素は先行順（兄弟は表示順。API-WBS-001 と同じ）、活動は WP の中の表示順。
     """
     view = estimate_service.estimate_rollup(session, access, user, project_id)
     elements = []

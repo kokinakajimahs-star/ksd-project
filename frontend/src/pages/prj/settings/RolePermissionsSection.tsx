@@ -1,7 +1,9 @@
 // UI-PRJ-002 の権限（CMN-01。API-CMN-006・007）。プロジェクトのロール×権限の表（9.2 の既定を写したもの）を見せ、置き換える。
-// 変えられるのは permission.manage を持つ人だけ（9.1）。置き換えは載せなかったロールの権限を全て外すので、全てのロールを送る
+// 変えられるのは permission.manage を持つ人だけ（9.1）。置き換えは載せなかったロールの権限を全て外すので、全てのロールを送る。
+// permission.manage を持つロールが 1 つも無い表は、サーバが 422 NO_PERMISSION_MANAGER で拒む（9.2 の注記）
 import { useEffect, useState } from "react";
 
+import { ApiError } from "../../../api/client";
 import { toErrorView, type ErrorView } from "../../../api/errors";
 import { getRolePermissions, replaceRolePermissions, type RoleGrants, type RolePermissions } from "../../../api/prj";
 import ErrorAlert from "../../../components/ErrorAlert";
@@ -19,6 +21,19 @@ export function tableOf(value: RolePermissions): GrantTable {
     table[grant.role] = [...grant.permissions];
   }
   return table;
+}
+
+/** 422 NO_PERMISSION_MANAGER のときに、どう直せばよいかを添える文言 */
+export const NO_PERMISSION_MANAGER_HINT =
+  "「ロール×権限の表を変える（permission.manage）」を、少なくとも 1 つのロールに残してください";
+
+/** 保存の失敗を画面に出す形にする。permission.manage を持つロールが無くなる表（422）には直し方を添える */
+export function describeSaveError(error: unknown): ErrorView {
+  const view = toErrorView(error);
+  if (error instanceof ApiError && error.code === "NO_PERMISSION_MANAGER") {
+    return { message: view.message, details: [NO_PERMISSION_MANAGER_HINT] };
+  }
+  return view;
 }
 
 /** 表を置き換えの入力にする。3 章のロールの順、各ロールの権限は 9.1 の順（一覧に無いものは後ろ） */
@@ -97,7 +112,7 @@ export default function RolePermissionsSection({
       setNotice("ロール×権限の表を保存しました");
       onChanged();
     } catch (e: unknown) {
-      setError(toErrorView(e));
+      setError(describeSaveError(e));
     } finally {
       setSubmitting(false);
     }

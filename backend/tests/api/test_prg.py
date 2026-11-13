@@ -8,10 +8,10 @@ SQLite の一時ファイルの DB と TestClient で、正常系と 401・403�
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -23,10 +23,13 @@ from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, User
 from app.models.eff import TimeEntry
-from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem
+from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem, StatusReport
 from app.services.clock import get_now
 from app.services.progress import ComputedEtcEffort, EffortTablesAbsent, TimeEntriesEffort
 from app.services.project_access import ProjectMembersTable
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -244,6 +247,37 @@ def test_put_progress_validates_and_derives_percent(world: World, client: TestCl
     assert world.progress(report, a, actual_start="2026-12-01")["percent_complete"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error_type"),
+    [
+        ("percent_complete", 33.333, "decimal_max_places"),
+        ("percent_complete", 0.001, "decimal_max_places"),
+        ("remaining_hours", 1.005, "decimal_max_places"),
+        ("remaining_hours", 0.1 + 0.2, "decimal_max_places"),
+    ],
+)
+def test_put_progress_refuses_more_decimal_places_than_the_columns(
+    world: World, db_session: Session, field: str, value: float, error_type: str
+) -> None:
+    """A-49 の 4（OQ-42 (8)）：進捗率（Numeric(5,2)）・残工数（Numeric(10,2)）の小数の桁を超える値は、丸めずに 400。何も保存しない。"""
+    a = world.add("A", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    error = world.progress(report, a, expect=400, **{field: value})["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert [(d["loc"], d["type"]) for d in error["details"]] == [(["body", field], error_type)]
+    assert db_session.scalars(select(ProgressEntry).where(ProgressEntry.activity_id == a)).all() == []
+
+
+def test_put_progress_keeps_two_decimal_places_as_entered(world: World, db_session: Session) -> None:
+    """A-49 の 4：小数 2 桁までの進捗率・残工数はそのまま保存する（列の小数の桁に収まる）。"""
+    a = world.add("A", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    body = world.progress(report, a, percent_complete=33.33, remaining_hours=12345.67)
+    assert (body["percent_complete"], body["remaining_hours"]) == (33.33, 12345.67)
+    stored = db_session.scalars(select(ProgressEntry).where(ProgressEntry.activity_id == a)).one()
+    assert (stored.percent_complete, stored.remaining_hours) == (Decimal("33.33"), Decimal("12345.67"))
+
+
 def test_put_progress_permissions_follow_own_assignment(app: FastAPI, world: World, client: TestClient) -> None:
     a = world.add("A", duration_days=5)
     b = world.add("B", duration_days=5)
@@ -257,11 +291,46 @@ def test_put_progress_permissions_follow_own_assignment(app: FastAPI, world: Wor
     assert world.progress(report, a, who="executor", percent_complete=10)["percent_complete"] == 10.0
     assert world.progress(report, b, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
     assert world.progress(report, b, who="contractor", percent_complete=20)["percent_complete"] == 20.0
-    assert world.progress(report, a, who="contractor", expect=403)["error"]["code"] == "FORBIDDEN"
+    # 委託先に見えない活動（自分の割当でない a）は、無い活動と同じ 404（9.2 の注記。CR-011。403 より先）
+    hidden = world.progress(report, a, who="contractor", expect=404)["error"]
+    missing = world.progress(report, MISSING, who="contractor", expect=404)["error"]
+    assert hidden == {**missing, "details": [{"activity_id": a}]} and missing["details"] == [{"activity_id": MISSING}]
     # progress.enter_all（PM・進捗管理担当者）は割当に関わらず書ける
     assert world.progress(report, b, who="pm", percent_complete=30)["percent_complete"] == 30.0
     # 権限の無い利用者には活動の有無を見せない（404 より先に 403）
     assert world.progress(report, MISSING, who="viewer", expect=403)["error"]["code"] == "FORBIDDEN"
+
+
+def test_contractor_gets_same_404_for_hidden_and_missing_activities(app: FastAPI, world: World,
+                                                                      client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先に見えない活動は、無い活動と同じ 404（``code``・``message``・``details`` が同じ形）。
+    自分の割当かの 403 より先に判定しない。API-PRG-003・004・010 で確かめる。全て読める利用者の 403 は変わらない。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["contractor"].id: {b}, world.users["executor"].id: {b}}))
+
+    def put_items(activity_id: int, who: str) -> Any:
+        return client.put(world.url(f"/activities/{activity_id}/progress-items"), json={"items": []}, headers=world.h[who])
+
+    def get_items(activity_id: int, who: str) -> Any:
+        return client.get(world.url(f"/activities/{activity_id}/progress-items"), headers=world.h[who])
+
+    for call in (lambda x: client.put(world.url(f"/status-reports/{report}/progress/{x}"), json={"percent_complete": 10},
+                                      headers=world.h["contractor"]),
+                 lambda x: put_items(x, "contractor"), lambda x: get_items(x, "contractor")):
+        hidden, missing = call(a), call(MISSING)
+        assert (hidden.status_code, missing.status_code) == (404, 404)
+        assert hidden.json()["error"] == {**missing.json()["error"], "details": [{"activity_id": a}]}
+        assert missing.json()["error"] == {"code": "NOT_FOUND", "message": "活動が見つかりません",
+                                           "details": [{"activity_id": MISSING}]}
+    assert put_items(b, "contractor").status_code == 200
+
+    # 全て読める利用者（実行担当者）の自分の割当でない活動は 403 のまま、無い活動は 404
+    assert world.progress(report, a, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
+    assert error_code(put_items(a, "executor")) == "FORBIDDEN"
+    assert put_items(MISSING, "executor").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +394,18 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
     assert twice.status_code == 400
     assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": [
         {"item_type": "CHECK", "title": "x", "weight": 0}]}, headers=world.h["pm"]).status_code == 400
+    # 重みは 0.01 以上・小数 2 桁まで（progress_items.weight は Numeric(10,2)。丸めない。A-49 の 4）
+    for weight, error_type in ((0.001, "greater_than_equal"), (0.005, "greater_than_equal"), (1.255, "decimal_max_places")):
+        refused = client.put(world.url(f"/activities/{a}/progress-items"), json={"items": [
+            {"item_type": "CHECK", "title": "x", "weight": weight}]}, headers=world.h["pm"])
+        assert refused.status_code == 400 and error_code(refused) == "VALIDATION_ERROR"
+        assert [(d["loc"], d["type"]) for d in refused.json()["error"]["details"]] == [
+            (["body", "items", 0, "weight"], error_type)]
+    assert len(client.get(world.url(f"/activities/{a}/progress-items"), headers=world.h["pm"]).json()["items"]) == 2
+    smallest = client.put(world.url(f"/activities/{b}/progress-items"), json={"items": [
+        {"item_type": "WORK", "title": "x", "weight": 0.01}]}, headers=world.h["pm"])
+    assert smallest.status_code == 200, smallest.text
+    assert [i["weight"] for i in smallest.json()["items"]] == [0.01]
     assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": []},
                       headers=world.h["viewer"]).status_code == 403
 
@@ -333,6 +414,125 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
                        headers=world.h["pm"]).json()
     assert (reset["progress_method"], reset["effective_method"]) == (None, "DIRECT")
     assert world.line(report)["rows"][0]["percent_complete"] == 100.0
+
+
+def test_only_enter_all_changes_approved(app: FastAPI, world: World, client: TestClient) -> None:
+    """API-PRG-004（設計書 6.2）：``approved`` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人が変えると 403
+    （何も書かない）。足す項目を真にするのも変えるうち。保存済みと同じ値を送るのは変えたことにしない（項目は ``id`` で対応づける）。"""
+    a = world.add("A", duration_days=4)
+    world.report("2026-12-03")
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["executor"].id: {a}, world.users["contractor"].id: {a}}))
+    url = world.url(f"/activities/{a}/progress-items")
+
+    def put(who: str, *items: dict[str, Any]) -> Any:
+        return client.put(url, json={"items": list(items)}, headers=world.h[who])
+
+    def current() -> list[tuple[str, bool, bool]]:
+        return [(i["title"], i["done"], i["approved"]) for i in client.get(url, headers=world.h["viewer"]).json()["items"]]
+
+    # enter_own だけ（実行担当者・委託先）：承認済みで足すのは 403、偽（省いても偽）なら足せる
+    for who in ("executor", "contractor"):
+        refused = put(who, {"item_type": "WORK", "title": "下書き"}, {"item_type": "DELIVERABLE", "title": "設計書",
+                                                                     "approved": True})
+        assert refused.status_code == 403 and error_code(refused) == "FORBIDDEN", refused.text
+        assert [d["loc"] for d in refused.json()["error"]["details"]] == [["body", "items", 1, "approved"]]
+    assert current() == []
+    created = put("executor", {"item_type": "DELIVERABLE", "title": "設計書", "approved": False})
+    assert created.status_code == 200, created.text
+    item_id = created.json()["items"][0]["id"]
+    design = {"id": item_id, "item_type": "DELIVERABLE", "title": "設計書"}
+
+    # enter_own だけの人が保存済みの偽を真に変えるのは 403。enter_all（進捗管理担当者・PM）は変えられる
+    assert error_code(put("executor", {**design, "approved": True})) == "FORBIDDEN"
+    assert current() == [("設計書", False, False)]
+    approved = put("progress", {**design, "approved": True})
+    assert approved.status_code == 200, approved.text
+    assert current() == [("設計書", False, True)]
+
+    # 同じ値（真）を送って完了だけ変えるのは enter_own だけでも通る。省く（偽）のは真を偽へ変えることなので 403
+    kept = put("contractor", {**design, "done": True, "approved": True})
+    assert kept.status_code == 200, kept.text
+    assert current() == [("設計書", True, True)]
+    assert error_code(put("executor", {**design, "done": True})) == "FORBIDDEN"
+    assert error_code(put("executor", {**design, "done": True, "approved": False})) == "FORBIDDEN"
+    assert current() == [("設計書", True, True)]
+    both = put("pm", {**design, "done": True, "approved": False}, {"item_type": "CHECK", "title": "試験", "approved": True})
+    assert both.status_code == 200, both.text
+    assert current() == [("設計書", True, False), ("試験", False, True)]
+
+
+def test_only_enter_all_removes_or_retypes_approved_and_work_items(app: FastAPI, world: World,
+                                                                   client: TestClient) -> None:
+    """API-PRG-004（設計書 6.2・CR-014）：enter_own だけの人は、承認済みの項目と作業項目（WORK）を消せず、種類を変えられない
+    （承認済み作業割合を承認なしで変えないため。403 で何も書かない）。判定は保存済みの値で行う。名前・重み・完了の変更と、
+    未承認で作業でない項目を消す・種類を変えること、未承認の項目を足すことは今どおり。enter_all の人は全てできる。"""
+    a = world.add("A", duration_days=4)
+    world.report("2026-12-03")
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["executor"].id: {a}, world.users["contractor"].id: {a}}))
+    url = world.url(f"/activities/{a}/progress-items")
+
+    def put(who: str, *items: dict[str, Any]) -> Any:
+        return client.put(url, json={"items": list(items)}, headers=world.h[who])
+
+    def current() -> list[dict[str, Any]]:
+        return [{k: i[k] for k in ("id", "item_type", "title", "weight", "done", "approved")}
+                for i in client.get(url, headers=world.h["viewer"]).json()["items"]]
+
+    def refused_details(response: Any) -> list[tuple[Any, Any]]:
+        assert response.status_code == 403 and error_code(response) == "FORBIDDEN", response.text
+        return [(d.get("loc"), d.get("progress_item_id")) for d in response.json()["error"]["details"]]
+
+    created = put("pm", {"item_type": "WORK", "title": "承認済み作業", "approved": True},
+                  {"item_type": "WORK", "title": "未承認作業"},
+                  {"item_type": "CHECK", "title": "承認済み検証", "approved": True},
+                  {"item_type": "CHECK", "title": "未承認検証"},
+                  {"item_type": "DELIVERABLE", "title": "未承認成果物"})
+    assert created.status_code == 200, created.text
+    saved = current()
+    aw, uw, ac, uc, ud = saved
+    assert [(i["item_type"], i["approved"]) for i in saved] == [
+        ("WORK", True), ("WORK", False), ("CHECK", True), ("CHECK", False), ("DELIVERABLE", False)]
+
+    items_loc = ["body", "items"]
+    for who in ("executor", "contractor"):
+        # 承認済みの項目・作業項目を消す（送った一覧に載せない）
+        assert refused_details(put(who, uw, ac, uc, ud)) == [(items_loc, aw["id"])]
+        assert refused_details(put(who, aw, ac, uc, ud)) == [(items_loc, uw["id"])]
+        assert refused_details(put(who, aw, uw, uc, ud)) == [(items_loc, ac["id"])]
+        # 承認済みの項目・作業項目の種類を変える
+        assert refused_details(put(who, {**aw, "item_type": "CHECK"}, uw, ac, uc, ud)) == [
+            (["body", "items", 0, "item_type"], None)]
+        assert refused_details(put(who, aw, {**uw, "item_type": "CHECK"}, ac, uc, ud)) == [
+            (["body", "items", 1, "item_type"], None)]
+        assert refused_details(put(who, aw, uw, {**ac, "item_type": "WORK"}, uc, ud)) == [
+            (["body", "items", 2, "item_type"], None)]
+        # 許す変更（名前・完了）と並べても、拒む変更があれば何も書かない。拒む理由は全て載せる（承認済みの変更も同じ 403）
+        mixed = put(who, {**uw, "item_type": "DELIVERABLE"}, {**ac, "title": "改名", "done": True, "approved": False},
+                    {**uc, "done": True}, ud)
+        assert refused_details(mixed) == [(["body", "items", 0, "item_type"], None),
+                                          (["body", "items", 1, "approved"], None), (items_loc, aw["id"])]
+        assert current() == saved
+
+    # enter_own だけでも：名前・重み・完了を変える、未承認で作業でない項目を消す・種類を変える、未承認の項目を足すのは通る
+    allowed = put("executor", {**aw, "title": "承認済み作業（改）", "weight": 2, "done": True}, {**uw, "done": True},
+                  {**ac, "weight": 3}, {**ud, "item_type": "CHECK"}, {"item_type": "WORK", "title": "足した作業"})
+    assert allowed.status_code == 200, allowed.text
+    after = current()
+    assert [(i["item_type"], i["title"], i["weight"], i["done"], i["approved"]) for i in after] == [
+        ("WORK", "承認済み作業（改）", 2.0, True, True), ("WORK", "未承認作業", 1.0, True, False),
+        ("CHECK", "承認済み検証", 3.0, False, True), ("CHECK", "未承認成果物", 1.0, False, False),
+        ("WORK", "足した作業", 1.0, False, False)]
+    assert uc["id"] not in [i["id"] for i in after]
+
+    # enter_all（進捗管理担当者）は承認済みの項目・作業項目を消し、種類を変えられる
+    aw2, uw2, ac2, ud2, added = after
+    done = put("progress", {**uw2, "item_type": "CHECK"}, {**ac2, "item_type": "DELIVERABLE"}, ud2)
+    assert done.status_code == 200, done.text
+    assert [(i["id"], i["item_type"], i["approved"]) for i in current()] == [
+        (uw2["id"], "CHECK", False), (ac2["id"], "DELIVERABLE", True), (ud2["id"], "CHECK", False)]
+    assert aw2["id"] not in [i["id"] for i in current()] and added["id"] not in [i["id"] for i in current()]
 
 
 def test_project_default_method_change_refreshes_open_entries(world: World, client: TestClient,
@@ -469,6 +669,27 @@ def test_contractor_sees_only_assigned_rows(app: FastAPI, world: World) -> None:
     line = world.line(report, who="contractor")
     assert [(r["row_index"], r["activity_id"]) for r in line["rows"]] == [(0, b)] and line["restricted"] is True
     assert [r["activity_id"] for r in world.line(report, who="viewer")["rows"]] == [a, b]
+
+
+def test_contractor_entry_count_counts_only_assigned_rows(app: FastAPI, world: World, client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先には報告日の ``entry_count`` を自分の割当の活動の行だけで数える
+    （API-PRG-002 の一覧、API-PRG-006・009 の ``report``）。全て読める利用者は全ての行を数える。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, who="pm", percent_complete=10)
+    world.progress(report, b, who="pm", percent_complete=20)
+    delays = world.url(f"/status-reports/{report}/delays")
+    listed = client.get(world.url("/status-reports"), headers=world.h["viewer"]).json()
+    assert [r["entry_count"] for r in listed["items"]] == [2]
+    assert world.line(report)["report"]["entry_count"] == 2
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b}}))
+    restricted = client.get(world.url("/status-reports"), headers=world.h["contractor"]).json()
+    assert [r["entry_count"] for r in restricted["items"]] == [1] and restricted["total"] == 1
+    assert world.line(report, who="contractor")["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["contractor"]).json()["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["viewer"]).json()["report"]["entry_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +846,112 @@ def test_delays_extract_and_impact(app: FastAPI, world: World, client: TestClien
     assert limited["delays"][0]["project_finish"] is None and limited["combined_project_finish"] is None
     assert client.get(world.url(f"/status-reports/{MISSING}/delays"), headers=world.h["viewer"]).status_code == 404
     assert client.get(world.url(f"/status-reports/{report}/delays"), headers=world.h["outsider"]).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 同時実行（OQ-42 (3)。A-49 の 3）：入力・確定は報告日の行をロックして読み直した状態で判定する。
+# 一意制約の違反は 409 CONFLICT（conftest の race）
+# ---------------------------------------------------------------------------
+
+CONFLICT_ERROR = {"code": "CONFLICT",
+                  "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+                  "details": []}
+
+
+def _finalize_by_other(world: World, report_id: int) -> Callable[[Session], None]:
+    """先に終わった確定（別のセッション）：報告日を FINALIZED にする。"""
+    def finalize(other: Session) -> None:
+        report = other.get(StatusReport, report_id)
+        assert report is not None
+        report.status = "FINALIZED"
+        report.finalized_by = world.users["pm"].id
+        report.finalized_at = NOW
+    return finalize
+
+
+def test_progress_after_concurrent_finalize_is_409_and_writes_nothing(world: World, db_session: Session,
+                                                                      race: RaceProbe) -> None:
+    """API-PRG-003：入力と確定の同時実行（OQ-42 (3)）。報告日の行をロックして読み直した状態で判定するので、先の確定がコミットした
+    後の入力は 409 INVALID_STATE で、確定済みの報告日に入力を書かない（BR-13。A-49 の 3）。"""
+    a = world.add("A", duration_days=4)
+    report = world.report("2026-12-03")["id"]
+    race.before_lock("status_reports", _finalize_by_other(world, report))
+    race.locked.clear()
+
+    body = world.progress(report, a, expect=409, percent_complete=30)
+    assert body["error"]["code"] == "INVALID_STATE"
+    assert body["error"]["details"] == [{"status_report_id": report, "status": "FINALIZED"}]
+    assert race.locked == ["status_reports"]
+    assert db_session.scalars(select(ProgressEntry).where(ProgressEntry.status_report_id == report)).all() == []
+
+
+def test_finalize_after_concurrent_finalize_is_409_and_makes_no_second_snapshot(world: World, db_session: Session,
+                                                                                race: RaceProbe) -> None:
+    """API-PRG-007：二重の確定（OQ-42 (3)）。報告日の行をロックして読み直した状態で判定するので、先の確定がコミットした後の確定は
+    409 INVALID_STATE で、スナップショットを作らない（確定は二度しない。A-49 の 3）。"""
+    world.all_days_working()
+    a = world.add("A", requested_start="2026-12-01", duration_days=10)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, percent_complete=20, actual_start="2026-12-01")
+    race.before_lock("status_reports", _finalize_by_other(world, report))
+    race.locked.clear()
+
+    body = world.finalize(report, expect=409)
+    assert body["error"]["code"] == "INVALID_STATE"
+    assert body["error"]["details"] == [{"status_report_id": report, "status": "FINALIZED"}]
+    assert race.locked == ["status_reports"]
+    assert db_session.scalars(select(ProgressSnapshot).where(ProgressSnapshot.status_report_id == report)).all() == []
+
+    # 競わない確定も同じく報告日の行をロックしてから判定する
+    other = world.report("2026-12-04")["id"]
+    race.locked.clear()
+    assert world.finalize(other)["report"]["status"] == "FINALIZED"
+    assert race.locked == ["status_reports"]
+
+
+def test_items_and_method_lock_open_reports_before_refreshing_entries(world: World, client: TestClient,
+                                                                      race: RaceProbe) -> None:
+    """API-PRG-004・005：算定項目・算定方式を変えたときの求め直しは、入力のある OPEN の報告日の行をロックしてから入力を変える
+    （``FOR UPDATE OF status_reports``。確定と競わせない。A-49 の 3）。
+
+    この経路は活動・項目を書いた後にロックを取るので、ロックの直前に別のセッションで確定をコミットする再現は SQLite ではできない
+    （書き込みは 1 つずつ）。ここでは PostgreSQL の方言で ``FOR UPDATE OF status_reports`` を出すことだけを確かめる。"""
+    a = world.add("A", duration_days=4)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, actual_start="2026-12-01")
+
+    race.locked.clear()
+    method = client.put(world.url(f"/activities/{a}/progress-method"), json={"progress_method": "CHECK_ITEM_RATIO"},
+                        headers=world.h["pm"])
+    assert method.status_code == 200, method.text
+    assert race.locked == ["status_reports"]
+
+    race.locked.clear()
+    items = client.put(world.url(f"/activities/{a}/progress-items"),
+                       json={"items": [{"item_type": "CHECK", "title": "単体試験", "done": True}]}, headers=world.h["pm"])
+    assert items.status_code == 200, items.text
+    assert items.json()["percent_complete"] == 100.0
+    assert race.locked == ["status_reports"]
+
+
+def test_status_report_created_at_once_is_409_conflict(world: World, client: TestClient, db_session: Session,
+                                                       race: RaceProbe) -> None:
+    """API-PRG-001：同じ日付の報告日の同時の作成。先の作成がコミットした後の INSERT が一意制約（project_id＋report_date）に
+    当たったら、500 でなく 409 CONFLICT（6.1）で、報告日は 1 つだけ（A-49 の 3）。"""
+    pm = world.users["pm"].id
+
+    def create(other: Session) -> None:
+        other.add(StatusReport(project_id=world.pid, report_date=date(2026, 12, 3), status="OPEN", created_by=pm,
+                               created_at=NOW))
+
+    race.before_insert(StatusReport, create)
+    response = client.post(world.url("/status-reports"), json={"report_date": "2026-12-03"}, headers=world.h["pm"])
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == CONFLICT_ERROR
+    reports = db_session.scalars(select(StatusReport).where(StatusReport.project_id == world.pid)).all()
+    assert [(r.report_date, r.status) for r in reports] == [(date(2026, 12, 3), "OPEN")]
+    # 競わない 2 度目の作成は、これまでどおり事前の確認で 409 DUPLICATE_STATUS_REPORT
+    assert world.report("2026-12-03", expect=409)["error"]["code"] == "DUPLICATE_STATUS_REPORT"
 
 
 # ---------------------------------------------------------------------------

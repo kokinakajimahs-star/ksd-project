@@ -6,7 +6,14 @@ import { ApiError, setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import { makeMe, makeMember, makePendingApproval, makeUser } from "../../test/fixtures";
 import { memberPage } from "../../test/chgFixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import {
   makeComment,
   makeReview,
@@ -385,6 +392,25 @@ describe("UI-WBS-003 WBSの検証・レビュー・承認", () => {
     ]);
     expect(await screen.findByText("このプロジェクトの WBS で判断を待つ申請はありません")).toBeInTheDocument();
     expect(await screen.findByRole("table", { name: "スコープベースラインの版" })).toHaveTextContent("初回の承認");
+  });
+
+  it("承認待ちは total まで頁を読み足し、1000 件より後ろにあるこのプロジェクトの申請も出す（A-49 の 2）", async () => {
+    // 先頭の 1000 件は他のプロジェクトの申請（承認待ちは全てのプロジェクトをまたぐ一覧。API-WBS-020）
+    const others = Array.from({ length: 1000 }, (_, i) => makePendingApproval({ id: 2000 + i, project_id: 5, target_id: 5 }));
+    const all = [...others, makePendingApproval({ id: 10 })];
+    const { calls } = mockApi(
+      routes(meWith(APPROVER), { "GET /api/v1/approval-requests": (call) => pagedResponse(all, call) }),
+    );
+    renderAt();
+
+    const table = await screen.findByRole("table", { name: "判断を待つ WBS の申請" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("#10");
+    expect(sent(calls, "GET", "/api/v1/approval-requests").map((c) => c.url)).toEqual([
+      "/api/v1/approval-requests?limit=1000&offset=0",
+      "/api/v1/approval-requests?limit=1000&offset=1000",
+    ]);
   });
 
   it("自分の申請の判断はサーバの 403 の文言を出す（WBS-21）", async () => {

@@ -37,18 +37,18 @@ from app.domain.estimate import (
     rollup_estimates,
 )
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.cmn import User
 from app.models.est import EstimateRecord
-from app.models.prj import HOURS_PER_DAY_DEFAULT, Calendar, Project
+from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
-from app.services.wbs import _mark_edited, _preorder
+from app.services.wbs import mark_wbs_edited, preorder_elements, project_hours_per_day
 
 ESTIMATE_EDIT = "estimate.edit"
 PROJECT_VIEW = "project.view"
-_ZERO = Decimal(0)
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +80,6 @@ def _current_hours(target: WbsElement | Activity) -> Decimal | None:
     return target.own_estimate_hours if isinstance(target, WbsElement) else target.estimate_hours
 
 
-def _hours_per_day(session: Session, project_id: int) -> Decimal:
-    """人日→人時の換算に使う 1 日の稼働時間（PRJ-04）。カレンダーの行が無いプロジェクトは 4.1 の既定。"""
-    value = session.scalar(select(Calendar.hours_per_day).where(Calendar.project_id == project_id))
-    return Decimal(HOURS_PER_DAY_DEFAULT if value is None else value)
-
-
 def _elements(session: Session, project_id: int) -> list[WbsElement]:
     return list(session.scalars(select(WbsElement).where(WbsElement.project_id == project_id).order_by(WbsElement.id)))
 
@@ -107,7 +101,7 @@ def _rollup(project_id: int, elements: Sequence[WbsElement], activities: Sequenc
         raise RuntimeError(f"プロジェクト {project_id} の見積を集計できない: {exc}") from exc
 
 
-def _visible(
+def visible_scope(
     session: Session,
     access: ProjectAccess,
     actor: User,
@@ -176,9 +170,11 @@ def write_estimate(
 
     対象がそのプロジェクトに無ければ 404。WBS要素の見積は承認待ちの間は 409（RULE-WBS-006）。
     換算・値の検査は RULE-EST-002（負の値・小数 3 桁以降・換算後の上限超えは 400）。記録を足し、対象の今の見積を同じ値にする。
+    WBS の状態はプロジェクトの行をロックして読み直した値で判定する（A-49 の 3）。WBS の編集（``app.services.wbs`` の
+    ``_editing``）と同じく、対象の種類を問わず対象を読む前にロックする。
     """
     authorize_project(session, access, actor, project_id, ESTIMATE_EDIT)
-    project = session.get(Project, project_id)
+    project = lock_row(session, Project, project_id)
     if project is None:  # authorize_project が先に 404 を返すので、ここへは来ない
         raise AppError(404, "NOT_FOUND", "プロジェクトが見つかりません", details=[{"project_id": project_id}])
     target = _target_of(session, project_id, target_type, target_id)
@@ -191,7 +187,7 @@ def write_estimate(
             target_id=target_id,
             input_value=input_value,
             input_unit=input_unit,
-            hours_per_day=_hours_per_day(session, project_id),
+            hours_per_day=project_hours_per_day(session, project_id),
             entered_by=actor.id,
             entered_at=now,
             method=method,
@@ -202,7 +198,7 @@ def write_estimate(
         raise AppError(400, "VALIDATION_ERROR", "見積の値が正しくありません",
                        details=[{"loc": ["body", "input_value"], "message": str(exc)}]) from exc
     if isinstance(target, WbsElement):
-        _mark_edited(project)
+        mark_wbs_edited(project)
         target.own_estimate_hours = record.hours
     else:
         target.estimate_hours = record.hours
@@ -263,7 +259,7 @@ def estimate_history(
     target = _target_of(session, project_id, target_type, target_id)
     elements = _elements(session, project_id)
     activities = _activities(session, project_id)
-    visible = _visible(session, access, actor, project_id, table, elements, activities)
+    visible = visible_scope(session, access, actor, project_id, table, elements, activities)
     if visible is not None:
         allowed = visible.element_ids if target_type is TargetType.ELEMENT else visible.activity_ids
         if target is None or target_id not in allowed:
@@ -306,26 +302,22 @@ class RollupView:
 def estimate_rollup(session: Session, access: ProjectAccess, actor: User, project_id: int) -> RollupView:
     """活動→WP→上位→プロジェクトへの見積の集計（project.view。RULE-EST-001・EST-02）。
 
-    委託先だけで読む利用者は、見える要素・自分の割当の活動だけを返す（``restricted`` が真）。そのときのプロジェクトの値は
-    見える最上位の要素の値の合計（API-WBS-001 の ``project_estimate_hours`` と同じ求め方）。
+    委託先だけで読む利用者は、見える要素・自分の割当の活動だけを返し（``restricted`` が真）、集計値も見える要素・活動だけから
+    求める（9.2 の注記。API-WBS-001 の ``rollup_hours``・``project_estimate_hours`` と同じ求め方）。
     """
     table = authorize_project(session, access, actor, project_id, PROJECT_VIEW)
     elements = _elements(session, project_id)
     activities = _activities(session, project_id)
-    rollup = _rollup(project_id, elements, activities)
-    visible = _visible(session, access, actor, project_id, table, elements, activities)
-    rows = _preorder(elements)
+    visible = visible_scope(session, access, actor, project_id, table, elements, activities)
     if visible is not None:
-        rows = [(e, depth) for e, depth in rows if e.id in visible.element_ids]
+        elements = [e for e in elements if e.id in visible.element_ids]
         activities = [a for a in activities if a.id in visible.activity_ids]
+    rollup = _rollup(project_id, elements, activities)
+    rows = preorder_elements(elements)
     order = {e.id: index for index, (e, _) in enumerate(rows)}
     ordered = sorted((a for a in activities if a.work_package_id in order),
                      key=lambda a: (order[a.work_package_id], a.sort_order, a.id))
-    if visible is None:
-        project_hours = rollup.project_hours
-    else:
-        project_hours = sum((rollup.hours_of(e.id) for e, _ in rows if e.parent_id is None), _ZERO)
-    return RollupView(rollup=rollup, elements=rows, activities=ordered, project_hours=project_hours,
+    return RollupView(rollup=rollup, elements=rows, activities=ordered, project_hours=rollup.project_hours,
                       restricted=visible is not None)
 
 

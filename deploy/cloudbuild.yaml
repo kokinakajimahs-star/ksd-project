@@ -1,0 +1,48 @@
+# サーバ（Dockerfile の app の段）と試験（test の段）の 2 つのイメージをビルドし、Artifact Registry へ置く（設計書 1.1・CR-020）。
+#
+# 流し方は deploy/deploy.sh（gcloud builds submit --config deploy/cloudbuild.yaml --substitutions _IMAGE_REPO=…,_TAG=…）。
+#   _IMAGE_REPO：<region>-docker.pkg.dev/<project>/<prefix>-images（terraform output image_repo）
+#   _TAG       ：git の短い sha（コミットしていない変更があれば -dirty-<時刻> を付ける）
+# 置き換えの値に既定値を置かない（渡し忘れたらビルドを始めない）。
+# 置いたイメージのダイジェストは最後の段で出し、ビルドの結果（results.images）にも残る。
+
+steps:
+  - id: build-app
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "--target", "app", "--tag", "${_IMAGE_REPO}/pmt:${_TAG}", "."]
+
+  # app と同じ段（frontend・base）は同じビルドの中のキャッシュを使う
+  - id: build-test
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "--target", "test", "--tag", "${_IMAGE_REPO}/pmt-test:${_TAG}", "."]
+    waitFor: ["build-app"]
+
+  - id: push-app
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_IMAGE_REPO}/pmt:${_TAG}"]
+    waitFor: ["build-app"]
+
+  - id: push-test
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_IMAGE_REPO}/pmt-test:${_TAG}"]
+    waitFor: ["build-test"]
+
+  - id: digests
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - "-c"
+      - >-
+        docker image inspect --format '{{index .RepoDigests 0}}'
+        "${_IMAGE_REPO}/pmt:${_TAG}" "${_IMAGE_REPO}/pmt-test:${_TAG}"
+    waitFor: ["push-app", "push-test"]
+
+images:
+  - "${_IMAGE_REPO}/pmt:${_TAG}"
+  - "${_IMAGE_REPO}/pmt-test:${_TAG}"
+
+options:
+  # ビルド用のサービスアカウント（deploy.sh が --service-account で渡す）で流すので、ログは Cloud Logging だけに書く
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1800s

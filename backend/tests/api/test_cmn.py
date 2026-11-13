@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,6 +27,7 @@ from app.domain.authz import DEFAULT_ROLE_PERMISSIONS, PERMISSIONS, ROLES, Membe
 from app.infra.db import Base
 from app.infra.security import hash_password, hash_token, verify_password
 from app.main import create_app
+from app.models.chg import AuditLog
 from app.models.cmn import AuthSession, RolePermission, User
 from app.models.prj import Project
 from app.services.clock import get_now
@@ -33,6 +35,14 @@ from app.services.project_access import ProjectTablesAbsent
 
 NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 PASSWORD = "correct horse battery staple"
+# ログイン名が無い・無効・ロック中・パスワードの誤りに共通の 401（どれに当たったかもロックも明かさない。NFR-04）
+INVALID_CREDENTIALS_BODY = {
+    "error": {
+        "code": "INVALID_CREDENTIALS",
+        "message": "ログイン名またはパスワードが違うか、しばらくログインできません",
+        "details": [],
+    }
+}
 PROJECT = 1
 OTHER_PROJECT = 2
 MISSING_PROJECT = 99
@@ -71,6 +81,9 @@ class FakeProjectAccess:
 
     def memberships(self, session: Session, user_id: int) -> dict[int, Membership]:
         return {pid: members[user_id] for pid, members in self.projects.items() if user_id in members}
+
+    def project_ids(self, session: Session) -> list[int]:
+        return sorted(self.projects)
 
 
 @pytest.fixture()
@@ -183,9 +196,12 @@ def test_login_issues_token_with_12_hour_expiry_and_stores_only_hash(
         "email": None,
         "organization": None,
         "is_system_admin": False,
+        "can_create_project": False,
         "is_active": True,
+        "locked_until": None,
     }
     assert "password_hash" not in response.text
+    assert "failed_login_count" not in response.text
 
     token = body["access_token"]
     stored = db_session.scalars(select(AuthSession)).all()
@@ -224,9 +240,7 @@ def test_login_rejects_bad_credentials_with_same_401(
     make_user(db_session, "inactive", is_active=False)
     response = client.post("/api/v1/auth/login", json={"login_id": login_id, "password": password})
     assert response.status_code == 401
-    assert response.json() == {
-        "error": {"code": "INVALID_CREDENTIALS", "message": "ログイン名またはパスワードが違います", "details": []}
-    }
+    assert response.json() == INVALID_CREDENTIALS_BODY
     assert db_session.scalars(select(AuthSession)).all() == []
 
 
@@ -235,6 +249,105 @@ def test_login_input_error_is_400(client: TestClient) -> None:
     response = client.post("/api/v1/auth/login", json={"login_id": "u1"})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def post_login(client: TestClient, login_id: str, password: str) -> Response:
+    return client.post("/api/v1/auth/login", json={"login_id": login_id, "password": password})
+
+
+def stored_user(session: Session, user_id: int) -> User:
+    """DB に残った値（401 を返した要求の書き込みも、コミットしていれば読める）。"""
+    session.expire_all()
+    user = session.get(User, user_id)
+    assert user is not None
+    return user
+
+
+def test_login_locks_after_10_failures_for_15_minutes(client: TestClient, db_session: Session, clock: Clock) -> None:
+    """API-CMN-001・NFR-04：パスワードを続けて 10 回誤るとロックし（数えは 0 に戻る）、15 分の間は正しいパスワードでも 401。
+    ロック中の試行は数えずロックも延ばさない。15 分たてばログインでき、成功で数えとロックが消える。"""
+    user = make_user(db_session, "u1")
+    for attempt in range(1, 10):
+        assert post_login(client, "u1", "wrong password").status_code == 401
+        assert (stored_user(db_session, user.id).failed_login_count, stored_user(db_session, user.id).locked_until) == (
+            attempt, None)
+
+    tenth = post_login(client, "u1", "wrong password")
+    assert tenth.status_code == 401
+    assert tenth.json() == INVALID_CREDENTIALS_BODY
+    locked = stored_user(db_session, user.id)
+    assert (locked.failed_login_count, locked.locked_until) == (0, NOW + timedelta(minutes=15))
+
+    for offset in (timedelta(0), timedelta(minutes=15) - timedelta(seconds=1)):
+        clock.now = NOW + offset
+        for password in (PASSWORD, "wrong password"):
+            response = post_login(client, "u1", password)
+            assert response.status_code == 401
+            assert response.json() == INVALID_CREDENTIALS_BODY
+    still = stored_user(db_session, user.id)
+    assert (still.failed_login_count, still.locked_until) == (0, NOW + timedelta(minutes=15))
+    assert db_session.scalars(select(AuthSession)).all() == []
+
+    clock.now = NOW + timedelta(minutes=15)
+    assert post_login(client, "u1", PASSWORD).status_code == 200
+    unlocked = stored_user(db_session, user.id)
+    assert (unlocked.failed_login_count, unlocked.locked_until) == (0, None)
+
+
+def test_login_success_resets_failure_count(client: TestClient, db_session: Session, clock: Clock) -> None:
+    """API-CMN-001・NFR-04：数えるのは「続けて」誤った回数。成功で 0 に戻るので、その後の 9 回の誤りではロックしない。"""
+    user = make_user(db_session, "u1")
+    for _ in range(9):
+        post_login(client, "u1", "wrong password")
+    assert stored_user(db_session, user.id).failed_login_count == 9
+    login(client, "u1")
+    assert stored_user(db_session, user.id).failed_login_count == 0
+    for _ in range(9):
+        post_login(client, "u1", "wrong password")
+    assert stored_user(db_session, user.id).locked_until is None
+    login(client, "u1")
+
+
+def test_locked_and_bad_credentials_are_indistinguishable(
+    client: TestClient, db_session: Session, clock: Clock
+) -> None:
+    """API-CMN-001・NFR-04：ログイン名が無い・無効・ロック中（正しいパスワード）・パスワードの誤りの応答は、状態・本体・見出しが同じ。"""
+    make_user(db_session, "u1")
+    make_user(db_session, "inactive", is_active=False)
+    locked = make_user(db_session, "locked")
+    locked.locked_until = NOW + timedelta(minutes=5)
+    db_session.commit()
+
+    responses = [
+        post_login(client, "nobody", PASSWORD),
+        post_login(client, "inactive", PASSWORD),
+        post_login(client, "locked", PASSWORD),
+        post_login(client, "u1", "wrong password"),
+    ]
+    assert {response.status_code for response in responses} == {401}
+    assert all(response.json() == INVALID_CREDENTIALS_BODY for response in responses)
+    assert len({tuple(sorted(response.headers.items())) for response in responses}) == 1
+
+
+def test_login_lock_follows_settings(tmp_path: Path, disposables: list[FastAPI]) -> None:
+    """NFR-10：ロックする回数と長さは PMT_LOGIN_MAX_FAILURES・PMT_LOGIN_LOCK_MINUTES に従う。"""
+    application = create_app(
+        Settings(database_url=f"sqlite:///{tmp_path / 'lock.db'}", login_max_failures=2, login_lock_minutes=1)
+    )
+    disposables.append(application)
+    Base.metadata.create_all(application.state.engine)
+    clock = Clock(NOW)
+    application.dependency_overrides[get_now] = clock
+    with application.state.session_factory() as session:
+        user_id = make_user(session, "u1").id
+    with TestClient(application) as client:
+        post_login(client, "u1", "wrong password")
+        post_login(client, "u1", "wrong password")
+        assert post_login(client, "u1", PASSWORD).status_code == 401
+        with application.state.session_factory() as session:
+            assert stored_user(session, user_id).locked_until == NOW + timedelta(minutes=1)
+        clock.now = NOW + timedelta(minutes=1)
+        assert post_login(client, "u1", PASSWORD).status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +451,35 @@ def test_list_users_allowed_by_member_manage_in_a_project(
         assert response.json()["error"]["code"] == "FORBIDDEN"
 
 
+def test_list_users_shows_lock_and_create_permission_only_to_user_admin(
+    client: TestClient, db_session: Session, admin: User, access: FakeProjectAccess, project: int, clock: Clock
+) -> None:
+    """API-CMN-003（CR-019）：``locked_until``・``can_create_project`` は user.admin を持つ人にだけ値を返し、member.manage
+    だけの人（PM）には null。ほかの項目は同じ。"""
+    pm = make_user(db_session, "pm")
+    access.add_member(project, pm.id, "PM")
+    locked = make_user(db_session, "locked")
+    locked.locked_until = NOW + timedelta(minutes=10)
+    locked.can_create_project = True
+    db_session.commit()
+
+    def items(login_id: str) -> dict[str, dict[str, object]]:
+        response = client.get("/api/v1/users", headers=bearer(login(client, login_id)))
+        assert response.status_code == 200, response.text
+        return {item["login_id"]: item for item in response.json()["items"]}
+
+    by_admin = items("admin")
+    assert by_admin["locked"]["can_create_project"] is True and by_admin["pm"]["can_create_project"] is False
+    assert str(by_admin["locked"]["locked_until"]).startswith("2026-11-10T09:10:00")
+    by_pm = items("pm")
+    assert set(by_pm) == set(by_admin) == {"admin", "owner-1", "pm", "locked"}
+    for login_id, item in by_pm.items():
+        assert (item["locked_until"], item["can_create_project"]) == (None, None), login_id
+        hidden = ("locked_until", "can_create_project")
+        assert {k: v for k, v in item.items() if k not in hidden} == {
+            k: v for k, v in by_admin[login_id].items() if k not in hidden}
+
+
 def test_list_users_follows_project_table_not_default(
     client: TestClient, db_session: Session, access: FakeProjectAccess, clock: Clock
 ) -> None:
@@ -366,7 +508,7 @@ def test_admin_creates_user_who_can_log_in(
         json={
             "login_id": "new.user",
             "display_name": "新しい利用者",
-            "password": "s3cret-pass",
+            "password": "s3cret-passphrase",
             "email": "new.user@example.invalid",
             "organization": "委託先A",
         },
@@ -382,9 +524,9 @@ def test_admin_creates_user_who_can_log_in(
     stored = db_session.get(User, body["id"])
     assert stored is not None
     assert stored.password_hash.startswith("scrypt$16384$8$1$")
-    assert "s3cret-pass" not in stored.password_hash
-    assert verify_password("s3cret-pass", stored.password_hash)
-    login(client, "new.user", "s3cret-pass")
+    assert "s3cret-passphrase" not in stored.password_hash
+    assert verify_password("s3cret-passphrase", stored.password_hash)
+    login(client, "new.user", "s3cret-passphrase")
 
 
 def test_create_user_requires_user_admin(
@@ -407,7 +549,7 @@ def test_create_user_duplicate_login_id_is_409(client: TestClient, admin: User, 
     response = client.post(
         "/api/v1/users",
         headers=bearer(login(client, "admin")),
-        json={"login_id": "admin", "display_name": "二人目", "password": "p"},
+        json={"login_id": "admin", "display_name": "二人目", "password": PASSWORD},
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "DUPLICATE_LOGIN_ID"
@@ -416,11 +558,11 @@ def test_create_user_duplicate_login_id_is_409(client: TestClient, admin: User, 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"login_id": "", "display_name": "x", "password": "p"},
+        {"login_id": "", "display_name": "x", "password": PASSWORD},
         {"login_id": "x", "display_name": "x", "password": ""},
-        {"login_id": "x" * 101, "display_name": "x", "password": "p"},
-        {"login_id": "x", "display_name": "x", "password": "p", "is_active": False},
-        {"login_id": "x", "display_name": "x", "password": "p", "password_hash": "scrypt$x"},
+        {"login_id": "x" * 101, "display_name": "x", "password": PASSWORD},
+        {"login_id": "x", "display_name": "x", "password": PASSWORD, "is_active": False},
+        {"login_id": "x", "display_name": "x", "password": PASSWORD, "password_hash": "scrypt$x"},
     ],
     ids=["empty-login", "empty-password", "long-login", "unknown-field", "hash-field"],
 )
@@ -429,6 +571,114 @@ def test_create_user_input_errors_are_400(client: TestClient, admin: User, clock
     response = client.post("/api/v1/users", headers=bearer(login(client, "admin")), json=payload)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("login_id", "password", "message"),
+    [
+        ("u-short", "x" * 11, "パスワードは 12 文字以上にしてください"),
+        ("same.as.login.id", "same.as.login.id", "ログイン名と同じパスワードは使えません"),
+    ],
+    ids=["11-chars", "same-as-login-id"],
+)
+def test_create_user_rejects_password_against_policy(
+    client: TestClient, db_session: Session, admin: User, clock: Clock, login_id: str, password: str, message: str
+) -> None:
+    """API-CMN-004・NFR-04：12 文字未満・ログイン名と同じパスワードは 400 VALIDATION_ERROR（loc は body.password）。作らない。"""
+    response = client.post(
+        "/api/v1/users",
+        headers=bearer(login(client, "admin")),
+        json={"login_id": login_id, "display_name": "x", "password": password},
+    )
+    assert response.status_code == 400
+    body = response.json()["error"]
+    assert body["code"] == "VALIDATION_ERROR"
+    assert body["details"] == [{"loc": ["body", "password"], "message": message}]
+    assert db_session.scalar(select(User).where(User.login_id == login_id)) is None
+
+
+def test_create_user_accepts_exactly_12_chars_and_any_character_kinds(
+    client: TestClient, admin: User, clock: Clock
+) -> None:
+    """API-CMN-004・NFR-04：ちょうど 12 文字は通る。文字種（数字・記号など）は課さない。1024 文字まで通り、1025 文字は 400。"""
+    token = login(client, "admin")
+    for login_id, password in (("u12", "a" * 12), ("u1024", "b" * 1024)):
+        response = client.post(
+            "/api/v1/users", headers=bearer(token), json={"login_id": login_id, "display_name": "x", "password": password}
+        )
+        assert response.status_code == 201, response.text
+        login(client, login_id, password)
+    too_long = client.post(
+        "/api/v1/users", headers=bearer(token), json={"login_id": "u1025", "display_name": "x", "password": "c" * 1025}
+    )
+    assert too_long.status_code == 400
+
+
+def test_password_min_length_follows_settings(tmp_path: Path, disposables: list[FastAPI]) -> None:
+    """NFR-10：最小の長さは PMT_PASSWORD_MIN_LENGTH に従う（API-CMN-004・005 の両方）。"""
+    application = create_app(Settings(database_url=f"sqlite:///{tmp_path / 'policy.db'}", password_min_length=16))
+    disposables.append(application)
+    Base.metadata.create_all(application.state.engine)
+    application.dependency_overrides[get_now] = Clock(NOW)
+    with application.state.session_factory() as session:
+        make_user(session, "admin", is_system_admin=True)
+    with TestClient(application) as client:
+        token = login(client, "admin")
+        short = client.post(
+            "/api/v1/users", headers=bearer(token), json={"login_id": "u1", "display_name": "x", "password": "y" * 15}
+        )
+        assert short.status_code == 400
+        assert short.json()["error"]["details"][0]["message"] == "パスワードは 16 文字以上にしてください"
+        created = client.post(
+            "/api/v1/users", headers=bearer(token), json={"login_id": "u1", "display_name": "x", "password": "y" * 16}
+        )
+        assert created.status_code == 201
+        patched = client.patch(f"/api/v1/users/{created.json()['id']}", headers=bearer(token), json={"password": "z" * 15})
+        assert patched.status_code == 400
+
+
+def test_admin_sets_can_create_project_and_me_reports_project_create(
+    client: TestClient, db_session: Session, admin: User, clock: Clock
+) -> None:
+    """API-CMN-004・005・008・9.1：user.admin がプロジェクトの作成を許すと（can_create_project）、その人の /me の
+    system_permissions に project.create が出る。外すと消える。既定は許さない。"""
+    token = login(client, "admin")
+    created = client.post(
+        "/api/v1/users",
+        headers=bearer(token),
+        json={"login_id": "creator", "display_name": "作る人", "password": PASSWORD, "can_create_project": True},
+    )
+    assert created.status_code == 201
+    assert created.json()["can_create_project"] is True
+    plain = client.post(
+        "/api/v1/users", headers=bearer(token), json={"login_id": "plain", "display_name": "x", "password": PASSWORD}
+    )
+    assert plain.json()["can_create_project"] is False
+
+    assert client.get("/api/v1/me", headers=bearer(login(client, "creator"))).json()["system_permissions"] == [
+        "project.create"
+    ]
+    assert client.get("/api/v1/me", headers=bearer(login(client, "plain"))).json()["system_permissions"] == []
+
+    revoked = client.patch(
+        f"/api/v1/users/{created.json()['id']}", headers=bearer(token), json={"can_create_project": False}
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["can_create_project"] is False
+    assert client.get("/api/v1/me", headers=bearer(login(client, "creator"))).json()["system_permissions"] == []
+    assert client.patch(
+        f"/api/v1/users/{created.json()['id']}", headers=bearer(token), json={"can_create_project": None}
+    ).status_code == 400
+
+
+def test_only_user_admin_sets_can_create_project(client: TestClient, db_session: Session, clock: Clock) -> None:
+    """API-CMN-005・9.1：project.create の許可を設定するのは user.admin だけ。自分に許すことも 403。"""
+    user = make_user(db_session, "u1")
+    response = client.patch(
+        f"/api/v1/users/{user.id}", headers=bearer(login(client, "u1")), json={"can_create_project": True}
+    )
+    assert response.status_code == 403
+    assert stored_user(db_session, user.id).can_create_project is False
 
 
 # ---------------------------------------------------------------------------
@@ -486,12 +736,53 @@ def test_password_change_revokes_old_tokens(
     user = make_user(db_session, "u1")
     old_token = login(client, "u1")
     response = client.patch(
-        f"/api/v1/users/{user.id}", headers=bearer(login(client, "admin")), json={"password": "new-pass"}
+        f"/api/v1/users/{user.id}", headers=bearer(login(client, "admin")), json={"password": "new-passphrase"}
     )
     assert response.status_code == 200
     assert client.get("/api/v1/me", headers=bearer(old_token)).status_code == 401
     assert client.post("/api/v1/auth/login", json={"login_id": "u1", "password": PASSWORD}).status_code == 401
-    login(client, "u1", "new-pass")
+    login(client, "u1", "new-passphrase")
+
+
+@pytest.mark.parametrize(
+    ("password", "message"),
+    [("x" * 11, "パスワードは 12 文字以上にしてください"), ("long.login.id", "ログイン名と同じパスワードは使えません")],
+    ids=["11-chars", "same-as-login-id"],
+)
+def test_update_user_rejects_password_against_policy(
+    client: TestClient, db_session: Session, admin: User, clock: Clock, password: str, message: str
+) -> None:
+    """API-CMN-005・NFR-04：設定し直すパスワードも方針で確かめる（ログイン名はその利用者のもの）。違反は 400 で、何も変えない。"""
+    user = make_user(db_session, "long.login.id")
+    before = user.password_hash
+    response = client.patch(
+        f"/api/v1/users/{user.id}", headers=bearer(login(client, "admin")), json={"password": password}
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["details"] == [{"loc": ["body", "password"], "message": message}]
+    assert stored_user(db_session, user.id).password_hash == before
+    login(client, "long.login.id")
+
+
+def test_admin_password_reset_unlocks_user(
+    client: TestClient, db_session: Session, admin: User, clock: Clock
+) -> None:
+    """API-CMN-005・NFR-04：user.admin がパスワードを設定し直すとロックを解き（数え 0・locked_until 空）、すぐにログインできる。
+    一覧（API-CMN-003）の locked_until でロック中が分かる。"""
+    user = make_user(db_session, "u1")
+    for _ in range(10):
+        post_login(client, "u1", "wrong password")
+    token = login(client, "admin")
+    listed = {item["login_id"]: item for item in client.get("/api/v1/users", headers=bearer(token)).json()["items"]}
+    assert datetime.fromisoformat(listed["u1"]["locked_until"]) == NOW + timedelta(minutes=15)
+
+    response = client.patch(f"/api/v1/users/{user.id}", headers=bearer(token), json={"password": "reset-passphrase"})
+    assert response.status_code == 200
+    assert response.json()["locked_until"] is None
+    reset = stored_user(db_session, user.id)
+    assert (reset.failed_login_count, reset.locked_until) == (0, None)
+    login(client, "u1", "reset-passphrase")
 
 
 @pytest.mark.parametrize("change", [{"is_active": False}, {"is_system_admin": False}], ids=["deactivate", "demote"])
@@ -699,6 +990,29 @@ def test_replace_role_permissions_rejects_bad_codes(
     assert count == len(default_role_permission_rows())
 
 
+def test_replace_role_permissions_must_keep_a_permission_manager(
+    client: TestClient, db_session: Session, access: FakeProjectAccess, project: int, admin: User, clock: Clock
+) -> None:
+    """API-CMN-007・9.2 の注記：どのロールも permission.manage を持たない表は 422 NO_PERMISSION_MANAGER。表は変わらない。
+    PM 以外のロールに残せば通る。"""
+    path = f"/api/v1/projects/{project}/role-permissions"
+    token = login(client, "admin")
+    for roles in ([], [{"role": "PM", "permissions": ["project.view", "member.manage"]}]):
+        response = client.put(path, headers=bearer(token), json={"roles": roles})
+        assert response.status_code == 422, roles
+        assert response.json()["error"]["code"] == "NO_PERMISSION_MANAGER"
+        assert response.json()["error"]["details"] == [{"permission": "permission.manage"}]
+        count = len(db_session.scalars(select(RolePermission).where(RolePermission.project_id == project)).all())
+        assert count == len(default_role_permission_rows())
+
+    moved = client.put(
+        path, headers=bearer(token),
+        json={"roles": [{"role": "PM", "permissions": ["project.view"]},
+                        {"role": "PLANNER", "permissions": ["project.view", "permission.manage"]}]},
+    )
+    assert moved.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # API-CMN-008 自分の情報と権限
 # ---------------------------------------------------------------------------
@@ -741,6 +1055,36 @@ def test_me_for_system_admin(
     assert body["user"]["is_system_admin"] is True
     assert body["system_permissions"] == ["project.create", "user.admin"]
     assert body["projects"][0]["permissions"] == [p for p in PERMISSIONS if p not in {"project.create", "user.admin"}]
+
+
+def test_me_for_system_admin_lists_all_projects(
+    client: TestClient, db_session: Session, access: FakeProjectAccess, project: int, admin: User, clock: Clock
+) -> None:
+    """API-CMN-008・9.2 の注記：システム管理者は全てのプロジェクトを持つ。メンバーでないプロジェクトはロールが空で、
+    全ての権限・閲覧は全て（ALL）。"""
+    add_project(db_session, access, OTHER_PROJECT)
+    access.add_member(project, admin.id, "VIEWER")
+    body = client.get("/api/v1/me", headers=bearer(login(client, "admin"))).json()
+    project_permissions = [p for p in PERMISSIONS if p not in {"project.create", "user.admin"}]
+    assert body["projects"] == [
+        {"project_id": project, "roles": ["VIEWER"], "permissions": project_permissions, "view_level": "ALL"},
+        {"project_id": OTHER_PROJECT, "roles": [], "permissions": project_permissions, "view_level": "ALL"},
+    ]
+
+
+def test_me_for_system_admin_reads_projects_table(client: TestClient, db_session: Session, clock: Clock) -> None:
+    """API-CMN-008：アプリの既定の ProjectMembersTable でも、システム管理者はメンバーでないプロジェクトを全て持つ。
+    システム管理者でない人には載らない。"""
+    admin_user = make_user(db_session, "admin", is_system_admin=True)
+    make_user(db_session, "u1")
+    for code in ("P-001", "P-002"):
+        db_session.add(Project(code=code, name=code, start_date=date(2026, 12, 1), owner_user_id=admin_user.id))
+    db_session.commit()
+    ids = sorted(db_session.scalars(select(Project.id)))
+    body = client.get("/api/v1/me", headers=bearer(login(client, "admin"))).json()
+    assert [entry["project_id"] for entry in body["projects"]] == ids
+    assert all(entry["roles"] == [] for entry in body["projects"])
+    assert client.get("/api/v1/me", headers=bearer(login(client, "u1"))).json()["projects"] == []
 
 
 def test_me_without_memberships_has_no_projects(client: TestClient, db_session: Session, clock: Clock) -> None:
@@ -805,6 +1149,24 @@ def test_initial_admin_is_created_at_startup(tmp_path: Path, disposables: list[F
         login(client, "root", "changed-pass")
 
 
+@pytest.mark.parametrize(
+    ("login_id", "password"),
+    [("root", "short-pass1"), ("root.administrator", "root.administrator")],
+    ids=["11-chars", "same-as-login-id"],
+)
+def test_initial_admin_password_against_policy_fails_fast(
+    tmp_path: Path, disposables: list[FastAPI], login_id: str, password: str
+) -> None:
+    """NFR-04・NFR-10：最初のシステム管理者のパスワードも方針で確かめ、反すれば起動を止める（作らない）。"""
+    application = _app_with_admin_settings(tmp_path, login_id, password)
+    disposables.append(application)
+    with pytest.raises(RuntimeError, match="PMT_INITIAL_ADMIN_PASSWORD"):
+        with TestClient(application):
+            pass
+    with application.state.session_factory() as session:
+        assert session.scalars(select(User)).all() == []
+
+
 @pytest.mark.parametrize(("login_id", "password"), [("root", None), (None, "initial-pass")])
 def test_initial_admin_with_only_one_setting_fails_fast(
     tmp_path: Path, disposables: list[FastAPI], login_id: str | None, password: str | None
@@ -815,3 +1177,68 @@ def test_initial_admin_with_only_one_setting_fails_fast(
     with pytest.raises(RuntimeError, match="PMT_INITIAL_ADMIN"):
         with TestClient(application):
             pass
+
+
+# ---------------------------------------------------------------------------
+# 変更履歴（NFR-05）：ハッシュの伏せ字・ログインの変更者
+# ---------------------------------------------------------------------------
+
+
+def audit_rows(session: Session, entity_type: str, entity_id: int) -> list[AuditLog]:
+    session.expire_all()
+    return list(
+        session.scalars(
+            select(AuditLog).where(AuditLog.entity_type == entity_type, AuditLog.entity_id == entity_id)
+            .order_by(AuditLog.id)
+        )
+    )
+
+
+def test_audit_logs_redact_hashes_and_record_login_actors(
+    client: TestClient, db_session: Session, admin: User, clock: Clock
+) -> None:
+    """NFR-05：ハッシュの列（password_hash・token_hash）は *** に伏せて記録する。auth_sessions も記録し、
+    ログイン・ログアウトの変更者は本人、ログインの失敗で変わる users の行の変更者は空、管理者の変更は管理者。"""
+    admin_token = login(client, "admin")
+    created = client.post(
+        "/api/v1/users", headers=bearer(admin_token),
+        json={"login_id": "u1", "display_name": "利用者", "password": PASSWORD},
+    ).json()
+    user_id = created["id"]
+    [create_log] = audit_rows(db_session, "users", user_id)
+    assert (create_log.action, create_log.user_id) == ("CREATE", admin.id)
+    assert create_log.after is not None and create_log.after["password_hash"] == "***"
+
+    clock.now = NOW + timedelta(minutes=1)
+    assert post_login(client, "u1", "wrong password").status_code == 401
+    failure = audit_rows(db_session, "users", user_id)[-1]
+    assert (failure.action, failure.user_id, failure.occurred_at) == ("UPDATE", None, NOW + timedelta(minutes=1))
+    assert (failure.before, failure.after) == ({"failed_login_count": 0}, {"failed_login_count": 1})
+
+    clock.now = NOW + timedelta(minutes=2)
+    token = login(client, "u1")
+    reset = audit_rows(db_session, "users", user_id)[-1]
+    assert (reset.user_id, reset.before, reset.after) == (user_id, {"failed_login_count": 1}, {"failed_login_count": 0})
+    session_row = db_session.scalar(select(AuthSession).where(AuthSession.token_hash == hash_token(token)))
+    assert session_row is not None
+    [session_created] = audit_rows(db_session, "auth_sessions", session_row.id)
+    assert (session_created.action, session_created.user_id) == ("CREATE", user_id)
+    assert session_created.after is not None and session_created.after["token_hash"] == "***"
+
+    clock.now = NOW + timedelta(minutes=3)
+    assert client.post("/api/v1/auth/logout", headers=bearer(token)).status_code == 204
+    session_revoked = audit_rows(db_session, "auth_sessions", session_row.id)[-1]
+    assert (session_revoked.action, session_revoked.user_id) == ("UPDATE", user_id)
+    assert session_revoked.after == {"revoked_at": (NOW + timedelta(minutes=3)).isoformat()}
+
+    client.patch(f"/api/v1/users/{user_id}", headers=bearer(admin_token), json={"password": "reset-passphrase"})
+    changed = audit_rows(db_session, "users", user_id)[-1]
+    assert changed.user_id == admin.id
+    assert changed.before is not None and changed.after is not None
+    assert (changed.before["password_hash"], changed.after["password_hash"]) == ("***", "***")
+
+    stored_hash = stored_user(db_session, user_id).password_hash
+    for row in db_session.scalars(select(AuditLog)):
+        text = f"{row.before} {row.after}"
+        assert stored_hash not in text
+        assert hash_token(token) not in text

@@ -84,6 +84,20 @@ def _project(session: Session, code: str = "P-001") -> Project:
     return project
 
 
+def _project_at_old_revision(session: Session, code: str) -> Project:
+    """古い版まで移行した DB にプロジェクトを作る。責任者は SQL で入れる（ORM の ``User`` は最新の版の列を書くが、
+    古い版の ``users`` には後の移行（0011）で足した列が無い）。"""
+    session.execute(
+        sa.text("INSERT INTO users (login_id, display_name, password_hash) VALUES (:login, '利用者', 'scrypt$dummy')"),
+        {"login": f"owner-{code}"},
+    )
+    owner_id = session.scalar(sa.text("SELECT id FROM users WHERE login_id = :login"), {"login": f"owner-{code}"})
+    project = Project(code=code, name="プロジェクト", start_date=date(2026, 12, 1), owner_user_id=owner_id)
+    session.add(project)
+    session.flush()
+    return project
+
+
 def _element(
     session: Session,
     project: Project,
@@ -533,11 +547,17 @@ def test_approval_requests_pending_then_decided(db_session: Session) -> None:
 
 @pytest.mark.parametrize(("target_type", "status"), [("WBS", "REJECTED"), ("CHANGE_REQUEST", "PENDING")])
 def test_approval_requests_accept_design_values(db_session: Session, target_type: str, status: str) -> None:
-    """DB-WBS-008 approval_requests：対象は WBS・CHANGE_REQUEST、状態は PENDING・APPROVED・REJECTED。target_id は外部キーを持たない。"""
+    """DB-WBS-008 approval_requests：対象は WBS・CHANGE_REQUEST、状態は PENDING・APPROVED・REJECTED。target_id は外部キーを持たない。
+
+    判断した状態は判断者・時刻を持つ（``decided_pair``。A-49 の 6）。
+    """
     project = _project(db_session)
     requester = _user(db_session, "requester")
+    decided = {} if status == "PENDING" else {"decided_by": requester.id, "decided_at": AT}
     db_session.add(
-        ApprovalRequest(project_id=project.id, target_type=target_type, target_id=12345, status=status, requested_by=requester.id)
+        ApprovalRequest(
+            project_id=project.id, target_type=target_type, target_id=12345, status=status, requested_by=requester.id, **decided
+        )
     )
     db_session.commit()
 
@@ -549,7 +569,7 @@ def test_approval_requests_accept_design_values(db_session: Session, target_type
         {"status": "WITHDRAWN"},
         {"project_id": 9999},
         {"requested_by": 9999},
-        {"decided_by": 9999},
+        {"status": "APPROVED", "decided_by": 9999, "decided_at": AT},
         {"target_id": None},
     ],
     ids=["target_type", "status", "no-project", "no-requester", "no-decider", "no-target"],
@@ -564,6 +584,48 @@ def test_approval_requests_rejections(db_session: Session, override: dict[str, o
     values.update(override)
     db_session.add(ApprovalRequest(**values))
     _flush_fails(db_session)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "PENDING", "decided_by": "approver"},
+        {"status": "PENDING", "decided_at": AT},
+        {"status": "PENDING", "decided_by": "approver", "decided_at": AT},
+        {"status": "APPROVED"},
+        {"status": "APPROVED", "decided_by": "approver"},
+        {"status": "REJECTED", "decided_at": AT},
+    ],
+    ids=["pending-with-decider", "pending-with-time", "pending-with-both", "approved-without-both", "approved-without-time",
+         "rejected-without-decider"],
+)
+def test_approval_requests_decided_pair_follows_status(db_session: Session, state: dict[str, object]) -> None:
+    """DB-WBS-008 approval_requests：5.10 の承認申請の状態から、PENDING は判断者・時刻が空、APPROVED・REJECTED は両方を持つ
+    （``ck_approval_requests_decided_pair``。``status_reports`` の ``finalized_pair`` と同じ形。A-49 の 6）。"""
+    project = _project(db_session)
+    requester = _user(db_session, "requester")
+    approver = _user(db_session, "approver")
+    values = {**state}
+    if values.get("decided_by") == "approver":
+        values["decided_by"] = approver.id
+    db_session.add(
+        ApprovalRequest(project_id=project.id, target_type="WBS", target_id=project.id, requested_by=requester.id, **values)
+    )
+    with pytest.raises(IntegrityError, match="ck_approval_requests_decided_pair"):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_approval_requests_decided_pair_survives_decide_and_raw_update(db_session: Session) -> None:
+    """DB-WBS-008 approval_requests：判断者・時刻を付けずに状態だけを変える更新は DB が拒む（サービスを通らない書き込みでも）。"""
+    project = _project(db_session)
+    requester = _user(db_session, "requester")
+    request = ApprovalRequest(project_id=project.id, target_type="WBS", target_id=project.id, requested_by=requester.id)
+    db_session.add(request)
+    db_session.commit()
+    with pytest.raises(IntegrityError, match="ck_approval_requests_decided_pair"):
+        db_session.execute(sa.text("UPDATE approval_requests SET status = 'REJECTED' WHERE id = :id"), {"id": request.id})
+    db_session.rollback()
 
 
 def test_approval_requests_target_id_has_no_foreign_key() -> None:
@@ -807,8 +869,8 @@ def test_migration_fills_top_last_child_seq_from_existing_first_level(tmp_path: 
     engine = create_db_engine(url)
     try:
         with Session(engine) as session:
-            filled = _project(session, "P-001")
-            empty = _project(session, "P-002")
+            filled = _project_at_old_revision(session, "P-001")
+            empty = _project_at_old_revision(session, "P-002")
             for project in (filled, empty):
                 session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
             insert = sa.text(

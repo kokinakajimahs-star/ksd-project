@@ -1407,3 +1407,278 @@
     react-router 7・vitest 4 は Node 20 以上を要る（lock の engines）。この VM は Node 24.13.0。`package.json` に engines を置かず、
     `scripts/setup-dev.sh`（保護パス）も Node の版を確かめない。
     `npm audit` の結果はその日の勧告の一覧によるので、後から勧告が出れば同じ注（1.1）に従って版を上げ直す
+
+## A-49: 未確定事項 OQ-08・09・10・38・42 を推奨案で決めたこと（2026-11-13）
+
+- **経緯:** 利用者が OPEN の 5 件（OQ-08・09・10・38・42）を推奨案で決めるよう指示した（2026-11-13）。設計書の変更が要るものは CR-010〜013 に起票して
+  承認とし、設計書を 1.2 にした（D-10）。この項は、設計書を変えずに実装で決めるものと、CR ごとの実装の解釈を記す。作業木 `wt/oq-open` で実装する
+- **選択（設計書 1.2 の CR）:** CR-010 → OQ-08・09・10・OQ-42 (4)(5)(20)。CR-011 → OQ-42 (1)(2)(6)。CR-012 → OQ-42 (10) と 2026-11-12 の追加の (23)
+  （閉じたレビューの指摘。A-48 (7) で実装済み）。CR-013 → OQ-42 (15)
+- **選択（設計書を変えずに実装で決めるもの）:**
+  1. OQ-38 (2)：変更内容の依存の端は、画面で「今ある活動（一覧から選ぶ。ID を送る）」か「この変更で足す活動の仮の名前（文字列を送る）」かを選ばせる。
+     API は JSON の型で区別する（整数＝ID、文字列＝`ref`。`domain/change.py` の `resolve_activity`）ので、数字だけの仮の名前も使える
+  2. OQ-38 (3)・OQ-42 (21) の一覧の上限：選択肢・一覧に要る資源（活動・報告日・承認待ち・メンバー）は、6.1 の `limit` 1000 で `total` まで頁を読み足す
+     （活動は NFR-01 で 2,000 件まで）
+  3. OQ-42 (3) 同時実行：状態を変える操作は、対象の親の行を `with_for_update()` で読んでから判定する（WBS の承認申請・レビュー＝`projects`、報告日の入力・確定＝
+     `status_reports`、変更要求の提出・取り下げ・判断・反映＝`change_requests`・`approval_requests`）。一意制約の違反は 500 でなく 409 `CONFLICT`。
+     採番規則の行はプロジェクトを作るときに作り、GET では作らない（無い既存のプロジェクトは移行で作る）。SQLite は `FOR UPDATE` を無視するので、試験は判定の順と 409 だけを見る
+  4. OQ-42 (8) 小数：API の入力で列の小数の桁を超える値は 400（`remaining_hours` など 2 桁の列。`weight` は 0.01 以上）、許容幅の設定は列の上限（`Numeric(6,2)` の 9999.99）まで
+  5. OQ-42 (11)：JSON の列（`audit_logs.before`・`after`・`change_requests.impact` など）の None は SQL の NULL で持つ（`none_as_null`）。既にある JSON の null は移行で NULL にする
+  6. OQ-42 (12)：状態と決めた人・時刻の組の CHECK を `approval_requests`・`change_requests` にも置く（5.10 の状態から導く）
+  7. OQ-42 (13)：移行とモデルの一致の試験に CHECK と既定値（server_default）の比較を足す
+  8. OQ-42 (14)：63 文字を超える制約名を短い名前にし、移行で付け直す（PostgreSQL は 63 文字で切るため）
+  9. OQ-42 (16)：変更要求の `requested_start` も BR-04 で稼働日へ寄せる（API-SCH-002・003 と同じ）
+  10. OQ-42 (17)：API 層はモデルを import しない（サービスに移す）。サービスが他のサービスの非公開の関数を使う所は、共用の公開の関数にする（1.3）
+  11. OQ-42 (18)：`# RULE-…` の宣言は 1 か所だけにし、ほかは行頭に ID を書かない参照にする（2.3）
+  12. OQ-42 (19)：共有リンクの 404 は失効・期限切れの理由を返さない（無いリンクと同じ応答）
+  13. OQ-42 (21)：進捗の入力は progress.enter_own だけの人には自分の割当の活動だけに出す（API-SCH-001 の `assignees`）。ガントは今の行に無い頂点の数を注記する。
+      タスクリストは保存前の編集があれば頁を移る前に確かめ、依存の相手は全ての活動から選ぶ。メンバーを足す候補から全ての頁のメンバーを除く
+  14. OQ-42 (22)：活動を消すと確定済みの報告日の入力も消す今の動きを残す。確定した値はスナップショット（写し）が持ち、過去の線と確定済みのレポートは写しから描く
+      （BR-13 は写しで満たす。CR-002 の「写しが過去を持ち、今の行は消せる」と同じ考え）
+  15. OQ-42 (24)（2026-11-12 の追加）：取り下げと判断の同時実行は 3. で、SQLite の ID の再利用は CR-012 で扱う
+  16. OQ-42 (25)（2026-11-12 の追加）：`frontend/package.json` に `engines`（Node 20 以上）を置き、`frontend/.npmrc` の `engine-strict=true` で古い Node の `npm ci` を止める
+     （`scripts/setup-dev.sh` は保護パスなので変えない）
+- **理由:** 設計書 1.2 と 6.1・1.3・2.3・BR-04・BR-13・NFR-01。利用者の推奨案での決定
+- **影響範囲:**
+  - CR-010（wt/oq-g1）：models/cmn.py（users の 3 列・CHECK failed_login_count >= 0）・移行 0011_users_auth・config.py（3 設定）・services/auth.py
+    （ロックの判定・principal_of の project.create・API-CMN-007 の 422・API-CMN-008）・services/users.py（方針の検査・初期管理者）・services/project_access.py
+    （project_ids）・schemas/users.py・api/deps.py・auth.py・users.py・main.py。画面 LoginPage・UserAdminPage・RolePermissionsSection・api/cmn.ts
+    - 実装の判断：システム管理者の API-CMN-008 は全てのプロジェクト（メンバーでなければ roles は空、権限は全て・view_level ALL）。初期管理者のパスワードは
+      利用者が既にいても起動時に確かめる（反すれば起動しない）。無効の利用者の誤りも数える。ロック中は now < locked_until。ログインの利用者の行を
+      with_for_update で読む。401 の文言は「ログイン名またはパスワードが違うか、しばらくログインできません」。パスワードを設定し直すとロックを解く（本人の変更でも）。
+      作成では方針の検査（400）がログイン名の重複（409）より先
+  - 1・2・13・16（wt/oq-g5）：api/pages.ts の fetchAllPages（読む間に total が変われば画面で 409 LIST_CHANGED を作って読み直しを促す）・lib/leaveGuard.ts・
+    chg/operations.ts ほか・ApprovalsPage（100 件の頁送りをやめて全件）・WbsReviewPage・StatusReportPage・EffortPage・GanttPage・ActivityListPage・MembersSection・
+    CorrectiveActionsPage・useProjectMembers・gantt/scale.ts（unplacedVertexCounts）・package.json の engines（`^20.0.0 || ^22.0.0 || >=24.0.0`。vitest 4 の
+    engines に合わせ、「Node 20 以上」のうち依存が動く版に絞った）・frontend/.npmrc・package-lock.json の root の engines
+  - CR-013・9〜12（wt/oq-g4）：domain/report.py（マイルストーンを最新計画のガントの行から求める）・services/report.py（確定済みでも日程が未計算なら 409。
+    写しの判定を Judgement に戻す＝既存の不具合の修正：確定済みのレポートの KPI の遅れの件数が常に 0 だった）・MeetingReportView の注記・domain/change.py
+    （roll_requested_starts。起票・更新の時点で寄せる）・api 層のモデルの import をやめる（サービスで型を再公開）・サービス間の非公開の関数を公開の名前に
+    （numbering_rule_row・load_wbs_context・coded_element・mark_wbs_edited・preorder_elements・project_hours_per_day・visible_scope）・RULE の宣言を 5.1 の実装先の
+    40 か所に 1 つずつ・共有リンクの 404 を 1 つの応答に
+  - CR-011（wt/oq-g2）：services/wbs.py（見える範囲の文脈で検査・木の集計・責任分担表・範囲のベースラインの件数）・estimate.py（見える分へ絞ってから集計）・
+    schedule.py（依存の相手・ベースラインの項目の件数）・progress.py（entry_count・見えない活動の 404・approved の権限）・effort.py（API-EFF-003 の見えない活動の 404）・
+    画面 EntryEditor・StatusReportPage（承認の欄は progress.enter_all だけ）
+    - 直した API：WBS-001・011・012・021、EST-003、SCH-001・012、PRG-002・006・009（report.entry_count）。404 にした API：PRG-003・004・EFF-003
+      （判定の順は 404（無い・見えない）→ 403（自分の割当。全て読める人だけ）→ 409 → 400）
+    - approved の「変える」：id で既存の項目と対応づけ、保存済みと違う値、または足す項目に真を置くこと。同じ値は変えるに数えない。id の誤り（400）の後に判定し、
+      1 件でもあれば 403 で何も書かない（details に loc ["body","items",i,"approved"]）
+  - CR-012 の 1・3（補い）・4〜8（wt/oq-g3a）：移行 0012_db_integrity（SQLite の 33 表を AUTOINCREMENT で作り直す・JSON の null を NULL に・採番規則の行の補い・
+    CHECK 3 つ・FK の名前の付け直し。新しい CHECK に反する行や NOT NULL の JSON 列の null があれば、直さずに止まる）・models の 8 ファイル（全ての表に
+    sqlite_autoincrement、JSON の 9 列を none_as_null、CHECK、短い FK 名）・schemas/numeric.py（numeric_column）・schemas/progress.py・projects.py
+    - CHECK：`ck_approval_requests_decided_pair`（PENDING は判断者・時刻が空、APPROVED・REJECTED は両方あり）、`ck_change_requests_submitted_at`（DRAFT だけ空。
+      取り下げで空に戻す今の動きに合わせた）、`ck_change_requests_applied_pair`（APPLIED だけ反映者・時刻あり）
+    - 小数の桁を確かめる入力：percent_complete・remaining_hours（2 桁）、weight（2 桁・0.01 以上）、delay_tolerance_days・delay_extract_days（2 桁・9999.99 以下）。
+      誤りは 400 VALIDATION_ERROR（type は decimal_max_places・decimal_whole_digits。既存の Decimal の入力と同じ）
+    - 付け直した名前：`fk_schedule_baseline_items_schedule_baseline_id`（元は SQLite で 66 文字の名前、PostgreSQL で SQLAlchemy が縮めた
+      `fk_schedule_baseline_items_schedule_baseline_id_schedul_ee77`）
+  - 3（wt/oq-g3b）：infra/db.py（lock_row・lock_rows・is_unique_violation）・main.py（IntegrityError のうち一意制約の違反だけを 409 CONFLICT。CHECK・外部キー・
+    NOT NULL は今どおり 500）・services/wbs.py（numbering_rule_row は読む経路で書かず既定の値を返し、書く経路はロックして無ければ作る。読む経路の commit を除いた）・
+    change.py・progress.py・io.py。ロックの順は change_requests → projects → wbs_numbering_rules → approval_requests（status_reports は単独）
+    - ロックする操作：WBS の編集（API-WBS-002〜005・007・010・013、取込）・採番規則の変更・レビュー（開く・閉じる・指摘を書く・更新）・申請・判断、変更要求の修正・提出・
+      取り下げ・反映、報告日の入力・確定・算定方式の変更による求め直し。依頼の範囲（状態を変える操作）より広く、採番の順を揃えるため WBS の全ての編集をロックした
+    - 一意制約の見分け：PostgreSQL は sqlstate 23505、SQLite は sqlite_errorname が SQLITE_CONSTRAINT_UNIQUE・PRIMARYKEY
+  - CR-014（wt/oq-open）：services/progress.py（`replace_progress_items` の CR-011 の判定と 1 つにし、id の誤りの 400 の後、progress.enter_all を持たないときだけ判定する。守る項目は保存済みの値で承認済みか WORK のもの）・services/projects.py（`create_project` の同じトランザクションで、システム管理者でなければ作った人を `roles=["PM"]` のメンバーにする。所属は空）・画面 EntryEditor（保存済みの承認済みの項目と作業項目は、enter_own だけの人には種類を文字で出し、外すボタンを出さない）
+    - 403 の details：送った項目は `{"loc": ["body","items",i,"approved"|"item_type"]}`、消した項目は `{"loc": ["body","items"], "progress_item_id": id}`。未承認で作業でない項目を WORK に変えるのは許す（率を下げる向きにしか動かない）
+  - 独立レビューの指摘（wt/oq-open）：services/estimate.py（API-EST-001 は権限の確認の直後にプロジェクトの行をロックしてから WBS の状態を読む）・services/report.py（共有リンクの会議レポートの 409 の details に活動の ID を載せない）
+- **覆す場合:** CR の分は設計書を 1.1 に戻すことになる（Change Request を起票する）。実装の分は、その項目のコミットの差分を戻す
+- **限界:**
+  - PostgreSQL では流していない（FOR UPDATE・CHECK・移行）
+  - CR-010：無いログイン名は DB に書かないので、応答の時間がわずかに違いうる。既にある短いパスワードの利用者はそのままログインできる（方針は設定するときに効く）。
+    システム管理者の API-CMN-008 はプロジェクトごとに権限を読む（件数が多いと遅い。未計測）。`PMT_INITIAL_ADMIN_PASSWORD` が 12 文字未満の環境はこの版から起動しない
+  - 13 c：BrowserRouter のため useBlocker を使えず、ブラウザの戻る・進む、コードからの移動（ログアウト）、画面の中で保存して読み直す操作では確かめない
+  - 2：利用者の一覧（prj/activeUsers.ts）・ベースライン・スコープは先頭 1000 件のまま（A-49 の 2 の対象外）
+  - 13 b：会議レポート（MeetingReportView）は行の番号が当たらない頂点を数えない（今の行に無い活動の数だけ）
+  - 9：既に保存された非稼働日の requested_start は移行で寄せない（日程の計算では次の稼働日として扱う）
+  - 10：API 層がドメインを直接 import する所は残る。サービス・モデル・infra の docstring に行頭の RULE の参照が残る（検証器の対象外）
+  - 12：共有リンクの応答の時間の差は扱わない
+  - CR-013：遅延一覧の予定・見込みの終了日は今の計画、ずれは写し（確定済み）
+  - CR-011：委託先の WBS の検査（SUM_MISMATCH など）は見える子だけで比べるので、全体では出ない差異が委託先にだけ出ることがある（9.2 の注記の字句どおり）。
+    件数は今の割当・今の WP の置き場で数える。書く権限（wbs.edit など）を委託先に与えたときの書き込みの応答は絞らない。progress.enter_own の人が承認済みの項目を
+    消す・名前や重みを変えるのは「approved を変える」に数えない。変更要求（API-CHG-002・004）の保存した影響（impact）と操作は絞らない（OQ-43）
+  - CR-012：0012 より前に今の最大より大きい id を消していた表は、その id が 1 度だけ使い直されうる（記録が無い）。PostgreSQL での 0012 の実行・json_typeof の判定・
+    元の FK 名は、SQL の描画とコードの読みで確かめただけ。大きな SQLite の DB で作り直す時間は測っていない
+  - 4：浮動小数の誤差を含む数（0.1+0.2 など）を送ると 400 になる（丸めない）。誤りの文言は Pydantic の英語（既存の Decimal の入力と同じ）
+  - 3：SQLite は FOR UPDATE を無視するので、試験は PostgreSQL の方言で FOR UPDATE が付くことと、ロックの直前に別のセッションが変えた値で判定することを見る。
+    実際の PostgreSQL でのロック待ち・デッドロックは確かめていない。申請の前提に効くスコープ項目・活動の見積、工数の群はロックしない
+  - CR-014：画面の守りは読み込んだ時点の値で決める（読み込んだ後に他の人が承認した項目は、読み直すまで画面では外せ、サーバが 403 を返す）。システム管理者が作ったプロジェクトは今どおりメンバーを作らない
+  - 独立レビュー（2026-11-13）で残したもの：報告日の入力の求め直し（`_refresh_open_entries`）と同時の入力の重なりは、報告日の行のロックの外で起こりうる（未確認）。API-PRG の作成・確定の応答の `entry_count` は委託先にも見える範囲で絞らない。共有リンクの `_build` の 422 `SCHEDULE_CYCLE`（details に活動の ID）は日程の計算の後には起きない経路として残した
+
+## A-50: 残りの未確定事項を全て推奨案で決め、Google Cloud へ配置したこと（2026-11-13）
+
+- **経緯:** 利用者が 2026-11-13 に次を指示した。(1) 配置先は Google Cloud のプロジェクト kc-dbsb-poc-260109（Cloud SQL for PostgreSQL・Cloud Run。サーバが画面も
+  配るなら 1 コンテナでよい）、資源は Terraform で作り、名前の接頭辞は `ksdp`。PostgreSQL での検証は Cloud SQL で行う。(2) その他の未確定事項は全て推奨案で
+  承認する（推奨案が無いものは作ってから続ける）。(3) ブラウザでの確認・性能・本番の値も推奨案で承認する。設計書の変更が要るものは CR-015〜020 に起票して承認とし、
+  設計書を 1.3 にした（D-10）。Terraform と配置のスクリプトは利用者が自分の認証で流す（この機械の sandbox は gcloud の認証を読めない）。作業木 `wt/oq-open`
+  （群 g7・g8・g9・pg）・`wt/records`・`wt/rpt-a3` で実装・記録する
+- **選択（設計書 1.3 の CR）:** CR-015 → OQ-35 (3)。CR-016 → OQ-43 (1)。CR-017 → OQ-34 (4)。CR-018 → OQ-21 (1)。CR-019 の 1 → OQ-06、2 → OQ-33 (1)(2)、
+  3 → OQ-31 (8)、4 → OQ-35 (5)、5 → OQ-36 (1)(6)・OQ-40 (2)、6・7 → OQ-43 (2)(3)、8 → OQ-15。CR-020 → OQ-01（本番の配置）
+- **選択（未確定事項の閉じ方）:** 43 件を全て CLOSED にした（`docs/open-questions.md`）
+  - 暫定の設計で実装済み（ASSUMED）のものは、CR で決めた項を除き「暫定どおり確定」とした（OQ-02〜05・11〜14・16〜20・22〜30・32・39・41 と、各 OQ の CR に
+    含めなかった項）。OQ-05 の許容幅・抽出の閾値は今の既定値（0.5 稼働日・2 稼働日）で試行し、試行の後に見直す
+  - 推奨案の無かったもの：OQ-15 の委託先へのメンバーの一覧は今どおり project.view で読める（作業の連絡に名前と所属が要るため。ロックの状態などは CR-019 の 7 で
+    user.admin だけに返す）
+  - OQ-01〜05 は要求仕様書 11 章の写しの表（列が 6 つ）に置いたまま CLOSED にし、OQ-06 以降を CLOSED の表へ移した
+- **本番の値（推奨案。環境変数で変えられる）:** 業務の時間帯 Asia/Tokyo（`PMT_BUSINESS_TIMEZONE`）、取込の上限 10 MiB・50,000 行（`PMT_IMPORT_MAX_BYTES`・
+  `PMT_IMPORT_MAX_ROWS`）、共有リンクの有効期限の上限 90 日（`PMT_SHARE_LINK_MAX_DAYS`。画面の既定は 14 日後）、API の説明は出さない（`PMT_API_DOCS`）、
+  パスワードは 12 文字以上・連続 10 回の誤りで 15 分ロック（CR-010）、トークンの有効期間 12 時間。資源の既定（`deploy/terraform/variables.tf`）：
+  asia-northeast1、Cloud SQL は PostgreSQL 16・ENTERPRISE・db-custom-1-3840・ZONAL・自動バックアップ 7 世代（18:00 UTC）・PITR 7 日・削除保護、
+  Cloud Run は cpu 1・1Gi・最小 0・最大 2 インスタンス・同時 80 リクエスト・応答 300 秒、最初の管理者のログイン名 `pmt-admin`（パスワードは Secret Manager の
+  `ksdp-initial-admin-password`）
+- **選択（設計書を変えずに実装で決めるもの）:**
+  1. CR-019 の 2（業務の日付）：「今日」は `services/clock.py` の `business_date(now, zone)`。期間は `business_period(date_from, date_to, zone)` で、業務の
+     時間帯の [開始日の 0 時, 終了日の翌日の 0 時) を UTC の範囲にする（表せない端は限らない）。サーバで now から日付を求めていたのは変更（CHG）の群だけだった
+  2. CR-019 の 5（共有ビュー）：API-RPT-004 の担当者は `assignees` の文字列の配列の形のまま、中身を所属にする（「組織／チーム」。片方だけならその値、両方とも
+     空なら「所属なし」。行ごとに重複を除く）。ログインした人の API-SCH-010・API-RPT-001 は変えない。有効期限の上限を超えたときの 400 の loc は
+     ["body","expires_at"]。画面の有効期限の既定値は 14 日後（端末の時刻の日時）
+  3. CR-019 の 7：一覧の応答に `UserListItemOut` を足した（`can_create_project: bool | None`）。作成・変更（API-CMN-004・005）の `UserOut` は変えない
+  4. CR-019 の 8（最後の PM）：PM はロールに PM を持つメンバーを、利用者の有効・無効を問わず数える。PM のいないプロジェクト（システム管理者が作っただけ）で
+     PM でないメンバーを変えるのは止めない。判定の順は 404（メンバーでない）→ 409。プロジェクトの行をロックしてから対象のメンバーを読み直して数える。
+     details は [{"project_id","user_id"}]
+  5. CR-019 の 1・CR-020（画面の配信）：既存の APIRoute の仕組みで書く。`assets/` は `public, max-age=31536000, immutable`、他は `no-cache`。先頭のセグメントが
+     `api`・`docs`・`redoc` のパスは画面へ回さない（JSON の 404・405 のまま。`//api/…` のような空のセグメントは飛ばして先頭を見る）。パスは resolve して dist の
+     内側に限る。dist に index.html が無ければ起動しない。欠けた `/assets/*` も index.html（no-cache）
+  6. CR-020（配置）：基のイメージはタグとダイジェストで固定（node 24 の bookworm-slim・python 3.12 の slim-bookworm。tzdata を入れて Asia/Tokyo を確かめる）。
+     uid 10001 の `pmt` で動かす。provider は google 8.11.0・random 3.9.1（全てのプラットフォームのハッシュを .terraform.lock.hcl に）。費用寄りの既定
+     （ZONAL・db-custom-1-3840・ENTERPRISE・最大 2 インスタンス・1Gi・cpu_idle・最小 0）。DB `pmt` は deletion_policy PREVENT、DB ユーザーは ABANDON。
+     パスワードは英数字だけ（URL と alembic の % を避ける）。秘密はリージョン内の複製で、秘密ごとに読める身元を限る（本番の DB の URL と最初の管理者の
+     パスワードは `ksdp-run`、検証の DB の URL は `ksdp-verify` だけ）。PostgreSQL での検証のジョブ（pgverify）は身元 `ksdp-verify`・DB ユーザー `pmt_verifier`
+     で動かす（本番の秘密を読めず、本番の表（`pmt_app` の持ち物）への権限を持たない）。Cloud SQL は公開 IP・許可ネットワーク無し・ENCRYPTED_ONLY・Cloud Run
+     の Unix ソケット（私設 IP は VPC の費用を避けた）。Cloud Build は専用 SA・CLOUD_LOGGING_ONLY・ソースのバケットは 7 日で消える・上げるファイルは
+     gcloudignore の許可リスト。コミットしていない変更があれば配置しない（`ALLOW_DIRTY=1`）。移行のジョブが通るまでサービスを入れ替えない（jobs だけ
+     `-target` で apply）。`deploy.sh` は terraform output が失敗したら止める（空のイメージで apply するとサービスとジョブを消す計画になるため）。出力が 1 つも
+     無い初回の状態の警告の文・複数の行は空として扱い、変数 `image`・`test_image` はダイジェストの形だけを受ける。最初の管理者のログイン名は `pmt-admin`
+  7. CR-015：画面 UI-INT-001 は effort.view が無い人の出力の対象から「実績工数」を外して理由を出す。取込の対象は変えない
+  8. CR-016：委託先の判定は CR-011 と同じ（`project_view_level(...) is not ViewLevel.ALL`。全てを読めるロールも持つ人は絞らない）。API-CHG-004 は変更要求を
+     読む前に 403（無い ID も 403。有無を明かさない）。画面は operations が null なら「変更内容と影響分析は表示しない」と出し、「直す」「影響分析を流す」を隠す
+  9. CR-017：自分の見積を空（null）にする・空で足すときは記録を残さない（記録は値を要し、値を消すことは見積でないため）。値が変わらないとき・409 のときも
+     残さない。`project_hours_per_day` を services/estimate.py から services/wbs.py に移した（循環の import を避ける）
+  10. CR-018：保存済みの値は移行しないので、書く値が今の値と違い、かつ開始日より前のときだけ拒む（古い活動の他の列は直せる）。API-PRJ-004 は字義どおり
+      （開始日を変えた結果、それより前の希望開始日の活動が残るなら 422。既存の活動も含む）。API-SCH-004 は RULE-SCH-006 の後、取込は行ごとの検査が全て通った
+      後に検査する（取込の誤りのコード `BEFORE_PROJECT_START`）。変更要求の作成・編集では検査せず、反映（API-CHG-006）で検査する。判定はプロジェクトの行を
+      ロックしてから行う（活動の追加・変更・一括変更・取込（dry_run でないとき）・開始日の変更。A-49 の 3 の順。レビューの軽 2）
+  11. CR-019 の 3：無害化は CSV だけ（xlsx は既に文字列の型で書いている）。取込で外すのは、次の文字が対象のときの `'` 1 文字だけ
+  12. CR-019 の 4（取込の上限）：本体は依存関数 `read_import_file` で受け、`Content-Length` が上限を超えれば読まずに 400、ヘッダが無い・小さく偽っても読んだ量が
+      上限を超えた時点で止めて 400。認証（401）で読んだトランザクションは本体を受け取る前に閉じる（読む間に DB の接続を持たない。レビューの中 1）。OpenAPI の
+      requestBody は元と同じ形（`openapi_extra`）。大きさの上限（400）は権限（403）より先（権限はサービス層で本体の後に確かめる今の作りのため）。行の上限は
+      403 の後・行の検査の前、dry_run でも同じ 400。行の数は見出しを除く全ての行（空の行も数える）。上限ちょうどは通す。details は [{"loc": ["body"], …}]。
+      CSV は上限を 1 行超えた所で解析を止める（`domain/tabular.py` の `iter_csv`。レビューの中 2）。xlsx は行の右端の空のセルを除き、64 列より右は最も右の値
+      だけを残す（シートが宣言する範囲で行を右へ埋めない。見出しより右に値があることは残るので `TOO_MANY_COLUMNS` は今どおり。レビューの中 3）
+  13. 定例会議レポートの印刷（UI-RPT-001。7.4 の A3 横の 1 枚。ブラウザでの確認で見つけた）：上段のガントには、予定のバーか実績のバー（未完了なら報告日まで）が
+      表示の範囲（報告日の前後 4 週）に長さのある重なりで掛かる活動の行だけを描き（マイルストーンは菱形の点が範囲の内）、省いた行の数を注記する。基準の
+      バーは見ない。イナズマ線は残した行の頂点だけを結ぶ。同じ部品なので REPORT の共有ビュー（API-RPT-004）も同じ。UI-SCH-002 と GANTT の共有ビューは
+      全ての行を描く。印刷では版面の高さ（275mm）の縦の並びにし、ガントは残りの高さの枠へ縦横比を保って縮める。下段の遅延一覧・マイルストーンの状況は
+      先頭の 15 件だけを印刷し、省いた件数を注記する（画面は全て）。長い文は印刷で省略記号で切る。ガントのバーのラベルは予定と実績のうち右へ延びる方の
+      右端に置き、範囲を固定したとき（会議レポート）は範囲の始まりより前で終わるバー・右端より右から始まるラベルを描かない。
+      利用者は 2026-11-13 に「印刷の体裁は問わない。画面の上で読めれば足りる」と判断した。印刷はこれ以上直さない（限界の項の縮みはそのまま受け入れる）
+  14. PostgreSQL でだけ落ちる試験（pgverify）：飛ばさず（skip にせず）、方言ごとに同じ性質を確かめる枝を足す。SQLite の枝の確かめ方は変えない。
+      AUTOINCREMENT は全ての表の主キー `id` がシーケンスを持つこと、NOT NULL の違反は SQLSTATE 23502 と表・列の名前（サーバの文言の言語に依らない）、
+      8 文字の working_weekdays は列の型が拒む `DataError`、`PRAGMA foreign_keys` は `test_foreign_keys_are_enforced` にして両方の方言で外部キーの違反
+      （PostgreSQL は 23503）を拒むこと（SQLite は PRAGMA も見る）。採番規則の行の同時の作成（API-WBS-002 の 409）は、PostgreSQL ではプロジェクトの行の
+      `FOR UPDATE` が割り込みを起こさせないので、別のセッションの INSERT がそのロックを待って lock_timeout（55P03）になり何も書かれないことを確かめる
+      （本番のロックを `FOR NO KEY UPDATE` に弱めることはしない）。PostgreSQL でも 409 に届く経路（API-WBS-006 の採番規則の変更。プロジェクトの行を
+      ロックしない）の試験を足し、両方の方言で 409 と先に作った行だけが残ることを確かめる。試験のデータベースを消すときに Cloud SQL の管理用の
+      スーパーユーザーの接続が残っていれば（42501）、待ってやり直し、流れの終わりにもう一度消し、それでも残れば名前を挙げて誤りにする。雛形に他の接続が
+      あって複製できないとき（55006）も待ってやり直す。PostgreSQL では試験ごとの `create_all` を流さない（雛形を `create_all` で作ってある）
+- **配置の結果（利用者が流した。2026-11-13）:**
+  - 利用者が `deploy.sh plan`・`deploy.sh` を流した。初回の plan で、出力の無い状態の terraform の警告の文がイメージの名前として渡った（8d886bf で直し、
+    変数にダイジェストの形の検査を足した）。直した後の plan は 32 件を足す
+  - Cloud Build（1 分 35 秒）でイメージ `pmt@sha256:7f0ea8c3…`・`pmt-test@sha256:d4ee8d12…` を作り、移行のジョブ（`ksdp-migrate`）が通ってからサービス
+    `ksdp-pmt` を入れた
+  - 外からの確認（curl）：`/` は 200 の index.html（`no-cache`）、`/api/v1/health` は 200 `{"status":"ok"}`、`/docs`・`/api/v1/nope` は JSON の 404、`/assets/` は
+    index.html、誤ったログインは 401。最初の管理者でのログインとログインした後の画面は確かめていない（パスワードを会話に出さないため）
+  - 2 回目の配置（cbe7661。レビューの直し・pgverify の身元の分離・会議レポートの印刷）：Cloud Build `0e101c11` でイメージ `pmt@sha256:6e89d103…`・
+    `pmt-test@sha256:07e551f2…` を作り、terraform は 0 件を足し 2 件を変え、移行のジョブ（`ksdp-migrate-q4z4c`）が通ってからサービスを入れ替えた。外からの
+    確認は 1 回目と同じ結果で、`//api/v1/nope` も JSON の 404
+  - Cloud SQL の PITR の WAL の置き場は `CLOUD_STORAGE`（利用者が `gcloud sql instances describe` で確かめた。pgverify が書く WAL でディスクは膨らまない）
+  - PostgreSQL での検証（pgverify。実行 `ksdp-pgverify-b5pc9`・23 分 37 秒）：1,826 件が通り、10 件が落ち、1 件が後片付けで誤りになった。本番のコードの
+    不具合は 0 件。SQLite に固有の確かめ方が 9 件（`sqlite_master`・`PRAGMA`・NOT NULL の違反の文言 5 件・生の SELECT の値の形・VARCHAR(7) を CHECK より
+    先に型が拒む）、試験の組み立てが 1 件（採番規則の行の同時の作成）、試験の道具が 1 件（データベースを消せない。選択の 14）。消せなかった試験の
+    データベース `pmt_test_1429253d_91bcc0c64dc3` が `ksdp-pg` に残った。Cloud SQL の API（`gcloud sql databases delete`）は持ち主でないので消せず
+    （must be owner）、pgverify のジョブの引数をその実行だけ差し替えて `pmt_verifier` で DROP した（実行 `ksdp-pgverify-hx972`。利用者が流した。ジョブの定義は
+    変えていない）
+  - 3 回目の配置（19d4ec8。試験の直しを試験のイメージに載せる）：Cloud Build `8f9fcc60`（1 分 40 秒）でイメージ `pmt@sha256:0c155c88…`・
+    `pmt-test@sha256:202317da…` を作り、移行のジョブ（`ksdp-migrate-2nlzp`）が通ってからサービスを入れ替えた。外からの確認は前と同じ結果
+  - 直した後の pgverify（実行 `ksdp-pgverify-lgn8t`）：成功（ジョブは pytest の終了コードが 0 のときだけ成功になる。PostgreSQL の枝を含む全件が通った）。
+    終わった後のインスタンスのデータベースは `postgres`・`pmt_verify`・`pmt` だけ（試験のデータベースの消し残しは無い）
+  - 試験の直し（d3bf075 と、その独立レビューの直し）の独立レビュー：中 1・軽 8。SQLite の枝の弱体化は検出されなかった。中（PostgreSQL の枝が 409 を
+    確かめない）は API-WBS-006 の試験を足して直した。軽のうち、PostgreSQL の枝がサーバの英語の文言に頼る・`close` が 1 つの誤りで残りを消さない・雛形の
+    複製が 55006 で落ちうるは直した。42501 が所有者でないときにも出ることは、自分で作ったデータベースだけを消すので待っても直らない場合は起こらないと
+    判断した（起これば待った後に名前を挙げて誤りにする）。残りは限界へ記した
+- **独立レビュー（CR-015〜020 の差分。2026-11-13）:**
+  - 実装者の仮定を引き継がない別の文脈でのレビュー。重大 0・中 4・軽 9。検証器の弱体化は検出されなかった（書き換えた試験は CR の振る舞いの変化に見合う）
+  - 直した（`wt/records`。直しを 1 つずつ戻すと新しい試験が落ちることを確かめた）：中 1 取込の本体を DB の接続を持ったまま読む、中 2 CSV の行の上限が全部を
+    解析した後でしか効かない（「\n」だけの 10 MiB の CSV で 1Gi を超える見込み）、中 3 xlsx の宣言の範囲（`A1:XFD50001` など）で数 KB のファイルからメモリを
+    膨らませられる、中 4 pgverify が本番と同じ身元・DB ユーザーで動く、軽 2 CR-018 の判定がプロジェクトの行をロックしない、軽 5 `deploy.sh` が terraform
+    output の失敗を飲み込む、軽 7 `//api/…` に画面が 200 で返る
+  - 直さずに限界へ記した：軽 1・3・4・6・8・9
+- **ブラウザでの確認・性能（NFR-02。2026-11-13）:**
+  - 開発機で、活動 2,000・依存 3,799 の試しのデータ（SQLite）を入れたサーバを headless の Chrome（chrome-headless-shell 153）で開いた。7.1 の画面 22 と 404 の
+    全てを 31 の場面（ロールの違いを含む）で開き、意図した 401（誤ったログイン）・404 のほかにコンソールの誤り・失敗した要求は無かった。書く流れは進捗の入力・
+    委託先の見え方（ガント・タスクリスト・WBS）・WBS の承認・変更要求の反映・ベースラインを流した
+  - NFR-02（ガントの表示 3 秒以内）：5 回ずつ。画面の遷移から最後の描画（イナズマ線）まで中央値 656 ms（最大 710 ms）、URL を直に開いて中央値 731 ms
+    （最大 882 ms）。API（API-SCH-010。2.4 MB）は中央値 290 ms
+  - 見つけた不具合と直し：定例会議レポートの印刷が A3 横で 53 枚（中。選択の 13 で 1 枚に。REPORT の共有ビューも 1 枚）、範囲の左端で切れたバーのラベル（軽）、
+    進行中の実績のバーに重なって読めないラベル（軽）。直しを戻すと新しい画面の試験が落ちることを確かめた
+  - 気づいたこと（直していない）：変更要求の「反映する」が反映できないとき（409）にも出る、ガントに読み込み中の表示が無い、ビルドに CSS のファイルが無い、
+    工数の画面で権限の文が 2 回出る、大きな表を全て描く
+- **理由:** 設計書 1.3 と 6.1・6.3・8 章（NFR-02・06・10）・9.2。利用者の推奨案での決定
+- **影響範囲:**
+  - CR-019 の 2・5〜8（wt/oq-g8）：services/clock.py・api/deps.py（get_business_zone・get_today・get_share_link_max_days）・api/change.py・services/change.py
+    （search_audit_logs）・api/report.py・services/report.py・services/effort.py・schemas/users.py・services/users.py・api/users.py・services/projects.py
+    （upsert_member・remove_member）。画面 labels.ts・ShareLinkPanel・SharedViewPage・api/cmn.ts（UserListItem）・UserAdminPage・OwnerSelect・ProjectListPage・
+    activeUsers.ts・BasicInfoSection・MembersSection
+  - 試験を PostgreSQL でも流す（wt/oq-pg）：backend/tests/conftest.py（`PMT_TEST_DATABASE_URL` があるときだけ、雛形のデータベースを試験ごとに
+    `CREATE DATABASE … TEMPLATE` で複製する。`integrity_error` もその PostgreSQL で違反させる。RaceProbe の別のセッションは PostgreSQL では lock_timeout 5 秒）
+  - CR-019 の 1・CR-020（wt/oq-g9）：backend/app/main.py（説明の切り替え・画面の配信）・backend/tests/test_app_serving.py・Dockerfile・.dockerignore・.gitignore・
+    deploy/terraform（versions・variables・main・database・run・outputs・poc.tfvars・.terraform.lock.hcl）・deploy/cloudbuild.yaml・deploy/gcloudignore・
+    deploy/deploy.sh・deploy/README.md
+  - CR-015〜018・CR-019 の 3・4（wt/oq-g7）：api/change.py・deps.py（get_import_max_bytes・get_import_max_rows）・io.py（read_import_file）・projects.py・
+    schedule.py・wbs.py・domain/tabular.py・schemas/change.py（operations を list | None）・services/change.py・estimate.py・io.py・projects.py・schedule.py・
+    wbs.py。画面 api/chg.ts・ChangeRequestsPage・ImportExportPage
+  - レビューの直し（wt/records）：api/io.py・domain/tabular.py（iter_csv）・services/io.py（行の幅・CSV の上限・取込のロック）・services/schedule.py・
+    services/projects.py・main.py・deploy/terraform（main・database・run・outputs）・deploy/deploy.sh・deploy/README.md。記録は docs/open-questions.md
+  - 会議レポートの印刷（wt/rpt-a3）：画面 components/gantt/scale.ts（barInRange・rowInRange）・GanttChart.tsx（ラベルの位置）・pages/rpt/MeetingReportView.tsx
+    （reportGanttRows・印刷の注記）・pages/rpt/labels.ts（印刷の CSS・PRINT_LIST_LIMIT）
+  - pgverify の仕分け（wt/records）：backend/tests/conftest.py（DROP のやり直し・PostgreSQL で create_all を流さない）・tests/models/test_models_integrity.py・
+    test_models_prj.py・tests/test_health.py・tests/api/test_wbs.py
+  - 将来の要望の控え：docs/future-requests.md（R1 の外の要望。FR-01：ガントと進捗の状況を報告用の PPTX で出力したい。RPT-04 に近い。R2 の計画の候補）
+- **覆す場合:** CR の分は設計書を 1.2 に戻すことになる（Change Request を起票する）。実装の分は、その項目のコミットの差分を戻す。資源は
+  `deploy/README.md` の片付けの手順で消す（Cloud SQL は削除保護と DB `pmt` の PREVENT を先に外す）
+- **限界:**
+  - CR-019 の 2：画面がブラウザの時刻から求める日付（工数の入力の週など）は業務の時間帯に直していない（端末の時間帯のまま）
+  - CR-019 の 6：API-EFF-003 だけを 404 にした。他の API（API-PRJ-003 など）はメンバーでない人に今どおり 403。システム管理者はメンバーでなくても今どおり書ける
+  - CR-019 の 8：最後の PM の利用者を無効にする（API-CMN-005）ことは止めない。無効の利用者も PM に数えるので、有効な PM のいないプロジェクトが残りうる
+    （レビューの軽 3。選択の 4 のとおり）
+  - CR-016：委託先に audit.view を与えると、監査ログ（変更要求の行の before・after）から operations・impact が読める（レビューの軽 4。9.2 の既定では委託先は
+    audit.view を持たない）
+  - CR-018：取込では行ごとのドメインの誤り（担当者が無いなど）と `BEFORE_PROJECT_START` を同時には返さない（前者を直すと後者が出る）。422 の画面の表示を
+    試験したのは活動の追加だけ。ロックの順は SQLite の RaceProbe で確かめただけ（PostgreSQL で同時に流していない）
+  - CR-019 の 3：責任分担表の CSV（API-WBS の出力。6.3 の対象外）は無害化していない
+  - CR-019 の 4：本体を上限で止めることは偽の受信で確かめただけ（uvicorn の実際の分割転送・Cloud Run の 32 MiB の上限では確かめていない）。止めるまでに上限に
+    加えて最大 1 チャンクを持つ。xlsx の上限は圧縮後の大きさに効き、展開後の大きさ・セルの長さには上限が無い（sharedStrings を使った zip 爆弾は試していない）。
+    本体は 404・403 の判定より先に読む（上限を超えれば権限の無い人にも 400、上限内なら読んだ後に 404・403。レビューの軽 1）
+  - PostgreSQL：この機械で PostgreSQL を動かす検証は自動判定に拒まれた。conftest の PostgreSQL の経路と、選択の 14 で足した試験の PostgreSQL の枝は
+    Cloud SQL の pgverify だけで流れる（結果は配置の結果の項）。409 の試験は PostgreSQL では lock_timeout の 5 秒を待つ。同時の操作を PostgreSQL の上で
+    本当に並べて流す試験は無い（RaceProbe は同じスレッドで割り込ませる）。Cloud SQL の管理用の接続が「少し待てば離れる」ことは確かめていない（常に
+    残るなら 1 件ごとに 22.5 秒待ち、ジョブの上限の 3600 秒を超えて後片付けが流れず、試験のデータベースが残る）。消し残しは流れの終わりに名前を挙げて
+    誤りにするだけで、前の流れの消し残しを流れの初めに掃除しない（同時に流れている別の pgverify のデータベースを消さないため）。`PostgresDatabases` の
+    やり直しの分岐は、偽の接続で確かめただけ（試験には入れていない）。この機械の `verify.sh all` を ksd-ls のセッションの試験と同時に流すと（負荷
+    18.7・8 コア）、画面の試験のうち 1,000 件を読み足す 2 件（ActivityListPage・CorrectiveActionsPage）が 5 秒の時間切れで落ちた（単独で流すと通り、
+    ksd-ls に新しい重い試験と合流を控えてもらって流し直した `verify.sh all` は PASS。そのときも負荷は 12〜16。時間切れの値は変えていない）。雛形のデータベースは alembic でなく `create_all` で作る（移行だけにある制約・既定値の違いは pgverify で捉えない。移行は本番の移行のジョブで
+    PostgreSQL に流れる。レビューの軽 6）
+  - CR-020：terraform の validate・plan・apply と docker build はこの機械で流していない（利用者が流した。sandbox が AF_UNIX のソケットを禁じ provider が
+    起動しない。docker は無い）。Terraform の状態に DB と最初の管理者のパスワードが平文で入る（状態のバケットはオーナーだけに見せる）。検証用の DB は本番と
+    同じインスタンスにあり（pgverify は本番の負荷になる）、Cloud SQL が API で作る DB ユーザーはどちらも `cloudsqlsuperuser` の一員なので、DB の作成・削除の
+    権限は分けていない。Artifact Registry の古いイメージを掃除しない。README の復元・片付けのコマンドは流していない。Cloud SQL の費用は月 60〜80 米ドルほどの
+    見積もり（料金表で確かめていない）。`.terraform.lock.hcl` の h1 のハッシュは 1 つだけ（別の環境で `init` すると書き換わり、次の配置がコミットしていない
+    変更で止まる。レビューの軽 8）。disk_autoresize に上限が無い・Dockerfile の tzdata の版を固定していない・`no-cache` の画面のファイルは 304 を返さない
+    （レビューの軽 9）
+  - ブラウザでの確認：headless の Chrome の 1 種だけ（他のブラウザ・実際のプリンタ・Windows のフォントでは見ていない）。サーバは SQLite で、同時の利用・
+    Cloud Run の上での表示の速さは測っていない。書く流れのうち工数の入力・取込・共有リンクの作成は画面で流していない
+  - 会議レポートの印刷：範囲に掛かる行が多いと、1 枚に収める代わりにガントの文字が読めないほど縮む（試しのデータでは 335 行を 158mm に描き、1 行がおよそ
+    0.47mm。読める文字には 60 行ほどまで）。印刷だけ行の数を限る・遅れ・クリティカルパスの行を先に出す・範囲を狭めるのいずれかを選ぶ判断が要る（今は
+    範囲に掛かる全ての行を縮めて載せる）。予定の全てが範囲より前の未着手の遅れの活動は、ガントの行に出ない（遅延一覧には出る。頂点は前から範囲の外で
+    描いていなかった）。範囲の内から始まり右端を越えるラベルは端で切れる。報告日に終えた行は頂点の丸がラベルの最初の文字に重なる。利用者は印刷の体裁を
+    問わないと判断した（選択の 13）。報告用の資料の出力は FR-01（PPTX。R2 の計画の候補）で扱う
+  - 要求仕様書 11 章は未確定のままの記載である（保護パス。更新するなら Change Request が要る）

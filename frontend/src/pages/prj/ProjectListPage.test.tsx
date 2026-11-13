@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAuthToken } from "../../api/client";
+import type { Me } from "../../api/cmn";
 import type { Project } from "../../api/prj";
 import { makeMe, makeProject, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall } from "../../test/mockApi";
@@ -218,6 +219,48 @@ describe("UI-PRJ-001 プロジェクト一覧", () => {
     expect((calls.find((c) => c.method === "POST")?.body as { owner_user_id: number }).owner_user_id).toBe(6);
     // 403 は責任者の候補を絞るだけで、画面のエラーにしない
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("システム管理者でない人が作ると、/me と一覧を読み直し、作ったプロジェクトの行き先を PM の権限で出す（API-PRJ-001。CR-014）", async () => {
+    const creator = makeUser({ id: 6, login_id: "lead", display_name: "リーダー", is_system_admin: false });
+    const created = makeProject({ id: 10, code: "P-010", name: "小規模改修" });
+    let projects: Project[] = [];
+    let memberships: Me["projects"] = [];
+    const { calls } = mockApi({
+      "GET /api/v1/me": () =>
+        jsonResponse(200, makeMe({ user: creator, system_permissions: ["project.create"], projects: memberships })),
+      "GET /api/v1/projects": () => jsonResponse(200, projectsPage(projects)),
+      "GET /api/v1/users": () => jsonResponse(200, usersPage()),
+      "POST /api/v1/projects": () => {
+        // サーバは作った人をメンバー（ロール PM）にする
+        projects = [created];
+        memberships = [
+          {
+            project_id: 10,
+            roles: ["PM"],
+            permissions: ["project.view", "project.manage", "effort.view", "audit.view", "data.export"],
+            view_level: "ALL",
+          },
+        ];
+        return jsonResponse(201, created);
+      },
+    });
+
+    renderPage();
+    expect(await screen.findByText("見られるプロジェクトがありません")).toBeInTheDocument();
+    const form = screen.getByRole("form", { name: "プロジェクトの作成" });
+    fireEvent.change(within(form).getByLabelText("コード"), { target: { value: "P-010" } });
+    fireEvent.change(within(form).getByLabelText("名称"), { target: { value: "小規模改修" } });
+    fireEvent.change(within(form).getByLabelText("開始日"), { target: { value: "2027-01-04" } });
+    fireEvent.click(within(form).getByRole("button", { name: "作成する" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("プロジェクト「P-010」を作成しました");
+    const destinations = await screen.findByRole("navigation", { name: "P-010 の行き先" });
+    for (const label of ["設定", "WBS", "工数", "変更履歴", "入出力"]) {
+      expect(within(destinations).getByRole("link", { name: label })).toBeInTheDocument();
+    }
+    expect(calls.filter((c) => c.method === "GET" && c.path === "/api/v1/me")).toHaveLength(2);
+    expect(projectCalls(calls)).toHaveLength(2);
   });
 
   it("コードが重なれば（409）サーバの文言を出し、入力を残す", async () => {

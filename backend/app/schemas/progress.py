@@ -3,20 +3,23 @@
 値の一覧（算定方式・項目の種類・判定）と長さの上限は ``app.models.sch``・``app.models.prg``（A-19・A-22）に合わせる。
 進捗率の算定（RULE-PRG-001）・確定（RULE-PRG-007）・判定（RULE-PRG-004）・遅延（RULE-PRG-006）はサービス層とドメイン層が行う（1.3）。
 工数・進捗率・軸の位置（5.4）・暦日の中の割合（7.3）は数（float）で返す（A-17・A-21 と同じ）。
+入力の進捗率・残工数・重みは、保存する列（``Numeric(5,2)``・``Numeric(10,2)``）の小数の桁を超えれば 400（丸めない。A-49 の 4。``schemas.numeric``）。
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.numeric import numeric_column
 from app.schemas.schedule import AxisPointOut
 
 TITLE_MAX = 200
 DELAY_REASON_MAX = 4000
 HOURS_MAX = 1_000_000
+WEIGHT_MIN = 0.01
 WEIGHT_MAX = 1_000_000
 ITEMS_MAX = 1000
 REPORT_IDS_MAX = 50
@@ -91,10 +94,10 @@ class ProgressEntryIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    percent_complete: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    percent_complete: Annotated[float | None, numeric_column(5, 2)] = Field(default=None, ge=0, le=100, allow_inf_nan=False)
     actual_start: date | None = None
     actual_finish: date | None = None
-    remaining_hours: float | None = Field(default=None, ge=0, le=HOURS_MAX, allow_inf_nan=False)
+    remaining_hours: Annotated[float | None, numeric_column(10, 2)] = Field(default=None, ge=0, le=HOURS_MAX, allow_inf_nan=False)
     delay_reason: str | None = Field(default=None, max_length=DELAY_REASON_MAX)
     forecast_finish: date | None = None
 
@@ -122,14 +125,14 @@ class ProgressEntryOut(BaseModel):
 
 
 class ProgressItemIn(BaseModel):
-    """算定項目 1 件。``id`` を載せればその項目を変える（完了の時刻を保つ）、載せなければ新しい項目。"""
+    """算定項目 1 件。``id`` を載せればその項目を変える（完了の時刻を保つ）、載せなければ新しい項目。``weight`` は 0.01 以上で小数 2 桁まで。"""
 
     model_config = ConfigDict(extra="forbid")
 
     id: int | None = None
     item_type: ProgressItemTypeCode
     title: str = Field(min_length=1, max_length=TITLE_MAX)
-    weight: float = Field(default=1, gt=0, le=WEIGHT_MAX, allow_inf_nan=False)
+    weight: Annotated[float, numeric_column(10, 2)] = Field(default=1, ge=WEIGHT_MIN, le=WEIGHT_MAX, allow_inf_nan=False)
     done: bool = False
     approved: bool = False
 

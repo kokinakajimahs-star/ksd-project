@@ -7,7 +7,7 @@ import { getAuthToken, setAuthToken } from "../../api/client";
 import { SESSION_STORAGE_KEY, SessionProvider, loadStoredSession } from "../../auth/session";
 import { makeLoginResponse, makeMe, makeUser, storeSession } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi } from "../../test/mockApi";
-import LoginPage from "./LoginPage";
+import LoginPage, { LOGIN_FAILED_MESSAGE } from "./LoginPage";
 
 function renderApp(path: string) {
   return render(
@@ -70,21 +70,36 @@ describe("UI-CMN-001 ログイン", () => {
     expect(stored.token).toBe("t-1");
   });
 
-  it("401 ならサーバの文言を出し、ログインしない・パスワードを消す", async () => {
+  it("401 ならロックを明かさない文言を出し、ログインしない・パスワードを消す", async () => {
     mockApi({
       "POST /api/v1/auth/login": () =>
-        errorResponse(401, "INVALID_CREDENTIALS", "ログイン名またはパスワードが違います"),
+        errorResponse(401, "INVALID_CREDENTIALS", "ログイン名またはパスワードが違うか、しばらくログインできません"),
     });
 
     renderLogin();
     fillAndSubmit("planner", "wrong");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("ログイン名またはパスワードが違います");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "ログイン名またはパスワードが違うか、しばらくログインできません",
+    );
     expect(screen.queryByText("プロジェクト一覧へ来た")).not.toBeInTheDocument();
     expect(getAuthToken()).toBeNull();
     expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
     expect(screen.getByLabelText("パスワード")).toHaveValue("");
     expect(screen.getByLabelText("ログイン名")).toHaveValue("planner");
+  });
+
+  it("401 の文言はサーバの文言に依らず同じ（ロック中かどうか・ログイン名の有無を画面でも明かさない。NFR-04）", async () => {
+    mockApi({
+      "POST /api/v1/auth/login": () => errorResponse(401, "INVALID_CREDENTIALS", "アカウントはロックされています"),
+    });
+
+    renderLogin();
+    fillAndSubmit("planner", "secret");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(LOGIN_FAILED_MESSAGE);
+    expect(alert).not.toHaveTextContent("ロック");
   });
 
   it("サーバに繋がらなければ接続できないことを出す", async () => {

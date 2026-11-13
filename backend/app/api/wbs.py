@@ -67,10 +67,8 @@ from app.services.wbs import (
     ChangeRequestApprovals,
     CrossGroupReaders,
     MatrixView,
-    ValidationResult,
-)
-from app.models.wbs import (
     ScopeBaseline,
+    ValidationResult,
     WbsDictionaryEntry,
     WbsElement,
     WbsNumberingRule,
@@ -189,16 +187,18 @@ def create_element(
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
     activities: ActivitiesReader = Depends(get_wbs_activities),
+    now: datetime = Depends(get_now),
 ) -> ElementOut:
     """API-WBS-002 要素を足す（採番する）。
 
     権限は wbs.edit。順番は親の last_child_seq + 1、WBS ID は採番規則から作る（RULE-WBS-001・002）。
     WP の下へは 422 ``WORK_PACKAGE_HAS_CHILDREN``、承認待ちの間は 409 ``INVALID_STATE``。
+    自分の見積を置いたら見積の記録（API-EST-001 と同じ形。単位は人時）を 1 行残す（EST-08・CR-017）。
     """
     element = wbs_service.add_element(
         session, access, user, activities, project_id,
         parent_id=body.parent_id, kind=body.kind, name=body.name, own_estimate_hours=body.own_estimate_hours,
-        responsible_user_id=body.responsible_user_id, responsible_team=body.responsible_team,
+        responsible_user_id=body.responsible_user_id, responsible_team=body.responsible_team, now=now,
     )
     return _single_out(session, activities, element)
 
@@ -212,13 +212,16 @@ def patch_element(
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
     activities: ActivitiesReader = Depends(get_wbs_activities),
+    now: datetime = Depends(get_now),
 ) -> ElementOut:
     """API-WBS-003 要素の名称・区分・責任者・自分の見積を変える。
 
     権限は wbs.edit。載せた項目だけを変える（WBS ID は変えない）。区分の変更が RULE-WBS-003 に合わなければ 422。
+    自分の見積が今と違う値になったら見積の記録（API-EST-001 と同じ形。単位は人時）を 1 行残す。同じ値・空（null）は残さない
+    （EST-08・CR-017）。
     """
     element = wbs_service.update_element(
-        session, access, user, activities, project_id, element_id, body.model_dump(exclude_unset=True)
+        session, access, user, activities, project_id, element_id, body.model_dump(exclude_unset=True), now=now
     )
     return _single_out(session, activities, element)
 
@@ -582,12 +585,14 @@ def list_scope_baselines(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
+    activities: ActivitiesReader = Depends(get_wbs_activities),
 ) -> BaselineList:
     """API-WBS-021 スコープベースラインの版の一覧。
 
     権限は project.view。版の順。版は上書きされず増える（WBS-22）。``limit``・``offset``（6.1）。
+    委託先には今見える要素の写しだけを数える（9.2 の注記）。
     """
-    rows, total = wbs_service.list_baselines(session, access, user, project_id, limit=limit, offset=offset)
+    rows, total = wbs_service.list_baselines(session, access, user, activities, project_id, limit=limit, offset=offset)
     return BaselineList(
         project_id=project_id,
         items=[BaselineSummary.model_validate(_baseline_summary(b, n)) for b, n in rows],

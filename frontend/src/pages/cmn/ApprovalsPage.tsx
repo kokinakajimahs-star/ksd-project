@@ -1,5 +1,5 @@
 // UI-CMN-003 承認待ち一覧（設計書 7.1 のルート /approvals。API-WBS-020・019・CMN-008）。
-// 自分が判断できる承認待ち（WBS と変更要求）を申請の古い順に並べ、その場で承認・差戻し（却下）する。
+// 自分が判断できる承認待ち（WBS と変更要求）を申請の古い順に全件並べ（A-49 の 2：total まで頁を読み足す）、その場で承認・差戻し（却下）する。
 // 判断の権限（WBS は wbs.approve、変更要求は change.approve）が無ければ判断の部品を出さない（7.2。サーバでも判定する）
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -12,14 +12,11 @@ import {
   type ApprovalTargetType,
   type Decision,
   type Me,
-  type Page,
   type PendingApproval,
 } from "../../api/cmn";
 import { describeError } from "../../api/errors";
-import Pager from "../../components/Pager";
+import { fetchAllPages } from "../../api/pages";
 import { formatDateTime } from "../../lib/format";
-
-export const APPROVALS_PAGE_SIZE = 100;
 
 interface TargetView {
   label: string;
@@ -70,8 +67,7 @@ function DecisionCell({
 
 export default function ApprovalsPage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [page, setPage] = useState<Page<PendingApproval> | null>(null);
-  const [offset, setOffset] = useState(0);
+  const [approvals, setApprovals] = useState<PendingApproval[] | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -81,22 +77,16 @@ export default function ApprovalsPage() {
   useEffect(() => {
     let cancelled = false;
     setLoadError(null);
-    Promise.all([getMe(), listPendingApprovals({ limit: APPROVALS_PAGE_SIZE, offset })]).then(
-      ([meResult, approvals]) => {
-        if (cancelled) {
-          return;
+    Promise.all([getMe(), fetchAllPages((page) => listPendingApprovals(page))]).then(
+      ([meResult, items]) => {
+        if (!cancelled) {
+          setMe(meResult);
+          setApprovals(items);
         }
-        // 判断して頁が空になったら（2 頁目の最後の 1 件など）先頭の頁へ戻る
-        if (approvals.items.length === 0 && offset > 0) {
-          setOffset(0);
-          return;
-        }
-        setMe(meResult);
-        setPage(approvals);
       },
       (e: unknown) => {
         if (!cancelled) {
-          setPage(null);
+          setApprovals(null);
           setLoadError(describeError(e));
         }
       },
@@ -104,7 +94,7 @@ export default function ApprovalsPage() {
     return () => {
       cancelled = true;
     };
-  }, [offset, reloadKey]);
+  }, [reloadKey]);
 
   async function handleDecide(approval: PendingApproval, decision: Decision, comment: string | null) {
     const target = TARGETS[approval.target_type];
@@ -130,9 +120,10 @@ export default function ApprovalsPage() {
       {notice !== null && <p role="status">{notice}</p>}
       {loadError !== null && <p role="alert">{loadError}</p>}
       {actionError !== null && <p role="alert">{actionError}</p>}
-      {page !== null && me !== null && page.items.length === 0 && <p>承認待ちはありません</p>}
-      {page !== null && me !== null && page.items.length > 0 && (
+      {approvals !== null && me !== null && approvals.length === 0 && <p>承認待ちはありません</p>}
+      {approvals !== null && me !== null && approvals.length > 0 && (
         <>
+          <p>{`全 ${approvals.length} 件`}</p>
           <table aria-label="承認待ちの一覧">
             <thead>
               <tr>
@@ -144,7 +135,7 @@ export default function ApprovalsPage() {
               </tr>
             </thead>
             <tbody>
-              {page.items.map((approval) => {
+              {approvals.map((approval) => {
                 const target = TARGETS[approval.target_type];
                 return (
                   <tr key={approval.id}>
@@ -170,7 +161,6 @@ export default function ApprovalsPage() {
               })}
             </tbody>
           </table>
-          <Pager total={page.total} limit={page.limit} offset={page.offset} onChange={setOffset} />
         </>
       )}
     </section>

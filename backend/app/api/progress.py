@@ -109,7 +109,7 @@ def list_status_reports(
 ) -> StatusReportList:
     """API-PRG-002 報告日の一覧。
 
-    権限は project.view。報告日の古い順。``limit``・``offset``（6.1）。
+    権限は project.view。報告日の古い順。``limit``・``offset``（6.1）。委託先には ``entry_count`` を自分の割当の活動の行だけで数える。
     """
     views, total = progress_service.list_status_reports(session, access, user, project_id, limit=limit, offset=offset)
     return StatusReportList(items=[_report_out(v) for v in views], total=total, limit=limit, offset=offset)
@@ -128,8 +128,8 @@ def put_progress(
 ) -> ProgressEntryOut:
     """API-PRG-003 進捗率・実績日付・残工数・遅延理由・完了見込みを書く。
 
-    権限は progress.enter_own（自分の割当の活動）か progress.enter_all。確定済みの報告日は 409 ``INVALID_STATE``（BR-13）。
-    実績開始日より前の実績終了日・直接入力以外の方式での進捗率は 400。保存する進捗率は RULE-PRG-001 の算定値
+    権限は progress.enter_own（自分の割当の活動）か progress.enter_all。委託先に見えない活動は無い活動と同じ 404（9.2 の注記）。
+    確定済みの報告日は 409 ``INVALID_STATE``（BR-13）。実績開始日より前の実績終了日・直接入力以外の方式での進捗率は 400。保存する進捗率は RULE-PRG-001 の算定値
     （実績終了日があれば 100）。残工数の空は自動（EFF-06）。
     """
     view = progress_service.put_progress(
@@ -176,8 +176,11 @@ def replace_progress_items(
 ) -> ProgressItemsOut:
     """API-PRG-004 進捗の算定項目を置き換える。
 
-    権限は progress.enter_own（自分の割当の活動）か progress.enter_all。``id`` を載せた項目は変え、載せない項目は足し、
-    載せなかった既存の項目は消す（他の活動の項目の ``id`` は 400）。OPEN の報告日の進捗率を求め直す（BR-06）。
+    権限は progress.enter_own（自分の割当の活動）か progress.enter_all。委託先に見えない活動は無い活動と同じ 404（9.2 の注記）。
+    ``id`` を載せた項目は変え、載せない項目は足し、載せなかった既存の項目は消す（他の活動の項目の ``id`` は 400）。
+    ``approved`` を変えるのは progress.enter_all を持つ人だけ（enter_own だけの人が変えると 403。足す項目を真にするのも変える。
+    保存済みと同じ値を送るのは変えたことにしない）。enter_own だけの人は、承認済みの項目と作業項目（WORK）を消せず種類を
+    変えられない（同じ 403。CR-014）。OPEN の報告日の進捗率を求め直す（BR-06）。
     """
     view = progress_service.replace_progress_items(
         session, access, user, project_id, activity_id, [i.model_dump() for i in body.items], now=now

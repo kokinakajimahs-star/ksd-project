@@ -5,16 +5,25 @@ import type { ChangeOperation, ChangeRequest, ChangeRequestInput } from "../../a
 import { toErrorView, type ErrorView } from "../../api/errors";
 import ErrorAlert from "../../components/ErrorAlert";
 import { CHANGE_TITLE_MAX, parseTargetCodes } from "./labels";
-import OperationEditor from "./OperationEditor";
+import OperationEditor, { type EndpointActivity } from "./OperationEditor";
 
 export interface ChangeRequestFormProps {
   /** 直す変更要求（DRAFT）。null は新しく作る */
   initial: ChangeRequest | null;
+  /** 依存の端に選べる今ある活動（全件）。読むまで・読めなければ null */
+  activities: EndpointActivity[] | null;
+  activitiesError?: ErrorView | null;
   onSave: (input: ChangeRequestInput) => Promise<void>;
   onCancel: () => void;
 }
 
-export default function ChangeRequestForm({ initial, onSave, onCancel }: ChangeRequestFormProps) {
+export default function ChangeRequestForm({
+  initial,
+  activities,
+  activitiesError = null,
+  onSave,
+  onCancel,
+}: ChangeRequestFormProps) {
   const [title, setTitle] = useState(initial?.title ?? "");
   const [reason, setReason] = useState(initial?.reason ?? "");
   const [targets, setTargets] = useState(initial?.target_codes.join(", ") ?? "");
@@ -66,7 +75,13 @@ export default function ChangeRequestForm({ initial, onSave, onCancel }: ChangeR
         対象の WBS ID（複数はカンマか空白で区切る。旧 ID も可）
         <input value={targets} onChange={(e) => setTargets(e.target.value)} />
       </label>
-      <OperationEditor operations={operations} onChange={setOperations} disabled={saving} />
+      <OperationEditor
+        operations={operations}
+        onChange={setOperations}
+        activities={activities}
+        activitiesError={activitiesError}
+        disabled={saving}
+      />
       <ErrorAlert error={error} />
       <button type="submit" disabled={saving}>
         {initial === null ? "下書きとして保存する" : "保存する"}

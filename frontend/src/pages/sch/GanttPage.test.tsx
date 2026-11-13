@@ -347,6 +347,54 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     expect(sent(calls, "GET", `${BASE}/lightning-lines`)[0]!.url).toBe(`${BASE}/lightning-lines?report_ids=40`);
     const past = layer(container, "past-lines").querySelector('[data-report-id="40"]')!;
     expect(past.querySelector("polyline")).toHaveAttribute("stroke-dasharray", "6 3");
+    // 全ての頂点が今の行に当たれば、描いていない頂点の注記は出さない
+    expect(screen.queryByText(/描いていない/)).toBeNull();
+  });
+
+  it("今のガントの行に当てられない頂点は描かず、その数を線ごとに注記する（黙って落とさない。A-49 の 13）", async () => {
+    mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/status-reports/41/lightning-line`]: () =>
+          jsonResponse(
+            200,
+            makeLightningLine([
+              ...LIGHTNING.rows,
+              // 今の計画に無い活動と、消した活動の写し（活動が null）
+              makeLightningRow({ row_index: 5, activity_id: 99, name: "消した活動" }),
+              makeLightningRow({ row_index: 6, activity_id: null, name: "昔の活動" }),
+            ]),
+          ),
+        [`GET ${BASE}/lightning-lines`]: () =>
+          jsonResponse(200, {
+            project_start: "2026-12-01",
+            lines: [
+              makeOverlaidLine({
+                vertices: [
+                  ...makeOverlaidLine().vertices,
+                  { ...makeOverlaidLine().vertices[0]!, row_index: 9, activity_id: 26 },
+                ],
+                missing_activity_ids: [98, null],
+              }),
+            ],
+            restricted: false,
+          }),
+      }),
+    );
+    const { container } = renderAt();
+    // 描くのは今の行に当たる 5 つの頂点だけ
+    await chart(container);
+    expect(screen.getByText("今の計画に無い活動の頂点 2 件は描いていない")).toBeInTheDocument();
+
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).getByLabelText("2026-12-03"),
+    );
+
+    // 過去の線：今のガントに無い活動 2 件と、行の番号が今の行に無い頂点 1 件
+    expect(
+      await screen.findByText("報告日 2026-12-03 の線：今の計画に無い活動の頂点 3 件は描いていない"),
+    ).toBeInTheDocument();
+    const past = layer(container, "past-lines").querySelector('[data-report-id="40"]')!;
+    expect(past.querySelectorAll("circle")).toHaveLength(1);
   });
 
   it("schedule.edit を持つ人は日程を計算し直せる（SCH-06・10）。持たない人にはボタンを出さない", async () => {

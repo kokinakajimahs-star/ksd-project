@@ -51,8 +51,12 @@ def _project(session: Session, code: str, owner: User) -> tuple[Project, WbsElem
 
 def _change_request(session: Session, project: Project, creator: User, number: int, codes: list[str],
                     status: str = "DRAFT") -> ChangeRequest:
+    # 状態に合わせて提出・反映の時刻と人を置く（DB の検査 submitted_at・applied_pair。5.10。A-49 の 6）
+    times: dict[str, object] = {} if status == "DRAFT" else {"submitted_at": NOW}
+    if status == "APPLIED":
+        times.update(applied_by=creator.id, applied_at=NOW)
     change_request = ChangeRequest(project_id=project.id, number=number, title=f"変更 {number}", reason="要望",
-                                   target_codes=codes, status=status, created_by=creator.id)
+                                   target_codes=codes, status=status, created_by=creator.id, **times)
     session.add(change_request)
     session.flush()
     return change_request

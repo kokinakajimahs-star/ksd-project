@@ -2,7 +2,7 @@
 // サーバが返す暦日上の座標（日付＋その日の中の割合）をそのまま x にする（画面で稼働日を数え直さない）
 import type { Judgement, LightningLine, OverlaidLine } from "../../api/prg";
 import type { ReportLightning } from "../../api/rpt";
-import type { CalendarPoint, Gantt, GanttRow } from "../../api/sch";
+import type { CalendarPoint, Gantt, GanttBar, GanttRow } from "../../api/sch";
 
 /** 表示の単位。単位は 1 日あたりの横幅だけを変える（7.3） */
 export type GanttUnit = "day" | "week" | "month";
@@ -118,6 +118,38 @@ export function chartExtraDates(rows: Pick<GanttRow, "row_index" | "activity_id"
   return extra;
 }
 
+/** 今のガントの行に当てられず描かない頂点の数（⑥⑦ の線と、⑧ の過去の線ごと） */
+export interface UnplacedVertices {
+  /** API-PRG-006 の線のうち、活動が無い（消した活動の写し）か今のガントの行に無い頂点の数（線が無ければ 0） */
+  lightning: number;
+  /** 過去の線ごと（並びは pastLines と同じ）：今のガントに無い活動（missing_activity_ids）と、行の番号が今の行に無い頂点の数 */
+  pastLines: { reportId: number; reportDate: string; count: number }[];
+}
+
+/**
+ * 描かない頂点を数える（docs/decisions/ASSUMPTIONS.md A-49 の 13・OQ-42 (21) の b。黙って落とさない）。
+ * 当て方は GanttChart と同じ：API-PRG-006 の線は活動、過去の線は行の番号で今のガントの行へ当てる
+ */
+export function unplacedVertexCounts(
+  rows: Pick<GanttRow, "row_index" | "activity_id">[],
+  lines: Pick<RangeLines, "lightning" | "pastLines">,
+): UnplacedVertices {
+  const { lightning = null, pastLines = [] } = lines;
+  const activities = new Set(rows.map((r) => r.activity_id));
+  const rowIndexes = new Set(rows.map((r) => r.row_index));
+  return {
+    lightning:
+      lightning === null
+        ? 0
+        : lightning.rows.filter((r) => r.activity_id === null || !activities.has(r.activity_id)).length,
+    pastLines: pastLines.map((line) => ({
+      reportId: line.report_id,
+      reportDate: line.report_date,
+      count: line.missing_activity_ids.length + line.vertices.filter((v) => !rowIndexes.has(v.row_index)).length,
+    })),
+  };
+}
+
 /** inner が outer に収まる（両端を含む） */
 export function rangeContains(outer: DateRange, inner: DateRange): boolean {
   return parseIsoDate(outer.start) <= parseIsoDate(inner.start) && parseIsoDate(inner.end) <= parseIsoDate(outer.end);
@@ -146,6 +178,26 @@ export function rangeToRefetch(
 /** 範囲を描く幅（最後の日を含む） */
 export function rangeWidth(range: DateRange, dayWidth: number): number {
   return (daysBetween(range.start, range.end) + 1) * dayWidth;
+}
+
+/**
+ * バーが範囲に掛かるか（描く x で見る。範囲は start の 0 時から end の翌日の 0 時まで）。バーは長さのある重なりが要り、
+ * 範囲の端に触れるだけなら掛からない。マイルストーン（終わりの点に菱形を描く）は、その点が範囲の内（両端を含む）なら掛かる
+ */
+export function barInRange(bar: Pick<GanttBar, "is_milestone" | "start" | "end">, range: DateRange): boolean {
+  const days = daysBetween(range.start, range.end) + 1;
+  const start = xOfPoint(range.start, bar.start.calendar, 1);
+  const end = xOfPoint(range.start, bar.end.calendar, 1);
+  if (bar.is_milestone || end <= start) {
+    const at = bar.is_milestone ? end : start;
+    return at >= 0 && at <= days;
+  }
+  return start < days && end > 0;
+}
+
+/** 行の予定のバーか実績のバーが範囲に掛かるか（基準のバーは見ない） */
+export function rowInRange(row: Pick<GanttRow, "planned" | "actual">, range: DateRange): boolean {
+  return [row.planned, row.actual].some((bar) => bar !== null && barInRange(bar, range));
 }
 
 export interface RowWindow {

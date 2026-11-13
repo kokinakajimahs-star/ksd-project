@@ -1,7 +1,9 @@
 """定例会議レポートの組み立て（設計書 5.1 の RULE-RPT-001、7.4。要求仕様書 RPT-01）。
 
-報告日の値の源：確定済み（``FINALIZED``）の報告日はスナップショット（RULE-PRG-007）の写しだけ、確定前（``OPEN``）は
-確定と同じ計算（RULE-PRG-007 の計算を状態を変えずに使う）で求めた値。この値からレポートの 5 つの欄をまとめる（7.4）::
+進捗の値（イナズマ線の頂点・判定・遅延一覧・KPI の進捗率と遅れの件数）の源：確定済み（``FINALIZED``）の報告日は
+スナップショット（RULE-PRG-007）の写しだけ、確定前（``OPEN``）は確定と同じ計算（RULE-PRG-007 の計算を状態を変えずに使う）で
+求めた値。計画の値（ガントのバー、マイルストーンの予定日・見込み日・ずれ）は、確定済みかどうかにかかわらず渡された最新計画
+（ガント・日程計算の入力。API-SCH-010 と同じ）から求める（7.4。設計書 1.2・CR-013）。これらからレポートの 5 つの欄をまとめる::
 
     上段      ガント（RULE-SCH-005）＋イナズマ線（RULE-PRG-005）。表示の範囲は報告日の前後 4 週
     下段左    遅延一覧：ずれの大きい順（δ の小さい順）・遅延理由・完了見込み（RULE-PRG-006 の抽出と見込み）
@@ -12,6 +14,8 @@
 - イナズマ線は写しの値（ポイント・ずれ・判定）だけから描き、今のガントの行へ置き直す。今のガントに無い活動の頂点は外して
   ``missing_activity_ids`` に返す（RULE-PRG-005 の ``overlay_lightning_lines`` と同じ扱い）
 - 遅延一覧・マイルストーンの見込みは、写しの判定とずれを RULE-PRG-006 へ渡して求める（依存の網は渡された日程計算の入力）
+- マイルストーンの欄の行は最新計画のガントの行（行の順）で、予定日はその予定のバーの日、見込み日は全ての遅延の見込みを当てた
+  前進計算の日（ずれなければ予定日）、ずれは見込み日−予定日（稼働日）。確定の後に足した・消したマイルストーンも最新計画のとおり
 - 全体の進捗率 ``Σ(見積 × 進捗率) / Σ見積``（小数 2 桁、四捨五入）。進捗率が未算定の活動は分子・分母の両方から外す。
   見積の合計が 0 なら ``None``
 - 期限超過は RULE-CHG-005 の判定を、報告日を「今日」として当てる（RPT-01「報告日時点の」）
@@ -151,7 +155,8 @@ class ReportKpi:
 class MeetingReport:
     """定例会議レポートのデータ（API-RPT-001 が返す）。
 
-    ``finalized`` が真なら値はスナップショットの写し、偽なら確定前の計算値。``snapshot`` はその値（確定前は保存しない）。
+    ``finalized`` が真なら進捗の値はスナップショットの写し、偽なら確定前の計算値。``snapshot`` はその値（確定前は保存しない）。
+    計画の値（``gantt``・``milestones``）はどちらも渡された最新計画から求める（CR-013）。
     ``lightning`` は今のガントの行へ置き直した線、``missing_activity_ids`` は今のガントに無いため外した頂点の活動。
     """
 
@@ -282,7 +287,8 @@ def build_meeting_report(
     - ``status``：報告日の状態。``FINALIZED`` は ``snapshot``（その報告日の写し）が要り、``activities`` は渡さない。
       ``OPEN`` は ``snapshot`` を渡さず、``activities``（全活動をガントの行の順に。RULE-PRG-007 と同じ入力）と
       ``tolerance_days``・``extract_days``（``projects.settings`` の今の値）から計算値を求める
-    - ``gantt``：今の計画のガント（RULE-SCH-005。報告日を渡して組み立てたもの）。イナズマ線はこの行へ置き直す
+    - ``gantt``：今の計画のガント（RULE-SCH-005。報告日を渡して組み立てたもの）。イナズマ線はこの行へ置き直し、マイルストーンの
+      欄はこの行の予定日から求める（予定のバーの無いマイルストーンは ``ReportError``）
     - ``schedule_activities``・``dependencies``：今の計画の日程計算の入力（RULE-PRG-006 の影響の計算に使う）
     - ``progress_notes``：報告日の遅延理由・完了見込み日。``estimate_hours``：活動の見積（人時。無ければ 0）
     - ``effort``：プロジェクトの工数の合計（RULE-EFF-002 の ``project``）。``corrective_actions``：プロジェクトの是正措置
@@ -363,21 +369,26 @@ def build_meeting_report(
         for impact in analysis.delays
     )
 
+    # 下段中：マイルストーンは計画の値なので、確定済みかどうかにかかわらず最新計画（今のガントの行）の予定日から求める
+    # （7.4。設計書 1.2・CR-013。写しの予定日と今の計画の見込み日を混ぜない）
     axis = WorkdayAxis(calendar=calendar, origin=project_start)
     slipped = {s.activity_id: s.after_date for s in analysis.combined_milestone_slips}
     milestones: list[MilestoneRow] = []
-    for item in sorted(source.items, key=lambda i: i.row_order):
-        if not item.is_milestone:
+    for row in gantt.rows:
+        if not row.is_milestone:
             continue
-        forecast = slipped.get(item.activity_id, item.finish_date)
+        if row.planned is None:
+            raise ReportError(f"マイルストーン {row.activity_id} の予定日が最新計画に無い（日程が計算されていない）")
+        planned = row.planned.end_date
+        forecast = slipped.get(row.activity_id, planned)
         milestones.append(
             MilestoneRow(
-                activity_id=item.activity_id,
-                wbs_code=item.wbs_code,
-                name=item.name,
-                planned_date=item.finish_date,
+                activity_id=row.activity_id,
+                wbs_code=row.wbs_code,
+                name=row.name,
+                planned_date=planned,
                 forecast_date=forecast,
-                slip_days=axis.report_line(forecast) - axis.report_line(item.finish_date),
+                slip_days=axis.report_line(forecast) - axis.report_line(planned),
             )
         )
 

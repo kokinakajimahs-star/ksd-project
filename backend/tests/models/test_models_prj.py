@@ -16,7 +16,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import BACKEND_DIR
@@ -254,10 +254,15 @@ def test_calendars_working_weekdays_accepts_seven_flags(db_session: Session, wee
 
 @pytest.mark.parametrize("weekdays", ["111110", "11111000", "111110x", "1111 00", "2111100", ""])
 def test_calendars_working_weekdays_rejects_bad_shapes(db_session: Session, weekdays: str) -> None:
-    """DB-PRJ-003 calendars：7 文字でない・0 と 1 以外の文字を含む値は DB が拒む。"""
+    """DB-PRJ-003 calendars：7 文字でない・0 と 1 以外の文字を含む値は DB が拒む。
+
+    SQLite は列の長さ（``VARCHAR(7)``）を見ないので、全て CHECK が拒む（``IntegrityError``）。PostgreSQL は 8 文字以上の値を
+    CHECK の前に列の型が拒む（``DataError``。SQLSTATE 22001 string_data_right_truncation）。API は 7 文字の 0・1 だけを受け付ける。
+    """
     project = _project(db_session)
     db_session.add(Calendar(project_id=project.id, working_weekdays=weekdays))
-    with pytest.raises(IntegrityError):
+    too_long_for_type = db_session.get_bind().dialect.name == "postgresql" and len(weekdays) > 7
+    with pytest.raises(DataError if too_long_for_type else IntegrityError):
         db_session.flush()
 
 

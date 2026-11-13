@@ -278,11 +278,20 @@ export default function GanttChart({
             if (text === "" || row.planned === null) {
               return null;
             }
+            // 予定と実績のうち右へ延びる方のバーの右端の右に置く（未完了の実績のバーは報告日まで延びるので、予定の右端に
+            // 置くと濃い青のバーに重なって読めない）
+            const barEnd = Math.max(x(row.planned.end), row.actual === null ? -Infinity : x(row.actual.end));
+            const labelX = barEnd + 10;
+            // 範囲を固定したとき（会議レポート）は、範囲の始まりより前で終わるバーのラベルを描かない（左端で切れた断片を残さない）。
+            // 右端より右から始まるラベルも描かない
+            if (fixedRange !== null && (barEnd <= LABEL_WIDTH || labelX >= width)) {
+              return null;
+            }
             return (
               <text
                 key={row.activity_id}
                 data-activity-id={row.activity_id}
-                x={x(row.planned.end) + 10}
+                x={labelX}
                 y={rowCenter(shown.first + i) + 4}
                 fontSize={11}
                 fill="#424242"

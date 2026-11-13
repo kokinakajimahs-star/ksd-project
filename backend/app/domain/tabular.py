@@ -3,12 +3,14 @@
 - 列の定義（6.3）：target ごとの列（この順）を ``COLUMNS`` に持つ。1 行目が見出し、2 行目からがデータ。
   日付は ``YYYY-MM-DD``、工数は人時の小数（2 桁まで）、マイルストーンは ``0``/``1``、複数の値は ``;`` 区切り
 - 変換：6.3 の 1 行（``WbsRow``・``ActivityRow``・``TimeEntryRow``）↔ 文字列のセルの並び（``export_grid``・取込の各関数）。
-  CSV（UTF-8 の BOM 付き・カンマ区切り）は ``encode_csv``・``decode_csv``。xlsx のセルの値（数・日付・真偽）は ``cell_text`` で
+  CSV（UTF-8 の BOM 付き・カンマ区切り）は ``encode_csv``・``decode_csv``。表計算ソフトが式として読まないよう、CSV の出力では
+  ``=``・``+``・``-``・``@``・タブ・復帰・``'`` で始まるセルの先頭へ ``'`` を 1 つ足し、取込では先頭の ``'`` の次の文字がそれらの
+  ときに ``'`` を 1 つ外す（往復で一致する。6.3・CR-019）。xlsx のセルの値（数・日付・真偽）は ``cell_text`` で
   同じ文字列に直す（xlsx のファイルの読み書きは外部のライブラリが要るので、この層では行わない。1.3 の「標準ライブラリのみ」）
 - 行ごとの検査：見出し、必須、形式（日付・整数・数・0/1・区分）、範囲（負の値・上限・小数 3 桁）、文字数、
   照合キーの重複、参照先（WBS ID・ログインID・活動ID）の有無。誤りは ``{行, 列, コード, メッセージ}``（``ImportIssue``）で全件を返す
 - 全件の検査：行ごとの検査が全て通った後に、取り込んだ後の全体へ RULE-WBS-003（階層と区分）・RULE-SCH-001（依存の循環）・
-  RULE-EFF-005（実績工数の入力検査）を当てる
+  実績工数の入力検査（RULE-EFF-005）を当てる
 - 全件の検査が通ったときだけ書く：誤りが 1 件でもあれば ``ImportPlan.changes`` は空（何も書かない）。書くのは呼び手（サービス層）
 - 往復の一致：出力した直後のファイルを取り込むと、変更は 0 件（``changes`` が空・全ての行が ``unchanged``）
 
@@ -24,7 +26,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -43,6 +45,9 @@ from app.domain.wbs_rules import ActivityRef, HierarchyIssue, HierarchyIssueCode
 CSV_ENCODING: Final = "utf-8-sig"
 CSV_DELIMITER: Final = ","
 CSV_LINE_TERMINATOR: Final = "\r\n"
+# 6.3（CR-019）：表計算ソフトが式として読む先頭の文字。CSV の出力ではこれで始まるセルの先頭へ CSV_FORMULA_ESCAPE を足す
+CSV_FORMULA_TRIGGERS: Final = frozenset({"=", "+", "-", "@", "\t", "\r", "'"})
+CSV_FORMULA_ESCAPE: Final = "'"
 # 6.3：先行の活動ID・担当者のログインIDの区切り
 LIST_SEPARATOR: Final = ";"
 # 見出しの行の行番号（データは次の行から）
@@ -120,13 +125,15 @@ class ImportIssueCode(StrEnum):
     TOO_LONG = "TOO_LONG"  # 文字数が列の長さを超える
     DUPLICATE_KEY = "DUPLICATE_KEY"  # 照合キーがファイルの中で重複している
     NOT_FOUND = "NOT_FOUND"  # 参照先（WBS ID・ログインID・活動ID）が無い
-    # RULE-WBS-003（階層と区分の整合）
+    # 階層と区分の整合（RULE-WBS-003）
     PARENT_CYCLE = "PARENT_CYCLE"
     WORK_PACKAGE_HAS_CHILDREN = "WORK_PACKAGE_HAS_CHILDREN"
     ACTIVITY_NOT_ON_WORK_PACKAGE = "ACTIVITY_NOT_ON_WORK_PACKAGE"
-    # RULE-SCH-001（依存の循環）
+    # 依存の循環（RULE-SCH-001）
     SCHEDULE_CYCLE = "SCHEDULE_CYCLE"
-    # RULE-EFF-005（実績工数の入力検査）
+    # 希望開始日がプロジェクトの開始日より前（5.5・CR-018。開始日はサービス層が DB から読んで判定する）
+    BEFORE_PROJECT_START = "BEFORE_PROJECT_START"
+    # 実績工数の入力検査（RULE-EFF-005）
     NOT_ASSIGNED = "NOT_ASSIGNED"
     LOCKED_DATE = "LOCKED_DATE"
     DAY_TOTAL_EXCEEDED = "DAY_TOTAL_EXCEEDED"
@@ -311,11 +318,24 @@ def export_grid(target: TabularTarget | str, rows: Iterable[WbsRow | ActivityRow
     return grid
 
 
+def _escape_formula(cell: str) -> str:
+    """式として読まれる文字で始まるセルの先頭へ ``'`` を 1 つ足す（6.3・CR-019）。"""
+    return CSV_FORMULA_ESCAPE + cell if cell[:1] in CSV_FORMULA_TRIGGERS else cell
+
+
+def _unescape_formula(cell: str) -> str:
+    """先頭の ``'`` の次の文字が式として読まれる文字なら、``'`` を 1 つ外す（``_escape_formula`` の逆。6.3・CR-019）。"""
+    return cell[1:] if cell[:1] == CSV_FORMULA_ESCAPE and cell[1:2] in CSV_FORMULA_TRIGGERS else cell
+
+
 def encode_csv(grid: Iterable[Sequence[str]]) -> bytes:
-    """表を CSV（UTF-8 の BOM 付き・カンマ区切り・改行は CRLF・必要なセルだけ引用符）のバイト列にする（6.3）。"""
+    """表を CSV（UTF-8 の BOM 付き・カンマ区切り・改行は CRLF・必要なセルだけ引用符）のバイト列にする（6.3）。
+
+    ``=``・``+``・``-``・``@``・タブ・復帰・``'`` で始まるセルは先頭へ ``'`` を 1 つ足す（式にしない。CR-019）。
+    """
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, delimiter=CSV_DELIMITER, lineterminator=CSV_LINE_TERMINATOR, quoting=csv.QUOTE_MINIMAL)
-    writer.writerows(grid)
+    writer.writerows([_escape_formula(cell) for cell in row] for row in grid)
     return buffer.getvalue().encode(CSV_ENCODING)
 
 
@@ -323,6 +343,15 @@ def decode_csv(data: bytes) -> list[list[str]]:
     """CSV のバイト列を表にする。先頭の BOM は外す（BOM の無い UTF-8 も読む。A-34）。
 
     UTF-8 として読めない・引用符が閉じていないときは ``TabularFileError``（行は誤りのあった行）。
+    先頭の ``'`` の次の文字が ``=``・``+``・``-``・``@``・タブ・復帰・``'`` のセルは ``'`` を 1 つ外す（``encode_csv`` の逆。CR-019）。
+    """
+    return list(iter_csv(data))
+
+
+def iter_csv(data: bytes) -> Iterator[list[str]]:
+    """``decode_csv`` と同じ表を 1 行ずつ返す（呼び手が行の数の上限で読むのを止められる。6.3・CR-019）。
+
+    UTF-8 として読めなければ最初の行を返す前に、引用符が閉じていなければその行に来たときに ``TabularFileError``。
     """
     try:
         text = data.decode(CSV_ENCODING)
@@ -332,16 +361,16 @@ def decode_csv(data: bytes) -> list[list[str]]:
             [ImportIssue(row, None, ImportIssueCode.FILE_UNREADABLE, f"{row} 行目が UTF-8 として読めない（CSV は UTF-8 で保存する）")]
         ) from exc
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=CSV_DELIMITER, strict=True)
-    grid: list[list[str]] = []
+    count = 0
     try:
         for record in reader:
-            grid.append(record)
+            count += 1
+            yield [_unescape_formula(cell) for cell in record]
     except csv.Error as exc:
-        row = len(grid) + 1
+        row = count + 1
         raise TabularFileError(
             [ImportIssue(row, None, ImportIssueCode.FILE_UNREADABLE, f"{row} 行目を CSV として読めない: {exc}")]
         ) from exc
-    return grid
 
 
 def _target(target: TabularTarget | str) -> TabularTarget:
@@ -681,7 +710,7 @@ def _wbs_values(row: WbsRow) -> tuple[object, ...]:
     )
 
 
-# RULE-INT-001 表形式の入出力
+# WBS の表の取込の計画（RULE-INT-001 の一部）
 def plan_wbs_import(
     grid: Sequence[Sequence[object]],
     *,
@@ -898,7 +927,7 @@ def _activity_values(row: ActivityRow) -> tuple[object, ...]:
     )
 
 
-# RULE-INT-001 表形式の入出力
+# 活動の表の取込の計画（RULE-INT-001 の一部）
 def plan_activity_import(
     grid: Sequence[Sequence[object]],
     *,
@@ -1026,7 +1055,7 @@ def _check_activity_cycles(
 
 @dataclass(frozen=True)
 class UserEffortContext:
-    """RULE-EFF-005 を当てるのに要る、利用者 1 人の今の値。
+    """実績工数の入力検査（RULE-EFF-005）を当てるのに要る、利用者 1 人の今の値。
 
     - ``user_id``：``existing`` の行の利用者
     - ``existing``：その利用者の今の実績工数（プロジェクトをまたいで渡す。1 日の合計の検査に使う）
@@ -1050,7 +1079,7 @@ _EFFORT_CODES: Final[Mapping[TimeEntryProblemCode, ImportIssueCode]] = MappingPr
 )
 
 
-# RULE-INT-001 表形式の入出力
+# 実績工数の表の取込の計画（RULE-INT-001 の一部）
 def plan_time_entry_import(
     grid: Sequence[Sequence[object]],
     *,

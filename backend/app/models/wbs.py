@@ -7,6 +7,9 @@
   （WBS-22 の「後から変更されない」。基準の後の要素の削除との両立は docs/instruction-change-requests.md CR-002）
 - 値の一覧が設計書に書かれている列（区分・状態・指摘の分類・申請の対象・版の理由）は DB の検査（CHECK）でも拒む
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）。工数は人時の小数 ``Numeric(10,2)``（2.4）
+- 全ての表の内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
+- JSON の列の ``None`` は SQL の NULL で持つ（``none_as_null``。JSON の ``null`` を保存しない。ASSUMPTIONS.md A-49 の 5）。
+  NOT NULL の列の ``None`` は、ORM の挿入なら既定値（``default``）になり、既定値の無い列・更新・SQL の挿入では DB が拒む
 
 ``approval_requests.target_id`` は対象の種類（WBS／変更要求）で指す表が変わるので外部キーを持たない（4.2 の ``<単数形>_id`` に当たらない）。
 ``scope_baselines.change_request_id`` の ``change_requests.id``（DB-CHG-001）への外部キーは、
@@ -117,6 +120,7 @@ class WbsNumberingRule(Base):
     __table_args__ = (
         CheckConstraint("min_digits >= 1", name="min_digits"),
         CheckConstraint("top_last_child_seq >= 0", name="top_last_child_seq"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -137,6 +141,7 @@ class WbsCodeHistory(Base):
     """改番（RULE-WBS-002）で変わった WBS ID の新旧の対応（要求 WBS-06・07）。旧 ID の解決は新しい順にたどる（5.2）。"""
 
     __tablename__ = "wbs_code_history"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -156,6 +161,7 @@ class WbsDictionaryEntry(Base):
     """
 
     __tablename__ = "wbs_dictionary_entries"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     element_id: Mapped[int] = mapped_column(ForeignKey("wbs_elements.id"), unique=True)
@@ -170,7 +176,7 @@ class WbsScopeLink(Base):
     """要素とスコープ項目の紐付け（要求 PRJ-02・WBS-16。100% ルールの対象外の混入・対象内の漏れの判定に使う）。組で一意。"""
 
     __tablename__ = "wbs_scope_links"
-    __table_args__ = (UniqueConstraint("element_id", "scope_item_id"),)
+    __table_args__ = (UniqueConstraint("element_id", "scope_item_id"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     element_id: Mapped[int] = mapped_column(ForeignKey("wbs_elements.id"))
@@ -185,7 +191,7 @@ class WbsReview(Base):
     """
 
     __tablename__ = "wbs_reviews"
-    __table_args__ = (CheckConstraint(in_list("status", REVIEW_STATUSES), name="status"),)
+    __table_args__ = (CheckConstraint(in_list("status", REVIEW_STATUSES), name="status"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -194,7 +200,7 @@ class WbsReview(Base):
     )
     requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
-    reviewer_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    reviewer_ids: Mapped[list[int]] = mapped_column(JSON(none_as_null=True), default=list)
     closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
@@ -210,6 +216,7 @@ class WbsReviewComment(Base):
     __table_args__ = (
         CheckConstraint(in_list("category", COMMENT_CATEGORIES), name="category"),
         CheckConstraint(in_list("status", COMMENT_STATUSES), name="status"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -231,6 +238,8 @@ class ApprovalRequest(Base):
 
     ``target_id`` は ``target_type`` が CHANGE_REQUEST なら変更要求の ID、WBS ならプロジェクトの ID（ASSUMPTIONS.md A-15）。
     判断すると ``decided_by``・``decided_at``・``comment`` が入る（承認者・日時・コメントが残る。WBS-21）。
+    **PENDING の間は判断した人・時刻が空、APPROVED・REJECTED なら両方ある**（DB の検査。5.10 の PENDING → APPROVED / REJECTED。
+    ``status_reports`` の ``finalized_pair`` と同じ形。A-49 の 6）。コメントは判断しても空でよい。
     申請者と同じ人が判断できないこと（SELF_APPROVAL_FORBIDDEN）は判断の API が確かめる。
     """
 
@@ -238,6 +247,12 @@ class ApprovalRequest(Base):
     __table_args__ = (
         CheckConstraint(in_list("target_type", APPROVAL_TARGET_TYPES), name="target_type"),
         CheckConstraint(in_list("status", APPROVAL_STATUSES), name="status"),
+        CheckConstraint(
+            "(status = 'PENDING' AND decided_by IS NULL AND decided_at IS NULL)"
+            " OR (status IN ('APPROVED', 'REJECTED') AND decided_by IS NOT NULL AND decided_at IS NOT NULL)",
+            name="decided_pair",
+        ),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -267,6 +282,7 @@ class ScopeBaseline(Base):
         UniqueConstraint("project_id", "version"),
         CheckConstraint("version >= 1", name="version"),
         CheckConstraint(in_list("reason", SCOPE_BASELINE_REASONS), name="reason"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -293,6 +309,7 @@ class ScopeBaselineElement(Base):
     __table_args__ = (
         CheckConstraint(in_list("kind", ELEMENT_KINDS), name="kind"),
         CheckConstraint("own_estimate_hours IS NULL OR own_estimate_hours >= 0", name="own_estimate_hours"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

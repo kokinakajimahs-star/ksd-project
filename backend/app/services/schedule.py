@@ -8,6 +8,8 @@
   ``ScheduleCalculator``（``app.state.schedule_recalculator``）として同じ計算を呼ぶ
 - 開始日・期間・終了日は 2 つから残りを RULE-CAL-001 で求める（SCH-03）。保存するのは希望開始日と期間（4.2）。
   期間 0 の活動がマイルストーン（BR-04・SCH-09）
+- 希望開始日はプロジェクトの開始日以降に限る（5.5・CR-018）。書いた後の希望開始日が開始日より前になる書き込みは
+  422 ``BEFORE_PROJECT_START``（``starts_before_project``・``before_project_start``。取込・変更要求の反映・開始日の変更も使う）
 - 一括更新は RULE-SCH-006、ガントは RULE-SCH-005、差異は RULE-SCH-004 を使う
 
 **別の群の表を読む口・書く口**（``app.state.schedule_links``。A-14・A-17・A-18 と同じ形）：
@@ -29,7 +31,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ViewLevel, project_view_level
@@ -63,12 +65,18 @@ from app.domain.scheduling import (
 from app.domain.wbs_code import CodedElement, display_preorder
 from app.domain.wbs_rules import ActivityRef, AssignmentRef, WbsRuleError, ensure_hierarchy
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
 from app.models.prg import ProgressEntry, ProgressItem, StatusReport
 from app.models.prj import WORKING_WEEKDAYS_DEFAULT, Calendar, CalendarHoliday, Project, ProjectMember
-from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
+from app.models.sch import (  # API 層は依存・スケジュールベースラインの型をここから取る（1.3：API はモデルを直接 import しない）
+    Activity,
+    ActivityDependency as ActivityDependency,
+    ScheduleBaseline as ScheduleBaseline,
+    ScheduleBaselineItem,
+)
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
@@ -226,6 +234,31 @@ def _validation_error(details: list[dict[str, Any]], message: str = "入力に�
 
 def _invalid(field_name: str, message: str) -> AppError:
     return _validation_error([{"loc": ["body", field_name], "message": message}])
+
+
+def starts_before_project(project_start: date, new_start: date | None, old_start: date | None) -> bool:
+    """書いた後の希望開始日がプロジェクトの開始日より前になるか（5.5・CR-018）。
+
+    今の値のままなら問わない（この版より前に保存された、開始日より前の希望開始日は、変えない限りそのまま残せる。5.5）。
+    """
+    return new_start is not None and new_start < project_start and new_start != old_start
+
+
+def before_project_start(
+    project_start: date, early: Iterable[tuple[Mapping[str, Any], date]], message: str | None = None
+) -> AppError:
+    """開始日より前の希望開始日になる書き込みを拒む 422 ``BEFORE_PROJECT_START``（何も書かない。5.5・CR-018）。
+
+    ``early`` は（どこか、開始日より前の希望開始日）の組。``details`` はどこかに希望開始日・開始日・理由を足したもの。
+    """
+    details = [
+        {**where, "requested_start": start.isoformat(), "project_start": project_start.isoformat(),
+         "message": f"希望開始日 {start.isoformat()} がプロジェクトの開始日 {project_start.isoformat()} より前です"}
+        for where, start in early
+    ]
+    return AppError(422, "BEFORE_PROJECT_START",
+                    message or f"希望開始日はプロジェクトの開始日（{project_start.isoformat()}）以降にします",
+                    details=details)
 
 
 def _cycle_error(activity_ids: Iterable[int]) -> AppError:
@@ -386,12 +419,18 @@ class ActivityView:
     assignees: tuple[AssigneeView, ...]
 
 
-def _views(session: Session, links: ScheduleLinks, plan: Plan, activities: Sequence[Activity]) -> list[ActivityView]:
+def _views(
+    session: Session, links: ScheduleLinks, plan: Plan, activities: Sequence[Activity],
+    visible: frozenset[int] | None = None,
+) -> list[ActivityView]:
+    """活動の出力の元。``visible`` を渡したら、先行・後続の相手は読める活動だけ（9.2 の注記）。"""
     elements = plan.element_by_id
     assignees = _assignees_by_activity(session, links, plan.project.id)
     preds: dict[int, list[int]] = {}
     succs: dict[int, list[int]] = {}
     for p, s in plan.pairs:
+        if visible is not None and (p not in visible or s not in visible):
+            continue
         preds.setdefault(s, []).append(p)
         succs.setdefault(p, []).append(s)
     return [
@@ -469,7 +508,7 @@ def list_activities(
     session: Session, access: ProjectAccess, actor: User, links: ScheduleLinks, project_id: int, *, limit: int,
     offset: int,
 ) -> ActivityListView:
-    """活動の一覧（project.view）。行の順は RULE-SCH-005 と同じ。依存は読める活動どうしのもの。"""
+    """活動の一覧（project.view）。行の順は RULE-SCH-005 と同じ。依存・先行と後続の相手は読める活動どうしのもの。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
     plan = load_plan(session, project_id)
     visible = _visible_activity_ids(session, access, actor, project_id, table, plan.activities)
@@ -479,8 +518,8 @@ def list_activities(
         d for d in plan.dependencies
         if visible is None or (d.predecessor_id in visible and d.successor_id in visible)
     ]
-    return ActivityListView(items=_views(session, links, plan, page), total=len(ordered), dependencies=dependencies,
-                            restricted=visible is not None)
+    return ActivityListView(items=_views(session, links, plan, page, visible), total=len(ordered),
+                            dependencies=dependencies, restricted=visible is not None)
 
 
 def _ensure_on_work_package(plan: Plan, activity_refs: Sequence[ActivityRef]) -> None:
@@ -512,9 +551,11 @@ def add_activity(
     """活動を WP の配下に足し（schedule.edit）、日程を計算し直す。
 
     置き場がこのプロジェクトの WBS 要素でなければ 400、WP でなければ 422 ``ACTIVITY_NOT_ON_WORK_PACKAGE``（RULE-WBS-003）。
-    表示順は WP の中の末尾。
+    表示順は WP の中の末尾。次の稼働日へ寄せた希望開始日がプロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     plan = load_plan(session, project_id)
     if work_package_id not in plan.element_by_id:
         raise _invalid("work_package_id", "このプロジェクトの WBS 要素ではありません")
@@ -522,6 +563,8 @@ def add_activity(
                                    ActivityRef(id=-1, work_package_id=work_package_id)])
     start, duration = resolve_activity_dates(plan.calendar, start=requested_start, finish=requested_finish,
                                              duration=duration_days, is_milestone=is_milestone)
+    if start is not None and starts_before_project(plan.project.start_date, start, None):
+        raise before_project_start(plan.project.start_date, [({"loc": ["body", "requested_start"]}, start)])
     siblings = [a.sort_order for a in plan.activities if a.work_package_id == work_package_id]
     activity = Activity(
         project_id=project_id,
@@ -550,8 +593,11 @@ def update_activity(
     """活動の名称・日付・期間・マイルストーンを変え（schedule.edit）、日程を計算し直す。載せた項目だけを変える。
 
     終了日だけを載せたら期間を保って開始日を動かす。開始日か期間と組なら残りを求める（SCH-03）。
+    求めた希望開始日が今と違い、プロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     activity = _activity_of(session, project_id, activity_id)
     unknown = set(changes) - UPDATABLE_FIELDS
     if unknown:
@@ -579,6 +625,11 @@ def update_activity(
         calendar = work_calendar(session, project_id)
         new_start, new_duration = resolve_activity_dates(calendar, start=start, finish=finish, duration=duration,
                                                          is_milestone=is_milestone)
+        project = session.get(Project, project_id)
+        assert project is not None  # authorize_project が無いプロジェクトを 404 にしてある
+        if new_start is not None and starts_before_project(project.start_date, new_start, activity.requested_start):
+            field_name = "requested_start" if "requested_start" in changes else "requested_finish"
+            raise before_project_start(project.start_date, [({"loc": ["body", field_name]}, new_start)])
         activity.requested_start = new_start
         activity.duration_days = new_duration
         activity.is_milestone = new_duration == 0
@@ -610,9 +661,13 @@ def bulk_update_activities(
     """複数の活動の名称・希望開始日・期間・先行・担当をまとめて変える（schedule.edit。SCH-02）。
 
     RULE-SCH-006 で全てを検査してから適用する。1 件でも不正なら何も保存せず 422（循環だけなら ``SCHEDULE_CYCLE``、
-    それ以外は ``BULK_UPDATE_INVALID``。``details`` は見つけた不正の全て）。通れば 1 回で保存し、日程を計算し直す。
+    それ以外は ``BULK_UPDATE_INVALID``。``details`` は見つけた不正の全て）。通った後、希望開始日を今と違う値にして
+    プロジェクトの開始日より前になる活動があれば何も保存せず 422 ``BEFORE_PROJECT_START``（``details`` はその全て。CR-018）。
+    通れば 1 回で保存し、日程を計算し直す。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     plan = load_plan(session, project_id)
     preds: dict[int, set[int]] = {a.id: set() for a in plan.activities}
     for p, s in plan.pairs:
@@ -649,6 +704,15 @@ def bulk_update_activities(
                        "一括更新に不正があるため、全件を保存しませんでした", details=details) from exc
 
     by_id = plan.activity_by_id
+    index_of = {c["activity_id"]: index for index, c in enumerate(changes)}
+    early = [
+        ({"index": index_of[e.id], "activity_id": e.id, "field": "requested_start"}, e.requested_start)
+        for e in result.activities
+        if e.requested_start is not None
+        and starts_before_project(plan.project.start_date, e.requested_start, by_id[e.id].requested_start)
+    ]
+    if early:
+        raise before_project_start(plan.project.start_date, early)
     for edited in result.activities:
         activity = by_id[edited.id]
         activity.name = edited.name
@@ -996,17 +1060,30 @@ def save_baseline(
 def list_baselines(
     session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
 ) -> tuple[list[BaselineView], int]:
-    """スケジュールベースラインの版の一覧（project.view。版の順。SCH-17）。"""
-    authorize_project(session, access, actor, project_id, "project.view")
+    """スケジュールベースラインの版の一覧（project.view。版の順。SCH-17）。
+
+    委託先だけで読む利用者には、版の項目の数を読める活動の項目とその WP の項目だけで数える（9.2 の注記）。
+    """
+    table = authorize_project(session, access, actor, project_id, "project.view")
     baselines = _baselines_of(session, project_id)
     page = baselines[offset:offset + limit]
+    activities = list(session.scalars(select(Activity).where(Activity.project_id == project_id)))
+    visible = _visible_activity_ids(session, access, actor, project_id, table, activities)
     counts: dict[int, int] = {}
     if page:
+        counted = (
+            select(ScheduleBaselineItem.schedule_baseline_id, func.count(ScheduleBaselineItem.id))
+            .where(ScheduleBaselineItem.schedule_baseline_id.in_([b.id for b in page]))
+        )
+        if visible is not None:
+            work_packages = {a.work_package_id for a in activities if a.id in visible}
+            counted = counted.where(or_(
+                and_(ScheduleBaselineItem.item_type == "ACTIVITY", ScheduleBaselineItem.activity_id.in_(visible)),
+                and_(ScheduleBaselineItem.item_type == "WORK_PACKAGE", ScheduleBaselineItem.element_id.in_(work_packages)),
+            ))
         counts = dict(
             session.execute(  # type: ignore[arg-type]
-                select(ScheduleBaselineItem.schedule_baseline_id, func.count(ScheduleBaselineItem.id))
-                .where(ScheduleBaselineItem.schedule_baseline_id.in_([b.id for b in page]))
-                .group_by(ScheduleBaselineItem.schedule_baseline_id)
+                counted.group_by(ScheduleBaselineItem.schedule_baseline_id)
             ).all()
         )
     return [BaselineView(baseline=b, item_count=counts.get(b.id, 0)) for b in page], len(baselines)

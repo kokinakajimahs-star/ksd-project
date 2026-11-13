@@ -6,13 +6,20 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import type { CalendarInput, Member, Project, RoleGrants, ScopeItem, ScopeItemInput } from "../../api/prj";
 import { makeMe, makeMember, makeProject, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import { PROJECT_PERMISSIONS } from "./labels";
 import ProjectSettingsPage, { parseProjectId } from "./ProjectSettingsPage";
 import { collectProjectChanges, formOf } from "./settings/BasicInfoSection";
 import { addHoliday, formatWeekdays, parseWeekdays } from "./settings/CalendarSection";
 import { orderRoles } from "./settings/MembersSection";
-import { tableOf, toRoleGrants } from "./settings/RolePermissionsSection";
+import { NO_PERMISSION_MANAGER_HINT, tableOf, toRoleGrants } from "./settings/RolePermissionsSection";
 import { toScopeInputs } from "./settings/ScopeSection";
 
 const BASE = "/api/v1/projects/3";
@@ -407,6 +414,52 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(2);
   });
 
+  it("メンバーを足す候補から、今の頁に無い（他の頁の）メンバーも除く（OQ-42 (21) の d・A-49 の 2）", async () => {
+    // 1001 人のメンバー。実行 花子は最後（11 頁目・全件では 2 頁目）にいて、一覧の今の頁（100 件）には出ない
+    const fillers = Array.from({ length: 999 }, (_, i) =>
+      makeMember({ user_id: 100 + i, login_id: `m${i}`, display_name: `メンバー${i}` }),
+    );
+    const execMember = makeMember({ user_id: 9, login_id: "exec", display_name: "実行 花子", roles: ["EXECUTOR"] });
+    const all = [PM_MEMBER, ...fillers, execMember];
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`GET ${BASE}/members`]: (call) => pagedResponse(all, call, { project_id: 3 }),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    const table = await within(section).findByRole("table", { name: "メンバーの一覧" });
+    expect(table).not.toHaveTextContent("exec");
+    const addButton = within(section).getByRole("button", { name: "メンバーを足す" });
+    await waitFor(() => expect(addButton).toBeEnabled());
+    fireEvent.click(addButton);
+    const form = within(section).getByRole("form", { name: "メンバーを足す" });
+    // 今の頁に無い実行 花子も、メンバーなので候補に出さない
+    expect(within(form).getAllByRole("option").map((o) => o.textContent)).toEqual(["計画 太郎（planner）"]);
+    expect(sent(calls, "GET", `${BASE}/members`).map((c) => c.url)).toEqual(
+      expect.arrayContaining([`${BASE}/members?limit=1000&offset=0`, `${BASE}/members?limit=1000&offset=1000`]),
+    );
+  });
+
+  it("メンバーの全件を読めなければ、メンバーを足させずに理由を出す", async () => {
+    mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`GET ${BASE}/members`]: (call) =>
+          call.url.includes("limit=1000")
+            ? errorResponse(500, "INTERNAL_ERROR", "サーバの内部で誤りが起きました")
+            : jsonResponse(200, membersPage([PM_MEMBER, PLANNER_MEMBER])),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    await within(section).findByRole("table", { name: "メンバーの一覧" });
+    expect(await within(section).findByText("メンバーの全件を読めないため、メンバーを足せません")).toBeInTheDocument();
+    expect(within(section).getByRole("alert")).toHaveTextContent("サーバの内部で誤りが起きました");
+    expect(within(section).getByRole("button", { name: "メンバーを足す" })).toBeDisabled();
+  });
+
   it("ロールを 1 つも選ばなければ送らずに伝える", async () => {
     const { calls } = mockApi(routes(meWith(PM_PERMISSIONS)));
 
@@ -447,6 +500,40 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     await waitFor(() => expect(within(section).getByRole("table")).not.toHaveTextContent("planner"));
   });
 
+  it("最後の PM を外す・PM のロールを外す変更（409 LAST_PM。CR-019）はサーバの文言を出し、一覧を変えない", async () => {
+    const lastPm = "最後の PM は外せません（先に別の PM を足します）";
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`DELETE ${BASE}/members/5`]: () => errorResponse(409, "LAST_PM", lastPm),
+        [`PUT ${BASE}/members/5`]: () => errorResponse(409, "LAST_PM", lastPm),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    fireEvent.click(await within(section).findByRole("button", { name: "pm を外す" }));
+    const confirm = within(section).getByRole("group", { name: "メンバーを外すことの確かめ" });
+    fireEvent.click(within(confirm).getByRole("button", { name: "外す" }));
+
+    expect(await within(section).findByRole("alert")).toHaveTextContent(lastPm);
+    expect(within(section).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(section).getByRole("table", { name: "メンバーの一覧" })).toHaveTextContent("PM 一郎");
+
+    fireEvent.click(within(section).getByRole("button", { name: "pm を変更する" }));
+    const form = within(section).getByRole("form", { name: "メンバーの変更" });
+    fireEvent.click(within(form).getByLabelText("計画担当者"));
+    fireEvent.click(within(form).getByLabelText("PM"));
+    fireEvent.click(within(form).getByRole("button", { name: "保存する" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent(lastPm);
+    expect(sent(calls, "PUT", `${BASE}/members/5`)[0]?.body).toEqual({
+      roles: ["PLANNER"],
+      organization: null,
+      team: null,
+    });
+    expect(within(section).getByRole("form", { name: "メンバーの変更" })).toBeInTheDocument();
+  });
+
   it("ロール×権限の表を全てのロールで置き換え（API-CMN-007）、/me を読み直す", async () => {
     const { calls } = mockApi(
       routes(meWith(PM_PERMISSIONS), {
@@ -475,6 +562,32 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     expect(body.roles[1]).toEqual({ role: "PLANNER", permissions: ["project.view", "wbs.edit", "estimate.edit"] });
     expect(body.roles[6]).toEqual({ role: "VIEWER", permissions: ["project.view"] });
     expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(2);
+  });
+
+  it("permission.manage を持つロールが無くなる表（422）は、サーバの文言と直し方を出す", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`PUT ${BASE}/role-permissions`]: () =>
+          errorResponse(
+            422,
+            "NO_PERMISSION_MANAGER",
+            "権限の表を変える権限（permission.manage）を持つロールが無くなるため、置き換えられません",
+          ),
+      }),
+    );
+
+    renderAt();
+    const section = await region("権限");
+    fireEvent.click(await within(section).findByLabelText("PM：permission.manage"));
+    fireEvent.click(within(section).getByRole("button", { name: "権限の表を保存する" }));
+
+    const alert = await within(section).findByRole("alert");
+    expect(alert).toHaveTextContent("権限の表を変える権限（permission.manage）を持つロールが無くなるため、置き換えられません");
+    expect(alert).toHaveTextContent(NO_PERMISSION_MANAGER_HINT);
+    const body = sent(calls, "PUT", `${BASE}/role-permissions`)[0]?.body as { roles: RoleGrants[] };
+    expect(body.roles[0]?.permissions).not.toContain("permission.manage");
+    expect(within(section).queryByRole("status")).not.toBeInTheDocument();
+    expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(1);
   });
 
   it("プロジェクトを見られなければ（403）サーバの文言を出し、各節を出さない", async () => {

@@ -10,6 +10,7 @@
 - 稼働日の軸の位置（5.4）：報告日線 ``report_line`` は原点から報告日までの稼働日の数（整数）。
   進捗ポイント ``point``・ずれ ``deviation`` は ``開始位置 + 期間 × 進捗率`` の小数（5.6）を ``Numeric(12,4)`` で持つ
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）。工数は人時の小数 ``Numeric(10,2)``（2.4）
+- 全ての表の内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
 """
 
 from __future__ import annotations
@@ -87,6 +88,7 @@ class StatusReport(Base):
             " OR (status = 'FINALIZED' AND finalized_by IS NOT NULL AND finalized_at IS NOT NULL)",
             name="finalized_pair",
         ),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -119,6 +121,7 @@ class ProgressEntry(Base):
         CheckConstraint(_percent_range("percent_complete"), name="percent_complete"),
         CheckConstraint(_not_before("actual_finish", "actual_start"), name="actual_dates"),
         CheckConstraint("remaining_hours IS NULL OR remaining_hours >= 0", name="remaining_hours"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -148,6 +151,7 @@ class ProgressItem(Base):
         CheckConstraint(in_list("item_type", PROGRESS_ITEM_TYPES), name="item_type"),
         CheckConstraint("weight > 0", name="weight"),
         CheckConstraint("done OR done_at IS NULL", name="done_at_when_done"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -177,6 +181,7 @@ class ProgressSnapshot(Base):
         CheckConstraint("tolerance_days >= 0", name="tolerance_days"),
         CheckConstraint("extract_days >= 0", name="extract_days"),
         CheckConstraint(in_list("plan_basis", PLAN_BASES), name="plan_basis"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -211,6 +216,7 @@ class ProgressSnapshotItem(Base):
         CheckConstraint("actual_hours IS NULL OR actual_hours >= 0", name="actual_hours"),
         CheckConstraint("etc_hours IS NULL OR etc_hours >= 0", name="etc_hours"),
         CheckConstraint(in_list("judgement", JUDGEMENTS), name="judgement"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

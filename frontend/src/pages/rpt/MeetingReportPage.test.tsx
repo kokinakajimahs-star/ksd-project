@@ -3,19 +3,28 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAuthToken } from "../../api/client";
+import { HEADER_HEIGHT, ROW_HEIGHT } from "../../components/gantt/scale";
 import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi } from "../../test/mockApi";
-import type { ShareLink } from "../../api/rpt";
+import type { MeetingReport, ShareLink } from "../../api/rpt";
 import {
   makeMeetingReport,
+  makeReportDelay,
   makeReportKpi,
   makeReportMilestone,
   makeShareLink,
   makeShareLinkCreated,
   shareLinkList,
 } from "../../test/rptFixtures";
+import { makeBar, makeGantt, makeGanttRow, point } from "../../test/schFixtures";
 import { formatDateTime } from "../../lib/format";
-import { localDateTimeToIso, shareLinkState } from "./labels";
+import {
+  localDateTimeAfterDays,
+  localDateTimeToIso,
+  PRINT_LIST_LIMIT,
+  PRINT_SHEET_HEIGHT_MM,
+  shareLinkState,
+} from "./labels";
 import MeetingReportPage from "./MeetingReportPage";
 
 const BASE = "/api/v1/projects/3";
@@ -26,6 +35,87 @@ function meWith(permissions: string[]) {
     user: makeUser({ id: 5, is_system_admin: false }),
     system_permissions: [],
     projects: [{ project_id: 3, roles: ["PM"], permissions, view_level: "ALL" }],
+  });
+}
+
+/**
+ * 表示の範囲（11/12〜1/7）の前で終わる行・後で始まる行を混ぜた会議レポート。
+ * 行 0：予定・実績とも 10/20 までで範囲の前（省く）、行 1：予定は 11/05 までだが未完了の実績が報告日まで延びる（残す）、
+ * 行 2：資料作成（範囲の内。残す）、行 3：2 月の活動（範囲の後。省く）
+ */
+function reportWithRowsOutsideWindow(): MeetingReport {
+  const base = makeMeetingReport();
+  const vertex = (
+    row_index: number,
+    activity_id: number,
+    date: string,
+    fraction: number,
+    judgement: "BEHIND" | "COMPLETED" | "NOT_STARTED",
+  ) => ({
+    row_index,
+    activity_id,
+    point: point(date, fraction),
+    deviation: judgement === "BEHIND" ? -3 : 0,
+    judgement,
+    display_date: date,
+  });
+  const link = (from: [number, number], to: [number, number], start: string, end: string) => ({
+    predecessor_id: from[1],
+    successor_id: to[1],
+    from_row: from[0],
+    to_row: to[0],
+    start: point(start, 1),
+    end: point(end, 0),
+  });
+  return makeMeetingReport({
+    gantt: makeGantt({
+      ...base.gantt,
+      rows: [
+        makeGanttRow({
+          row_index: 0,
+          activity_id: 11,
+          wbs_code: "1.1",
+          name: "要件の整理",
+          planned: makeBar("PLANNED", "2026-10-01", "2026-10-20"),
+          actual: makeBar("ACTUAL", "2026-10-01", "2026-10-20"),
+          assignees: ["実行担当A"],
+          percent_complete: 100,
+        }),
+        makeGanttRow({
+          row_index: 1,
+          activity_id: 12,
+          wbs_code: "1.1",
+          name: "設計",
+          planned: makeBar("PLANNED", "2026-10-21", "2026-11-05"),
+          actual: makeBar("ACTUAL", "2026-10-21", "2026-12-10", { open_ended: true }),
+          assignees: ["実行担当A"],
+          percent_complete: 70,
+        }),
+        makeGanttRow({
+          row_index: 2,
+          activity_id: 21,
+          planned: makeBar("PLANNED", "2026-12-01", "2026-12-21"),
+          percent_complete: 25,
+        }),
+        makeGanttRow({
+          row_index: 3,
+          activity_id: 31,
+          wbs_code: "2.1",
+          name: "移行",
+          planned: makeBar("PLANNED", "2027-02-01", "2027-02-20"),
+        }),
+      ],
+      links: [link([0, 11], [1, 12], "2026-10-20", "2026-10-21"), link([1, 12], [2, 21], "2026-11-05", "2026-12-01")],
+    }),
+    lightning: {
+      ...base.lightning,
+      vertices: [
+        vertex(0, 11, "2026-12-10", 1, "COMPLETED"),
+        vertex(1, 12, "2026-11-30", 0.5, "BEHIND"),
+        vertex(2, 21, "2026-12-06", 0.25, "BEHIND"),
+        vertex(3, 31, "2026-12-10", 1, "NOT_STARTED"),
+      ],
+    },
   });
 }
 
@@ -61,8 +151,10 @@ describe("UI-RPT-001 定例会議レポート", () => {
     expect(container.querySelector('[data-screen-id="UI-RPT-001"]')).not.toBeNull();
     expect(calls.map((c) => c.url).sort()).toEqual(["/api/v1/me", REPORT_URL]);
     expect(screen.getByText(/報告日 2026-12-10（入力中）/)).toHaveTextContent(
-      "値：計算値（確定前）・表示の範囲 2026-11-12〜2027-01-07",
+      "進捗の値：計算値（確定前）・表示の範囲 2026-11-12〜2027-01-07",
     );
+    // 計画の値は表示した時点の最新計画（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent("計画は表示した時点の最新計画");
 
     // 下段左：遅延一覧（サーバの順＝遅れの大きい順・遅延理由・完了見込み）
     const delayRows = within(delays).getAllByRole("row").slice(1);
@@ -135,6 +227,135 @@ describe("UI-RPT-001 定例会議レポート", () => {
     expect(screen.getByRole("img", { name: "ガントチャート" })).toHaveAttribute("width", String(280 + 57 * 6));
   });
 
+  it("上段は表示の範囲に予定・実績のバーが掛かる行だけを描き、省いた行の数を書き添える。頂点・矢印は描いた行にだけ当てる（7.4）", async () => {
+    mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view"])),
+      [`GET ${REPORT_URL}`]: () => jsonResponse(200, reportWithRowsOutsideWindow()),
+    });
+    const { container } = renderAt();
+    const svg = await screen.findByRole("img", { name: "ガントチャート" });
+
+    // 範囲の前で終わる行 0 と、範囲の後の行 3 は描かない。行 1 は未完了の実績のバーで残す
+    const rows = Array.from(container.querySelectorAll('[data-layer="row-labels"] [data-row]'));
+    expect(rows.map((r) => r.getAttribute("data-row"))).toEqual(["1", "2"]);
+    expect(svg).toHaveAttribute("data-row-count", "2");
+    expect(svg).toHaveAttribute("height", String(HEADER_HEIGHT + 2 * ROW_HEIGHT));
+    expect(screen.getByTestId("gantt-viewport")).toHaveStyle({ height: `${HEADER_HEIGHT + 2 * ROW_HEIGHT}px` });
+    expect(container.querySelector('[data-note="rows-outside-window"]')).toHaveTextContent(
+      "表示範囲の外の 2 行は省いた",
+    );
+    // 今の計画に無い頂点の注記とは別（この報告日には無い）
+    expect(screen.queryByText(/今の計画に無い活動の頂点/)).toBeNull();
+
+    // イナズマ線は描いた行の頂点だけを、報告日線の上端から下端まで行の順に結ぶ
+    const vertices = Array.from(container.querySelectorAll('[data-layer="lightning"] circle'));
+    expect(vertices.map((v) => v.querySelector("title")?.textContent)).toEqual([
+      "1.1 設計：遅れ（2026-11-30）",
+      "1.1 資料作成：遅れ（2026-12-06）",
+    ]);
+    const polyline = container.querySelector('[data-layer="lightning"] polyline')!.getAttribute("points")!.split(" ");
+    expect(polyline).toHaveLength(4);
+    expect(polyline[3]).toBe(`${280 + 29 * 24},${HEADER_HEIGHT + 2 * ROW_HEIGHT}`);
+
+    // 依存の矢印は両端の行を描くものだけ
+    expect(container.querySelector('[data-link="12-21"]')).not.toBeNull();
+    expect(container.querySelector('[data-link="11-12"]')).toBeNull();
+
+    // 行 1 のラベルは、範囲の前で終わる予定のバーの右（左端で切れる）ではなく、報告日まで延びる実績のバーの右に置く
+    const label = container.querySelector('[data-layer="bar-labels"] [data-activity-id="12"]');
+    expect(label).toHaveAttribute("x", String(280 + 29 * 24 + 10));
+    expect(label).toHaveTextContent("実行担当A 70%");
+    expect(container.querySelector('[data-layer="bar-labels"] [data-activity-id="11"]')).toBeNull();
+  });
+
+  it("印刷は行の数にかかわらず A3 横の 1 枚：ガントは全ての行の高さへ伸ばさず残りの高さの枠へ縮め、下段の一覧は先頭だけを載せて省いた件数を書く", async () => {
+    const delays = Array.from({ length: PRINT_LIST_LIMIT + 5 }, (_, i) =>
+      makeReportDelay({ activity_id: 100 + i, name: `遅れの活動${i + 1}`, deviation: -20 + i }),
+    );
+    const milestones = Array.from({ length: PRINT_LIST_LIMIT }, (_, i) =>
+      makeReportMilestone({ activity_id: 200 + i, name: `節目${i + 1}` }),
+    );
+    mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view"])),
+      [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport({ delays, milestones })),
+    });
+    const { container } = renderAt();
+    const delayTable = await screen.findByRole("table", { name: "遅延一覧" });
+
+    // 画面には全ての行を出す。印刷には先頭の PRINT_LIST_LIMIT 件だけを載せ、省いた件数を表の前に書く（印刷にだけ出す）
+    expect(within(delayTable).getAllByRole("row").slice(1)).toHaveLength(PRINT_LIST_LIMIT + 5);
+    const delayNote = container.querySelector(
+      'section[aria-labelledby="report-delays-heading"] [data-note="print-limit"]',
+    );
+    expect(delayNote).toHaveTextContent(
+      `印刷には先頭の ${PRINT_LIST_LIMIT} 件だけを載せ、残りの 5 件は省いた（全 ${PRINT_LIST_LIMIT + 5} 件）`,
+    );
+    expect(delayNote).toHaveClass("print-only");
+    expect(delayNote?.compareDocumentPosition(delayTable)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    // 上限ちょうどなら省かない
+    expect(
+      container.querySelector('section[aria-labelledby="report-milestones-heading"] [data-note="print-limit"]'),
+    ).toBeNull();
+    // 範囲の外の行が無ければ、省いた行の注記も出さない
+    expect(container.querySelector('[data-note="rows-outside-window"]')).toBeNull();
+
+    // 印刷用の CSS を規則として読む
+    const sheet = (container.querySelector("style") as HTMLStyleElement).sheet!;
+    const pageRule = Array.from(sheet.cssRules).find((r) => r.cssText.startsWith("@page"));
+    expect(pageRule?.cssText).toContain("size: A3 landscape");
+    const media = Array.from(sheet.cssRules).find(
+      (r): r is CSSMediaRule => r instanceof CSSMediaRule && r.media.mediaText === "print",
+    )!;
+    const rules = new Map(
+      Array.from(media.cssRules).map((r) => [(r as CSSStyleRule).selectorText, (r as CSSStyleRule).style]),
+    );
+    const rule = (selector: string) => {
+      const style = rules.get(selector);
+      expect(style, selector).toBeDefined();
+      return style!;
+    };
+
+    // 画面の区画を版面（A3 横・余白 10mm：高さ 277mm）に収まる高さの縦の並びにし、溢れた分で 2 枚目を作らない
+    expect(PRINT_SHEET_HEIGHT_MM).toBeLessThanOrEqual(277);
+    const page = rule(".meeting-report-page, .shared-view-page");
+    expect(page.getPropertyValue("height")).toBe(`${PRINT_SHEET_HEIGHT_MM}mm`);
+    expect(page.getPropertyValue("display")).toBe("flex");
+    expect(page.getPropertyValue("flex-direction")).toBe("column");
+    expect(page.getPropertyValue("overflow")).toBe("hidden");
+    const sheetRule = rule(".meeting-report-page > .meeting-report-sheet, .shared-view-page > .meeting-report-sheet");
+    expect(sheetRule.getPropertyValue("flex")).toBe("1 1 0");
+    expect(rule(".meeting-report-sheet > .report-upper").getPropertyValue("flex")).toBe("1 1 0");
+
+    // ガントは残りの高さの枠（行の数で決まる画面の高さを打ち消す）に、viewBox の縦横比を保って縮める
+    const viewport = rule(".meeting-report-sheet > .report-upper > .gantt-viewport");
+    expect(viewport.getPropertyValue("flex")).toBe("1 1 0");
+    expect(viewport.getPropertyValue("min-height")).toBe("0");
+    expect(viewport.getPropertyValue("height")).toBe("auto");
+    expect(viewport.getPropertyPriority("height")).toBe("important");
+    expect(viewport.getPropertyValue("overflow")).toBe("hidden");
+    const svgRule = rule(".meeting-report-sheet .gantt-viewport svg");
+    expect(svgRule.getPropertyValue("width")).toBe("100%");
+    expect(svgRule.getPropertyValue("height")).toBe("100%");
+    // 全ての行の高さへ伸ばす規則（幅に合わせた height: auto）を持たない
+    for (const [selector, style] of rules) {
+      if (selector.includes("svg")) {
+        expect(style.getPropertyValue("height"), selector).not.toBe("auto");
+      }
+    }
+    const svg = screen.getByRole("img", { name: "ガントチャート" });
+    expect(svg).toHaveAttribute("viewBox", `0 0 ${svg.getAttribute("width")} ${svg.getAttribute("height")}`);
+    expect(svg.getAttribute("preserveAspectRatio")).toBeNull();
+
+    // 下段の一覧は 1 行を 1 段にし、先頭の PRINT_LIST_LIMIT 行の後を印刷しない
+    expect(rule(".meeting-report-sheet .report-lower td").getPropertyValue("white-space")).toBe("nowrap");
+    expect(
+      rule(`.meeting-report-sheet .report-lower tbody tr:nth-child(n + ${PRINT_LIST_LIMIT + 1})`).getPropertyValue(
+        "display",
+      ),
+    ).toBe("none");
+    expect(rule(".meeting-report-sheet .print-only").getPropertyValue("display")).toBe("block");
+  });
+
   it("印刷するボタンでブラウザの印刷を呼ぶ", async () => {
     mockApi({
       "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view"])),
@@ -174,7 +395,11 @@ describe("UI-RPT-001 定例会議レポート", () => {
     const { container } = renderAt();
 
     expect(await screen.findByText("遅延している活動はありません")).toBeInTheDocument();
-    expect(screen.getByText(/報告日 2026-12-10（確定済み）/)).toHaveTextContent("値：確定時の写し");
+    expect(screen.getByText(/報告日 2026-12-10（確定済み）/)).toHaveTextContent("進捗の値：確定時の写し");
+    // 確定済みでも計画の値は写しでなく、表示した時点の最新計画（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent(
+      "計画は表示した時点の最新計画（ガントのバー、マイルストーンの予定日・見込み日・ずれ）",
+    );
     expect(screen.getByText("マイルストーンはありません")).toBeInTheDocument();
     expect(container.querySelector('[data-kpi="overall_progress"]')).toHaveTextContent("算定できない");
     expect(container.querySelector('[data-kpi="eac_variance_hours"]')).toHaveTextContent(
@@ -323,6 +548,8 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003・005。RPT-03）", () 
     renderAt();
 
     const form = await screen.findByRole("form", { name: "共有リンクを作る" });
+    // 既定値（14 日後）を消して空にする
+    fireEvent.change(within(form).getByLabelText("有効期限"), { target: { value: "" } });
     fireEvent.submit(form);
     expect(calls.some((c) => c.method === "POST")).toBe(false);
     expect(screen.getByRole("alert")).toHaveTextContent("有効期限を入力してください");
@@ -331,6 +558,30 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003・005。RPT-03）", () 
     fireEvent.submit(form);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("入力に誤りがあります"));
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("有効期限の入力の既定値は今から 14 日後（端末の時刻）で、そのまま作れる（CR-019）", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-12-10T09:30:45"));
+      const { calls } = mockApi({
+        "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
+        [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+        [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList([])),
+        [`POST ${BASE}/share-links`]: () => jsonResponse(201, makeShareLinkCreated()),
+      });
+      renderAt();
+
+      const form = await screen.findByRole("form", { name: "共有リンクを作る" });
+      expect(within(form).getByLabelText("有効期限")).toHaveValue("2026-12-24T09:30");
+      fireEvent.click(within(form).getByRole("button", { name: "共有リンクを作る" }));
+
+      await screen.findByLabelText("共有リンクの URL（71）");
+      const post = calls.find((c) => c.method === "POST");
+      expect(post?.body).toEqual({ scope: "REPORT", expires_at: new Date("2026-12-24T09:30").toISOString() });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("共有リンクの一覧を範囲・期限・状態（有効・失効・期限切れ）・作った日時で出し、トークンは出さない（API-RPT-005）", async () => {
@@ -428,6 +679,14 @@ describe("shareLinkState（共有リンクの一覧の状態）", () => {
   it("時差の無いサーバの時刻は UTC とみなす", () => {
     expect(shareLinkState({ expires_at: "2026-12-10T00:00:00", revoked_at: null }, now)).toBe("EXPIRED");
     expect(shareLinkState({ expires_at: "2026-12-10T00:00:01", revoked_at: null }, now)).toBe("ACTIVE");
+  });
+});
+
+describe("localDateTimeAfterDays（有効期限の入力の既定値）", () => {
+  it("端末の暦で日を足し、datetime-local の値（秒は切り捨て）にする", () => {
+    expect(localDateTimeAfterDays(new Date("2026-12-10T09:30:45"), 14)).toBe("2026-12-24T09:30");
+    expect(localDateTimeAfterDays(new Date("2026-12-25T23:59:59"), 14)).toBe("2027-01-08T23:59");
+    expect(localDateTimeAfterDays(new Date("2028-02-20T00:05:00"), 14)).toBe("2028-03-05T00:05");
   });
 });
 

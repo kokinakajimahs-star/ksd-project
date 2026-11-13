@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Body, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_project_access
+from app.api.deps import get_current_user, get_import_max_bytes, get_import_max_rows, get_project_access
 from app.api.schedule import get_schedule_links
 from app.api.wbs import get_wbs_activities
 from app.domain.tabular import ChangeAction, TabularTarget
@@ -40,8 +40,9 @@ def export_file(
 ) -> Response:
     """API-INT-001 出力する（`target`＝wbs/activities/time-entries、`format`＝csv/xlsx）。
 
-    権限は data.export。6.3 の列（この順）で、1 行目が見出し。CSV は UTF-8（BOM 付き）・カンマ区切り、xlsx は 1 枚目のシートに
+    権限は data.export（``time-entries`` は effort.view も。無ければ 403。CR-015）。6.3 の列（この順）で、1 行目が見出し。CSV は UTF-8（BOM 付き）・カンマ区切り、xlsx は 1 枚目のシートに
     同じ表を置く。委託先だけで読む利用者は自分の割当の範囲だけ（RULE-AUTH-001）。``target``・``format`` の誤りは 400。
+    CSV は ``=``・``+``・``-``・``@``・タブ・復帰・``'`` で始まるセルの先頭へ ``'`` を足し、xlsx は文字列の型で書く（式にしない。CR-019）。
     """
     exported = io_service.export_data(session, access, user, links, project_id, target, file_format)
     return Response(
@@ -51,14 +52,45 @@ def export_file(
     )
 
 
-@router.post("/projects/{project_id}/import", response_model=ImportResultOut)
+async def read_import_file(
+    request: Request,
+    max_bytes: int = Depends(get_import_max_bytes),
+    _user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> bytes:
+    """取込のファイル（要求の本体）。``PMT_IMPORT_MAX_BYTES`` を超えたら、そこで読むのを止めて 400 ``VALIDATION_ERROR``。
+
+    ``Content-Length`` が上限を超えていれば本体を読まずに拒む。無い・偽りでも、読んだ量が上限を超えた時点で止める（6.3・CR-019）。
+    認証（401）は本体より先に確かめ、本体を受け取る前に認証で読んだトランザクションを閉じて DB の接続をプールへ返す
+    （遅い送り手が接続を持ち続けないように。認証は読むだけなので失うものは無い）。
+    """
+    session.commit()
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > max_bytes:
+        raise io_service.file_too_large(max_bytes)
+    received = bytearray()
+    async for chunk in request.stream():
+        received.extend(chunk)
+        if len(received) > max_bytes:
+            raise io_service.file_too_large(max_bytes)
+    return bytes(received)
+
+
+@router.post(
+    "/projects/{project_id}/import",
+    response_model=ImportResultOut,
+    # 本体は read_import_file が上限まで読む。API の説明には従来どおりバイト列の本体として載せる
+    openapi_extra={"requestBody": {"content": {"application/octet-stream": {"schema": {
+        "type": "string", "contentMediaType": "application/octet-stream", "title": "Content", "default": ""}}}}},
+)
 def import_file(
     project_id: int,
     target: TabularTarget = Query(...),
     file_format: FileFormat = Query(FileFormat.CSV, alias="format"),
     dry_run: bool = Query(False),
-    content: bytes = Body(b"", media_type="application/octet-stream"),
     user: User = Depends(get_current_user),
+    content: bytes = Depends(read_import_file),
+    max_rows: int = Depends(get_import_max_rows),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
     activities: ActivitiesReader = Depends(get_wbs_activities),
@@ -70,10 +102,14 @@ def import_file(
     権限は data.import。要求の本体がファイルそのもの（``Content-Type`` は ``text/csv``・xlsx の型・``application/octet-stream``）。
     全行を先に検査し（RULE-INT-001）、誤りは ``{row, column, code, message}`` の配列。``dry_run=true`` は検査と書く行の一覧だけを返す
     （誤りがあっても 200 で ``ok`` が偽）。``dry_run`` でなく誤りがあれば何も書かずに 422 ``IMPORT_INVALID``（``details`` が誤りの配列）。
-    WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006）。
+    WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006）。活動の希望開始日が今と違う値でプロジェクトの
+    開始日より前になる行は、誤りのコード ``BEFORE_PROJECT_START``（5.5・CR-018）。
+    ファイルが ``PMT_IMPORT_MAX_BYTES`` を超える（読むのをそこで止める）・見出しを除く行が ``PMT_IMPORT_MAX_ROWS`` を超えるときは
+    400 ``VALIDATION_ERROR`` で何も書かない（``dry_run`` でも同じ。6.3・CR-019）。
     """
     result = io_service.import_data(
-        session, access, user, activities, links, project_id, target, file_format, content, dry_run=dry_run, now=now
+        session, access, user, activities, links, project_id, target, file_format, content, dry_run=dry_run, now=now,
+        max_rows=max_rows,
     )
     return ImportResultOut(
         target=result.target.value,
