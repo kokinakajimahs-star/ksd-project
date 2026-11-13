@@ -4,6 +4,8 @@
   1 つのトランザクションで作る
 - 読む操作は project.view、基本情報・スコープ・カレンダーを変える操作は project.manage、メンバーを変える操作は member.manage
   （全て RULE-AUTH-001 を ``app.services.auth.authorize_project`` で通す。プロジェクトが無ければ 404 を 403 より先に返す）
+- 最後の PM を外す・最後の PM から PM のロールを外すのは 409 ``LAST_PM``（システム管理者も同じ。CR-019）。メンバーを変える操作は
+  プロジェクトの行をロックしてから、読み直したメンバーで判定する（A-49 の 3）
 - カレンダーを変えた・開始日を変えたら、同じトランザクションの最後に日程を再計算する（1.3。``ScheduleRecalculator``）
 
 **別の群の表に書く 2 つの口**（``graphs/group-needs.toml`` では api:PRJ は db:WBS・db:SCH を待たない）：
@@ -33,6 +35,7 @@ from sqlalchemy.orm import Session
 from app.domain.authz import ROLES, authorize, default_role_permission_rows
 from app.domain.calendar import CalendarError, WorkCalendar
 from app.errors import AppError
+from app.infra.db import lock_row, lock_rows
 from app.models.cmn import RolePermission, User
 from app.models.prj import (
     HOURS_PER_DAY_DEFAULT,
@@ -585,6 +588,30 @@ def list_members(
     return [_member_view(member, user) for member, user in rows], total
 
 
+def _target_member(session: Session, project_id: int, user_id: int) -> ProjectMember | None:
+    """メンバーを変える操作の対象の行。プロジェクトの行をロックした後に、ロックして DB の値で読み直す（権限の確かめで先に読んだ
+    行が古いまま残っていても上書きする。A-49 の 3）。"""
+    return session.scalar(
+        lock_rows(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id))
+    )
+
+
+def _ensure_not_last_pm(session: Session, project_id: int, user_id: int) -> None:
+    """その利用者のほかに PM のロールを持つメンバーがいなければ 409 ``LAST_PM``（CR-019）。プロジェクトの行をロックした後に呼ぶ。"""
+    others = session.execute(
+        select(ProjectMember.user_id, ProjectMember.roles).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id != user_id
+        )
+    ).all()
+    if not any("PM" in roles for _, roles in others):
+        raise AppError(
+            409,
+            "LAST_PM",
+            "最後の PM は外せません（先に別の PM を足します）",
+            details=[{"project_id": project_id, "user_id": user_id}],
+        )
+
+
 def upsert_member(
     session: Session,
     access: ProjectAccess,
@@ -600,6 +627,7 @@ def upsert_member(
 
     - 3 章に無いロール・同じロールの重複・ロールが 1 つも無いのは 400
     - 利用者が無ければ 404。無効な利用者を新しく足すのは 422 ``USER_INACTIVE``（既にメンバーなら変えられる）
+    - 最後の PM から PM のロールを外すのは 409 ``LAST_PM``（システム管理者も同じ。CR-019）
     """
     authorize_project(session, access, actor, project_id, "member.manage")
     errors: list[dict[str, Any]] = []
@@ -618,9 +646,10 @@ def upsert_member(
     user = session.get(User, user_id)
     if user is None:
         raise AppError(404, "NOT_FOUND", "ユーザーが見つかりません", details=[{"user_id": user_id}])
-    member = session.scalar(
-        select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id)
-    )
+    lock_row(session, Project, project_id)  # 同じプロジェクトのメンバーの変更を 1 つずつにする（最後の PM の判定。A-49 の 3）
+    member = _target_member(session, project_id, user_id)
+    if member is not None and "PM" in member.roles and "PM" not in seen:
+        _ensure_not_last_pm(session, project_id, user_id)
     if member is None:
         if not user.is_active:
             raise AppError(
@@ -637,14 +666,15 @@ def upsert_member(
 
 
 def remove_member(session: Session, access: ProjectAccess, actor: User, project_id: int, user_id: int) -> None:
-    """メンバーを外す（member.manage）。メンバーでなければ 404。"""
+    """メンバーを外す（member.manage）。メンバーでなければ 404。最後の PM を外すのは 409 ``LAST_PM``（システム管理者も同じ。CR-019）。"""
     authorize_project(session, access, actor, project_id, "member.manage")
-    member = session.scalar(
-        select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id)
-    )
+    lock_row(session, Project, project_id)  # 同じプロジェクトのメンバーの変更を 1 つずつにする（最後の PM の判定。A-49 の 3）
+    member = _target_member(session, project_id, user_id)
     if member is None:
         raise AppError(
             404, "NOT_FOUND", "メンバーが見つかりません", details=[{"project_id": project_id, "user_id": user_id}]
         )
+    if "PM" in member.roles:
+        _ensure_not_last_pm(session, project_id, user_id)
     session.delete(member)
     session.commit()

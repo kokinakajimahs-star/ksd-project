@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -35,6 +35,9 @@ from app.services.projects import (
     NumberingRulesTableAbsent,
     SchedulingNotWired,
 )
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -940,6 +943,74 @@ def test_upsert_member_unknown_user_is_404_and_inactive_user_is_422(
     assert changed.status_code == 200, changed.text
     assert changed.json()["is_active"] is False and changed.json()["roles"] == ["EXECUTOR"]
     assert client.delete(f"/api/v1/projects/{world.pid}/members/{world.viewer.id}", headers=world.pm_h).status_code == 204
+
+
+def _pm_logins(client: TestClient, world: World) -> list[str]:
+    members = client.get(f"/api/v1/projects/{world.pid}/members", headers=world.admin_h).json()["items"]
+    return [m["login_id"] for m in members if "PM" in m["roles"]]
+
+
+def test_last_pm_cannot_be_removed_or_demoted_even_by_system_admin(client: TestClient, world: World) -> None:
+    """API-PRJ-010・011（CR-019）：最後の PM を外す・最後の PM から PM のロールを外すのは 409 ``LAST_PM``。システム管理者も同じで、
+    何も変えない。PM のロールを残す変更はできる。先に別の PM を足せば、もとの PM を外せる。"""
+    path = f"/api/v1/projects/{world.pid}/members/{world.pm.id}"
+    for headers in (world.pm_h, world.admin_h):
+        removed = client.delete(path, headers=headers)
+        assert removed.status_code == 409, removed.text
+        assert removed.json()["error"]["code"] == "LAST_PM"
+        assert removed.json()["error"]["details"] == [{"project_id": world.pid, "user_id": world.pm.id}]
+        demoted = client.put(path, json={"roles": ["PLANNER", "APPROVER"]}, headers=headers)
+        assert demoted.status_code == 409, demoted.text
+        assert error_code(demoted) == "LAST_PM"
+    assert _pm_logins(client, world) == ["pm"]
+
+    kept = client.put(path, json={"roles": ["PM", "APPROVER"], "organization": "開発部"}, headers=world.pm_h)
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["roles"] == ["PM", "APPROVER"]
+
+    world.put_member(world.pid, world.outsider.id, ["PM"])
+    demoted = client.put(path, json={"roles": ["VIEWER"]}, headers=world.pm_h)
+    assert demoted.status_code == 200, demoted.text
+    last = client.delete(f"/api/v1/projects/{world.pid}/members/{world.outsider.id}", headers=world.admin_h)
+    assert last.status_code == 409, last.text
+    assert error_code(last) == "LAST_PM"
+    assert client.delete(path, headers=world.admin_h).status_code == 204
+    assert _pm_logins(client, world) == ["outsider"]
+
+
+def test_members_of_project_without_pm_can_still_change(client: TestClient, world: World) -> None:
+    """PM のいないプロジェクト（システム管理者が作っただけ）でも、PM でないメンバーは足せて外せる（409 は PM を減らすときだけ）。"""
+    other = world.create_project(code="PRJ-002")
+    path = f"/api/v1/projects/{other['id']}/members/{world.outsider.id}"
+    world.put_member(other["id"], world.outsider.id, ["VIEWER"])
+    assert client.put(path, json={"roles": ["PLANNER"]}, headers=world.admin_h).status_code == 200
+    assert client.delete(path, headers=world.admin_h).status_code == 204
+
+
+@pytest.mark.parametrize(("method", "body"), [("DELETE", None), ("PUT", {"roles": ["PLANNER"]})])
+def test_last_pm_is_judged_after_locking_project(
+    client: TestClient, world: World, race: RaceProbe, method: str, body: dict[str, Any] | None
+) -> None:
+    """API-PRJ-010・011（CR-019・A-49 の 3）：2 人の PM を同時に外す。プロジェクトの行をロックしてから読み直したメンバーで
+    判定するので、先に別の PM を外した操作がロックの直前にコミットしていれば、こちらは 409 ``LAST_PM`` で PM が 1 人残る。"""
+    world.put_member(world.pid, world.outsider.id, ["PM"])
+
+    def remove_other_pm(other: Session) -> None:
+        member = other.scalar(
+            select(ProjectMember).where(ProjectMember.project_id == world.pid, ProjectMember.user_id == world.outsider.id)
+        )
+        assert member is not None
+        other.delete(member)
+
+    race.before_lock("projects", remove_other_pm)
+    race.locked.clear()
+    response = client.request(
+        method, f"/api/v1/projects/{world.pid}/members/{world.pm.id}", json=body, headers=world.pm_h
+    )
+    assert response.status_code == 409, response.text
+    assert error_code(response) == "LAST_PM"
+    assert race.locked == ["projects", "project_members"]
+    assert _pm_logins(client, world) == ["pm"]
 
 
 def test_member_roles_are_stored_in_role_order(db_session: Session, world: World) -> None:

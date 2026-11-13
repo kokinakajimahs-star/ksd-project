@@ -500,6 +500,40 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     await waitFor(() => expect(within(section).getByRole("table")).not.toHaveTextContent("planner"));
   });
 
+  it("最後の PM を外す・PM のロールを外す変更（409 LAST_PM。CR-019）はサーバの文言を出し、一覧を変えない", async () => {
+    const lastPm = "最後の PM は外せません（先に別の PM を足します）";
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`DELETE ${BASE}/members/5`]: () => errorResponse(409, "LAST_PM", lastPm),
+        [`PUT ${BASE}/members/5`]: () => errorResponse(409, "LAST_PM", lastPm),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    fireEvent.click(await within(section).findByRole("button", { name: "pm を外す" }));
+    const confirm = within(section).getByRole("group", { name: "メンバーを外すことの確かめ" });
+    fireEvent.click(within(confirm).getByRole("button", { name: "外す" }));
+
+    expect(await within(section).findByRole("alert")).toHaveTextContent(lastPm);
+    expect(within(section).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(section).getByRole("table", { name: "メンバーの一覧" })).toHaveTextContent("PM 一郎");
+
+    fireEvent.click(within(section).getByRole("button", { name: "pm を変更する" }));
+    const form = within(section).getByRole("form", { name: "メンバーの変更" });
+    fireEvent.click(within(form).getByLabelText("計画担当者"));
+    fireEvent.click(within(form).getByLabelText("PM"));
+    fireEvent.click(within(form).getByRole("button", { name: "保存する" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent(lastPm);
+    expect(sent(calls, "PUT", `${BASE}/members/5`)[0]?.body).toEqual({
+      roles: ["PLANNER"],
+      organization: null,
+      team: null,
+    });
+    expect(within(section).getByRole("form", { name: "メンバーの変更" })).toBeInTheDocument();
+  });
+
   it("ロール×権限の表を全てのロールで置き換え（API-CMN-007）、/me を読み直す", async () => {
     const { calls } = mockApi(
       routes(meWith(PM_PERMISSIONS), {

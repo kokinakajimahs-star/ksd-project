@@ -1,6 +1,7 @@
 // UI-PRJ-002 のメンバー（PRJ-06。API-PRJ-009〜011）。メンバーに 3 章のロールと所属を割り当て、足す・変える・外す。
 // 変えられるのは member.manage を持つ人だけ（9.1）。足す人の候補はユーザーの一覧（API-CMN-003。member.manage で読める）から、
-// 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの
+// 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの。
+// 最後の PM を外す・最後の PM から PM のロールを外す変更はサーバが 409 LAST_PM で断る（CR-019）ので、その文言を出す
 import { useEffect, useState, type FormEvent } from "react";
 
 import type { UserListItem } from "../../../api/cmn";

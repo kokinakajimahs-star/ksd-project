@@ -296,7 +296,8 @@ def upsert_member(
     """API-PRJ-010 メンバーを足す・ロールと所属を変える。
 
     権限は member.manage。ロール・所属・チームは載せた値で置き換える。3 章に無いロールは 400、利用者が無ければ 404、
-    無効な利用者を新しく足すのは 422 ``USER_INACTIVE``。
+    無効な利用者を新しく足すのは 422 ``USER_INACTIVE``。最後の PM から PM のロールを外すのは 409 ``LAST_PM``
+    （システム管理者も同じ。先に別の PM を足す。CR-019）。
     """
     view = projects_service.upsert_member(
         session,
@@ -321,7 +322,8 @@ def remove_member(
 ) -> Response:
     """API-PRJ-011 メンバーを外す。
 
-    権限は member.manage。メンバーでなければ 404。
+    権限は member.manage。メンバーでなければ 404。最後の PM を外すのは 409 ``LAST_PM``（システム管理者も同じ。
+    先に別の PM を足す。CR-019）。
     """
     projects_service.remove_member(session, access, user, project_id, user_id)
     return Response(status_code=204)
