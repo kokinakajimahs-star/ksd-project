@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.errors import AppError
@@ -53,7 +55,8 @@ def test_sqlite_foreign_keys_are_enabled(app: FastAPI) -> None:
 
 
 def test_settings_defaults(monkeypatch) -> None:
-    for name in ("PMT_DATABASE_URL", "PMT_TOKEN_TTL_HOURS", "PMT_INITIAL_ADMIN_LOGIN", "PMT_INITIAL_ADMIN_PASSWORD"):
+    for name in ("PMT_DATABASE_URL", "PMT_TOKEN_TTL_HOURS", "PMT_INITIAL_ADMIN_LOGIN", "PMT_INITIAL_ADMIN_PASSWORD",
+                 "PMT_PASSWORD_MIN_LENGTH", "PMT_LOGIN_MAX_FAILURES", "PMT_LOGIN_LOCK_MINUTES"):
         monkeypatch.delenv(name, raising=False)
     settings = Settings()
     assert settings.database_url.startswith("sqlite:///")
@@ -61,14 +64,34 @@ def test_settings_defaults(monkeypatch) -> None:
     assert settings.token_ttl_hours == 12
     assert settings.initial_admin_login is None
     assert settings.initial_admin_password is None
+    # NFR-04・NFR-10（設計書 1.2。CR-010）
+    assert settings.password_min_length == 12
+    assert settings.login_max_failures == 10
+    assert settings.login_lock_minutes == 15
 
 
 def test_settings_read_environment(monkeypatch) -> None:
     monkeypatch.setenv("PMT_DATABASE_URL", "sqlite:///x.db")
     monkeypatch.setenv("PMT_TOKEN_TTL_HOURS", "3")
+    monkeypatch.setenv("PMT_PASSWORD_MIN_LENGTH", "16")
+    monkeypatch.setenv("PMT_LOGIN_MAX_FAILURES", "5")
+    monkeypatch.setenv("PMT_LOGIN_LOCK_MINUTES", "30")
     settings = Settings()
     assert settings.database_url == "sqlite:///x.db"
     assert settings.token_ttl_hours == 3
+    assert (settings.password_min_length, settings.login_max_failures, settings.login_lock_minutes) == (16, 5, 30)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("PMT_PASSWORD_MIN_LENGTH", "0"), ("PMT_PASSWORD_MIN_LENGTH", "1025"), ("PMT_LOGIN_MAX_FAILURES", "0"),
+     ("PMT_LOGIN_LOCK_MINUTES", "0")],
+)
+def test_settings_reject_unusable_auth_policy(monkeypatch, name: str, value: str) -> None:
+    # どのパスワードも通らない最小の長さ・ロックしない設定は、起動時に止める（fail fast）
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_framework_http_exception_gets_japanese_message(app: FastAPI, client: TestClient) -> None:

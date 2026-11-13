@@ -124,12 +124,16 @@ def register_routers(api: APIRouter) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # 最初のシステム管理者（NFR-10）。両方とも未指定なら何もしない。片方だけなら起動を止める（fail fast）
+    # 最初のシステム管理者（NFR-10）。両方とも未指定なら何もしない。片方だけ・パスワードが方針（NFR-04）に反するなら
+    # 起動を止める（fail fast）
     settings: Settings = app.state.settings
     if settings.initial_admin_login or settings.initial_admin_password:
         with app.state.session_factory() as session:
             ensure_initial_admin(
-                session, login_id=settings.initial_admin_login, password=settings.initial_admin_password
+                session,
+                login_id=settings.initial_admin_login,
+                password=settings.initial_admin_password,
+                password_min_length=settings.password_min_length,
             )
     yield
 

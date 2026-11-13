@@ -274,12 +274,28 @@ def test_create_project_calls_numbering_rules_in_same_transaction(
 
 
 def test_create_project_requires_project_create(client: TestClient, world: World) -> None:
-    # プロジェクトの PM でも、システムの権限 project.create は持たない（9.1。個別の許可の保存先は OQ-09）
+    # プロジェクトの PM でも、システムの権限 project.create は持たない（9.1。個別の許可は users.can_create_project。CR-010）
     body = {"code": "PRJ-300", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.pm.id}
     for headers in (world.pm_h, world.outsider_h):
         response = client.post("/api/v1/projects", json=body, headers=headers)
         assert response.status_code == 403
         assert error_code(response) == "FORBIDDEN"
+
+
+def test_create_project_allowed_by_can_create_project(client: TestClient, world: World) -> None:
+    # 9.1：システム管理者が許したユーザー（API-CMN-005 の can_create_project）はプロジェクトを作れる（RULE-AUTH-001 の
+    # system_permissions）。許しを外すと 403 に戻る
+    body = {"code": "PRJ-301", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.outsider.id}
+    granted = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": True}, headers=world.admin_h)
+    assert granted.status_code == 200, granted.text
+    created = client.post("/api/v1/projects", json=body, headers=world.outsider_h)
+    assert created.status_code == 201, created.text
+
+    revoked = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": False}, headers=world.admin_h)
+    assert revoked.status_code == 200
+    response = client.post("/api/v1/projects", json={**body, "code": "PRJ-302"}, headers=world.outsider_h)
+    assert response.status_code == 403
+    assert error_code(response) == "FORBIDDEN"
 
 
 def test_create_project_duplicate_code_is_409(client: TestClient, world: World) -> None:
