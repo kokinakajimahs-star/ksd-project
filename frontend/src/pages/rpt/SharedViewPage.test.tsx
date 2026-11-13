@@ -75,6 +75,21 @@ describe("UI-RPT-002 共有ビュー（ログイン不要）", () => {
     expect(screen.queryByRole("table", { name: "遅延一覧" })).toBeNull();
   });
 
+  it("担当者は所属（組織／チーム）で示す。サーバの返す所属をバーの横に出し、その旨を書き添える（CR-019）", async () => {
+    const row = makeGanttRow({ name: "資料作成", assignees: ["開発部／基盤チーム", "協力会社"], percent_complete: 40 });
+    mockApi({
+      [`GET ${SHARED_URL}`]: () =>
+        jsonResponse(200, makeSharedView({ scope: "GANTT", gantt: makeGantt({ rows: [row] }), meeting_report: null })),
+    });
+    const { container } = renderAt();
+
+    await screen.findByRole("heading", { name: "ガントチャート" });
+    expect(container.querySelector('[data-note="assignee-affiliation"]')).toHaveTextContent(
+      "担当は所属（組織／チーム）で示す",
+    );
+    expect(container.querySelector('[data-layer="bar-labels"]')).toHaveTextContent("開発部／基盤チーム、協力会社 40%");
+  });
+
   it("REPORT のリンクで報告日がまだ無ければ、その旨を出す", async () => {
     mockApi({ [`GET ${SHARED_URL}`]: () => jsonResponse(200, makeSharedView({ meeting_report: null })) });
     renderAt();

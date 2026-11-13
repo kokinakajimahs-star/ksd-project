@@ -91,3 +91,8 @@ def get_login_lock_policy(request: Request) -> LoginLockPolicy:
 def get_password_min_length(request: Request) -> int:
     """パスワードの最小の長さ（設定の ``PMT_PASSWORD_MIN_LENGTH``。NFR-04）。"""
     return int(request.app.state.settings.password_min_length)
+
+
+def get_share_link_max_days(request: Request) -> int:
+    """共有リンクの有効期限の上限（今からの日数。設定の ``PMT_SHARE_LINK_MAX_DAYS``。API-RPT-002・CR-019）。"""
+    return int(request.app.state.settings.share_link_max_days)

@@ -15,7 +15,7 @@ import {
   shareLinkList,
 } from "../../test/rptFixtures";
 import { formatDateTime } from "../../lib/format";
-import { localDateTimeToIso, shareLinkState } from "./labels";
+import { localDateTimeAfterDays, localDateTimeToIso, shareLinkState } from "./labels";
 import MeetingReportPage from "./MeetingReportPage";
 
 const BASE = "/api/v1/projects/3";
@@ -329,6 +329,8 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003・005。RPT-03）", () 
     renderAt();
 
     const form = await screen.findByRole("form", { name: "共有リンクを作る" });
+    // 既定値（14 日後）を消して空にする
+    fireEvent.change(within(form).getByLabelText("有効期限"), { target: { value: "" } });
     fireEvent.submit(form);
     expect(calls.some((c) => c.method === "POST")).toBe(false);
     expect(screen.getByRole("alert")).toHaveTextContent("有効期限を入力してください");
@@ -337,6 +339,30 @@ describe("UI-RPT-001 共有リンク（API-RPT-002・003・005。RPT-03）", () 
     fireEvent.submit(form);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("入力に誤りがあります"));
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("有効期限の入力の既定値は今から 14 日後（端末の時刻）で、そのまま作れる（CR-019）", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-12-10T09:30:45"));
+      const { calls } = mockApi({
+        "GET /api/v1/me": () => jsonResponse(200, meWith(["project.view", "share.manage"])),
+        [`GET ${REPORT_URL}`]: () => jsonResponse(200, makeMeetingReport()),
+        [`GET ${BASE}/share-links`]: () => jsonResponse(200, shareLinkList([])),
+        [`POST ${BASE}/share-links`]: () => jsonResponse(201, makeShareLinkCreated()),
+      });
+      renderAt();
+
+      const form = await screen.findByRole("form", { name: "共有リンクを作る" });
+      expect(within(form).getByLabelText("有効期限")).toHaveValue("2026-12-24T09:30");
+      fireEvent.click(within(form).getByRole("button", { name: "共有リンクを作る" }));
+
+      await screen.findByLabelText("共有リンクの URL（71）");
+      const post = calls.find((c) => c.method === "POST");
+      expect(post?.body).toEqual({ scope: "REPORT", expires_at: new Date("2026-12-24T09:30").toISOString() });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("共有リンクの一覧を範囲・期限・状態（有効・失効・期限切れ）・作った日時で出し、トークンは出さない（API-RPT-005）", async () => {
@@ -434,6 +460,14 @@ describe("shareLinkState（共有リンクの一覧の状態）", () => {
   it("時差の無いサーバの時刻は UTC とみなす", () => {
     expect(shareLinkState({ expires_at: "2026-12-10T00:00:00", revoked_at: null }, now)).toBe("EXPIRED");
     expect(shareLinkState({ expires_at: "2026-12-10T00:00:01", revoked_at: null }, now)).toBe("ACTIVE");
+  });
+});
+
+describe("localDateTimeAfterDays（有効期限の入力の既定値）", () => {
+  it("端末の暦で日を足し、datetime-local の値（秒は切り捨て）にする", () => {
+    expect(localDateTimeAfterDays(new Date("2026-12-10T09:30:45"), 14)).toBe("2026-12-24T09:30");
+    expect(localDateTimeAfterDays(new Date("2026-12-25T23:59:59"), 14)).toBe("2027-01-08T23:59");
+    expect(localDateTimeAfterDays(new Date("2028-02-20T00:05:00"), 14)).toBe("2028-03-05T00:05");
   });
 });
 

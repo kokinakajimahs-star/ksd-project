@@ -16,7 +16,9 @@ import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
 import { formatDateTime } from "../../lib/format";
 import {
+  localDateTimeAfterDays,
   localDateTimeToIso,
+  SHARE_LINK_DEFAULT_DAYS,
   SHARE_LINK_STATE_LABELS,
   SHARE_SCOPE_LABELS,
   SHARE_SCOPES,
@@ -83,7 +85,8 @@ function RevokeControl({
 
 export default function ShareLinkPanel({ projectId }: { projectId: number }) {
   const [scope, setScope] = useState<ShareScope>("REPORT");
-  const [expiresAt, setExpiresAt] = useState("");
+  // 有効期限の既定値は今から 14 日後（端末の時刻。CR-019）
+  const [expiresAt, setExpiresAt] = useState(() => localDateTimeAfterDays(new Date(), SHARE_LINK_DEFAULT_DAYS));
   const [created, setCreated] = useState<CreatedLink[]>([]);
   /** 一覧と、読んだ時刻（状態の期限切れはこの時刻で決める） */
   const [listed, setListed] = useState<{ page: ShareLinkList; now: number } | null>(null);

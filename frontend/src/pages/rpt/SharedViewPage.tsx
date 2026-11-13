@@ -2,7 +2,9 @@
 // 共有リンク（API-RPT-004。認証を要らない唯一の API。6.1）で、リンクの範囲だけを読むだけで見せる：
 // GANTT は最新の進捗・最新の基準のガント、REPORT は最新の報告日の定例会議レポート（7.4。報告日が無ければ無い旨）。
 // 無い・失効した・期限の切れたリンクはサーバがどれも同じ 404 で返す（どれに当たったかは返さない）。画面もサーバの文言と
-// 1 つの案内だけを出し、理由を見分けない。書き込みの部品は置かない
+// 1 つの案内だけを出し、理由を見分けない。書き込みの部品は置かない。
+// リンクは転送されうるので、サーバは利用者の表示名などを返さず、ガントの担当者は所属（組織／チーム）で返す（CR-019）。
+// 画面はそれをバーの横にそのまま出し、担当を所属で示していることを書き添える
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -65,6 +67,9 @@ export default function SharedViewPage() {
           <p className="shared-meta">
             {view.project.code} {view.project.name}・{SHARE_SCOPE_LABELS[view.scope]}・有効期限{" "}
             {formatDateTime(view.expires_at)}（読むだけ）
+          </p>
+          <p className="note" data-note="assignee-affiliation">
+            担当は所属（組織／チーム）で示す（共有ビューでは個人の名前を出さない）
           </p>
           <div role="group" aria-label="表示の設定" className="no-print">
             <UnitSelect unit={unit} onChange={setUnit} />
