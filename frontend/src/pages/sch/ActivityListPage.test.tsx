@@ -6,9 +6,17 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import type { WbsElement } from "../../api/wbs";
 import { makeMe, makeMember, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import { activityList, makeActivity } from "../../test/schFixtures";
 import { makeEstimateRecord } from "../../test/wbsFixtures";
+import { UNSAVED_EDITS_MESSAGE } from "../../lib/leaveGuard";
 import ActivityListPage from "./ActivityListPage";
 import { toCreateInput, type FormState } from "./activities/AddActivityForm";
 import { toAssignmentInputs } from "./activities/AssignmentEditor";
@@ -124,6 +132,16 @@ function sent(calls: RecordedCall[], method: string, path: string) {
   return calls.filter((c) => c.method === method && c.path === path);
 }
 
+/** 一覧の頁（200 件ずつ）を読んだ要求 */
+function pageReads(calls: RecordedCall[]) {
+  return sent(calls, "GET", `${BASE}/activities`).filter((c) => c.url.includes("limit=200&"));
+}
+
+/** 依存の相手の選択肢のために全ての活動（limit 1000 で total まで）を読んだ要求 */
+function allReads(calls: RecordedCall[]) {
+  return sent(calls, "GET", `${BASE}/activities`).filter((c) => c.url.includes("limit=1000&"));
+}
+
 async function editable() {
   await screen.findByLabelText("21 の名称");
   // 担当の候補（API-PRJ-009）が届くまで待つ
@@ -189,7 +207,9 @@ describe("UI-SCH-001 タスクリスト", () => {
         { activity_id: 22, duration_days: 4, predecessor_ids: [] },
       ],
     });
-    await waitFor(() => expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(2));
+    // 一覧の頁と、依存の相手の選択肢（全ての活動）を読み直す
+    await waitFor(() => expect(pageReads(calls)).toHaveLength(2));
+    await waitFor(() => expect(allReads(calls)).toHaveLength(2));
   });
 
   it("1 件でも不正ならサーバは何も保存しない。全ての理由を出す（422）", async () => {
@@ -216,7 +236,8 @@ describe("UI-SCH-001 タスクリスト", () => {
     expect(alert.closest("[role=alert]")).toHaveTextContent("活動 23 の期間が不正です");
     // 入力は残す（読み直さない）
     expect(screen.getByLabelText("21 の先行")).toHaveValue("22");
-    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
+    expect(pageReads(calls)).toHaveLength(1);
+    expect(allReads(calls)).toHaveLength(1);
   });
 
   it("送れない形の入力は送らずに理由を出す", async () => {
@@ -493,6 +514,213 @@ describe("UI-SCH-001 タスクリスト", () => {
       }),
     );
     renderAt();
+    expect(await screen.findByRole("alert")).toHaveTextContent("このプロジェクトを見る権限がありません");
+  });
+});
+
+describe("UI-SCH-001 保存前の編集と、依存の相手の選択肢（A-49 の 13・OQ-42 (21) の c）", () => {
+  const A24 = makeActivity({ id: 24, name: "画面設計", predecessor_ids: [] });
+
+  /** 一覧の頁は 200 件ずつで 2 頁（試験では頁の中身を少なくし、total だけを 2 頁にする）。全件は 4 件 */
+  function twoPages(): RouteHandler {
+    return (call) => {
+      if (call.url.includes("limit=1000&")) {
+        return pagedResponse([A21, A22, M23, A24], call, { dependencies: [], restricted: false });
+      }
+      const offset = Number(new URLSearchParams(call.url.split("?")[1]).get("offset"));
+      return jsonResponse(200, activityList(offset === 0 ? [A21, A22, M23] : [A24], { total: 201, offset }));
+    };
+  }
+
+  function renderWithGantt() {
+    return render(
+      <MemoryRouter initialEntries={["/projects/3/activities"]}>
+        <Routes>
+          <Route path="/projects/:projectId/activities" element={<ActivityListPage />} />
+          <Route path="/projects/:projectId/gantt" element={<p>ガントの画面</p>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  function beforeUnloadPrevented(): boolean {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+
+  beforeEach(() => {
+    setAuthToken("t-planner");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    setAuthToken(null);
+  });
+
+  it("保存前の編集があれば頁送りの前に確かめる。やめれば頁を移らず編集を残し、移れば次の頁を読む。編集が無ければ確かめない", async () => {
+    const { calls } = mockApi(routes(EDITOR, { [`GET ${BASE}/activities`]: twoPages() }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderAt();
+    await editable();
+    const pager = screen.getByRole("navigation", { name: "頁送り" });
+    expect(pager).toHaveTextContent("全 201 件中 1〜200 件");
+
+    fireEvent.change(screen.getByLabelText("21 の名称"), { target: { value: "資料作成（改）" } });
+    fireEvent.click(within(pager).getByRole("button", { name: "次へ" }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(UNSAVED_EDITS_MESSAGE);
+    expect(pageReads(calls)).toHaveLength(1);
+    expect(screen.getByLabelText("21 の名称")).toHaveValue("資料作成（改）");
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(within(pager).getByRole("button", { name: "次へ" }));
+
+    expect(await screen.findByLabelText("24 の名称")).toHaveValue("画面設計");
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(pageReads(calls).map((c) => c.url)).toEqual([
+      `${BASE}/activities?limit=200&offset=0`,
+      `${BASE}/activities?limit=200&offset=200`,
+    ]);
+    expect(screen.queryByLabelText("21 の名称")).toBeNull();
+
+    // 編集の無い頁では確かめずに移る
+    fireEvent.click(within(screen.getByRole("navigation", { name: "頁送り" })).getByRole("button", { name: "前へ" }));
+    expect(await screen.findByLabelText("21 の名称")).toHaveValue("資料作成");
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(pageReads(calls)).toHaveLength(3);
+  });
+
+  it("保存前の編集があれば、リンクで他の画面へ移る前に確かめる。やめれば移らない。新しいタブで開くクリックは確かめない", async () => {
+    mockApi(routes(EDITOR));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithGantt();
+    await editable();
+    const links = screen.getByRole("navigation", { name: "行き先" });
+
+    fireEvent.change(screen.getByLabelText("22 の期間"), { target: { value: "5" } });
+    fireEvent.click(within(links).getByRole("link", { name: "ガント" }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(UNSAVED_EDITS_MESSAGE);
+    expect(screen.queryByText("ガントの画面")).toBeNull();
+    expect(screen.getByLabelText("22 の期間")).toHaveValue("5");
+
+    // Ctrl を押したクリック（新しいタブ）は今の画面を離れないので確かめない。新しいタブで開くのはブラウザの動作で、
+    // jsdom は移れないので、ここでは画面の後でクリックの既定の動作を止め、確かめないことだけを見る
+    const stopDefault = (event: Event) => event.preventDefault();
+    document.addEventListener("click", stopDefault);
+    fireEvent.click(within(links).getByRole("link", { name: "ガント" }), { ctrlKey: true });
+    document.removeEventListener("click", stopDefault);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("ガントの画面")).toBeNull();
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(within(links).getByRole("link", { name: "ガント" }));
+
+    expect(await screen.findByText("ガントの画面")).toBeInTheDocument();
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("保存前の編集が無ければ、リンクで確かめずに移る", async () => {
+    mockApi(routes(EDITOR));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithGantt();
+    await editable();
+
+    // 編集して取り消せば、編集は無い
+    fireEvent.change(screen.getByLabelText("22 の期間"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "編集を取り消す" }));
+    fireEvent.click(within(screen.getByRole("navigation", { name: "行き先" })).getByRole("link", { name: "ガント" }));
+
+    expect(await screen.findByText("ガントの画面")).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("保存前の編集がある間だけ、ブラウザを閉じる・再読み込みの前に確かめる（beforeunload）", async () => {
+    mockApi(routes(EDITOR, { [`PATCH ${BASE}/activities`]: () => jsonResponse(200, { items: [A22] }) }));
+    const view = renderAt();
+    await editable();
+    expect(beforeUnloadPrevented()).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("22 の期間"), { target: { value: "5" } });
+    expect(beforeUnloadPrevented()).toBe(true);
+
+    // 保存して読み直せば編集は無い
+    fireEvent.click(screen.getByRole("button", { name: "まとめて保存する" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("1 件の活動を保存し");
+    await waitFor(() => expect(beforeUnloadPrevented()).toBe(false));
+
+    fireEvent.change(screen.getByLabelText("22 の期間"), { target: { value: "6" } });
+    expect(beforeUnloadPrevented()).toBe(true);
+    // 画面を閉じれば確かめをやめる
+    view.unmount();
+    expect(beforeUnloadPrevented()).toBe(false);
+  });
+
+  it("依存の相手は今の頁でなく全ての活動から選ぶ（limit 1000 で total まで読み足す）。依存の一覧の名前も全ての活動から出す", async () => {
+    // 全件は 1001 件：今の頁の 3 件・999 件の活動・最後の頁（2 頁目）にだけある活動 4000
+    const fillers = Array.from({ length: 997 }, (_, i) => makeActivity({ id: 1000 + i, name: `活動 ${1000 + i}` }));
+    const last = makeActivity({ id: 4000, name: "最後の活動" });
+    const all = [A21, A22, M23, ...fillers, last];
+    const { calls } = mockApi(
+      routes(EDITOR, {
+        [`GET ${BASE}/activities`]: (call) =>
+          call.url.includes("limit=1000&")
+            ? pagedResponse(all, call, { dependencies: [], restricted: false })
+            : jsonResponse(
+                200,
+                activityList([A21, A22, M23], {
+                  total: all.length,
+                  dependencies: [{ id: 33, predecessor_id: 4000, successor_id: 21, dep_type: "FS", lag_days: 0 }],
+                }),
+              ),
+        [`POST ${BASE}/dependencies`]: () =>
+          jsonResponse(201, { id: 34, predecessor_id: 4000, successor_id: 22, dep_type: "FS", lag_days: 0 }),
+      }),
+    );
+    renderAt();
+    const form = await screen.findByRole("form", { name: "依存を足す" });
+
+    await waitFor(() => expect(within(within(form).getByLabelText("先行")).getAllByRole("option")).toHaveLength(1002));
+    expect(within(within(form).getByLabelText("後続")).getAllByRole("option")).toHaveLength(1002);
+    expect(allReads(calls).map((c) => c.url)).toEqual([
+      `${BASE}/activities?limit=1000&offset=0`,
+      `${BASE}/activities?limit=1000&offset=1000`,
+    ]);
+    // 今の頁に無い活動も名前で出す
+    expect(screen.getByRole("table", { name: "依存の一覧" })).toHaveTextContent("4000 最後の活動");
+
+    fireEvent.change(within(form).getByLabelText("先行"), { target: { value: "4000" } });
+    fireEvent.change(within(form).getByLabelText("後続"), { target: { value: "22" } });
+    fireEvent.click(within(form).getByRole("button", { name: "依存を足す" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("依存を変え");
+    expect(sent(calls, "POST", `${BASE}/dependencies`)[0]!.body).toEqual({ predecessor_id: 4000, successor_id: 22 });
+  });
+
+  it("見るだけの人は依存の相手を選ばないので、全ての活動を読まない", async () => {
+    const { calls } = mockApi(routes(VIEWER));
+    renderAt();
+    await screen.findByRole("table", { name: "依存の一覧" });
+
+    expect(pageReads(calls)).toHaveLength(1);
+    expect(allReads(calls)).toHaveLength(0);
+  });
+
+  it("全ての活動を読めなければ理由を出す", async () => {
+    mockApi(
+      routes(EDITOR, {
+        [`GET ${BASE}/activities`]: (call) =>
+          call.url.includes("limit=1000&")
+            ? errorResponse(403, "FORBIDDEN", "このプロジェクトを見る権限がありません")
+            : jsonResponse(200, activityList([A21, A22, M23])),
+      }),
+    );
+    renderAt();
+
     expect(await screen.findByRole("alert")).toHaveTextContent("このプロジェクトを見る権限がありません");
   });
 });

@@ -21,6 +21,7 @@ import {
 import { getWbsTree, type WbsElement } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
+import { confirmLeave, useLeaveGuard } from "../../lib/leaveGuard";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
 import EstimateForm from "../wbs/EstimateForm";
 import AddActivityForm from "./activities/AddActivityForm";
@@ -47,6 +48,7 @@ export default function ActivityListPage() {
   const projectId = parseProjectId(params.projectId);
   const [me, setMe] = useState<Me | null>(null);
   const [list, setList] = useState<ActivityList | null>(null);
+  const [allActivities, setAllActivities] = useState<Activity[] | null>(null);
   const [offset, setOffset] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [workPackages, setWorkPackages] = useState<WbsElement[]>([]);
@@ -134,8 +136,35 @@ export default function ActivityListPage() {
     };
   }, [projectId, canEdit]);
 
+  // 依存の相手の選択肢（変える人だけが要る）：今の頁でなく全ての活動（A-49 の 13。NFR-01 で 2,000 件まで）。
+  // 読み直すとき（足す・消す・保存の後）は一緒に読み直す
+  useEffect(() => {
+    if (projectId === null || !canEdit) {
+      return;
+    }
+    let cancelled = false;
+    fetchAllPages((page) => listActivities(projectId, page)).then(
+      (items) => {
+        if (!cancelled) {
+          setAllActivities(items);
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setAllActivities(null);
+          setLoadError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, canEdit, reloadKey]);
+
   const memberName = useMemo(() => new Map(members.map((m) => [m.user_id, m.display_name])), [members]);
   const dirty = Object.keys(drafts).length > 0;
+  // 保存していない編集があれば、リンクで他の画面へ移る・ブラウザを閉じる前に確かめる（A-49 の 13）
+  useLeaveGuard(dirty);
 
   if (projectId === null) {
     return (
@@ -374,7 +403,19 @@ export default function ActivityListPage() {
             </tbody>
           </table>
         )}
-        {list !== null && <Pager total={list.total} limit={list.limit} offset={list.offset} onChange={setOffset} />}
+        {list !== null && (
+          <Pager
+            total={list.total}
+            limit={list.limit}
+            offset={list.offset}
+            onChange={(next) => {
+              // 頁を移ると一覧を読み直し、保存していない編集は消える
+              if (confirmLeave(dirty)) {
+                setOffset(next);
+              }
+            }}
+          />
+        )}
 
         {canEdit && removing !== null && (
           <div role="group" aria-label="活動を消すことの確かめ">
@@ -438,7 +479,7 @@ export default function ActivityListPage() {
       {list !== null && (
         <DependencySection
           projectId={projectId}
-          activities={activities}
+          activities={allActivities ?? activities}
           dependencies={list.dependencies}
           canEdit={canEdit}
           onChanged={() => reload("依存を変え、日程を計算し直した")}
