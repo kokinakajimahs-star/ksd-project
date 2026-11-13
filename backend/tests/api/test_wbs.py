@@ -31,6 +31,7 @@ from app.domain.workflow import ApprovalStatus
 from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, RolePermission, User
+from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import (
@@ -279,6 +280,56 @@ def test_patch_element_rejections(world: World) -> None:
     assert world.client.patch(world.url(f"/elements/{MISSING}"), json={"name": "x"},
                               headers=world.headers["planner"]).status_code == 404
     assert world.client.patch(url, json={"name": "x"}, headers=world.headers["viewer"]).status_code == 403
+
+
+def test_own_estimate_on_add_and_patch_leaves_estimate_records(world: World) -> None:
+    """API-WBS-002・003：自分の見積を置いた・変えたら、API-EST-001 と同じ形の見積の記録を 1 行残す（EST-08・CR-017）。
+
+    単位は人時（入力の値＝人時）、手法・前提・参照資料は空、入力した人と日時を残す。見積を置かない追加・同じ値・見積以外の変更・
+    空（null）にする変更は残さない（記録の ``hours`` は空にできない。4.1）。拒まれた書き込みも残さない。
+    """
+    def history(element_id: int) -> list[dict[str, Any]]:
+        response = world.client.get(f"/api/v1/projects/{world.pid}/estimates/ELEMENT/{element_id}/history",
+                                    headers=world.headers["viewer"])
+        assert response.status_code == 200, response.text
+        items: list[dict[str, Any]] = response.json()["items"]
+        return items
+
+    def patch(element_id: int, body: dict[str, Any], expect: int = 200) -> Any:
+        response = world.client.patch(world.url(f"/elements/{element_id}"), json=body, headers=world.headers["planner"])
+        assert response.status_code == expect, response.text
+        return response.json()
+
+    planner = world.users["planner"].id
+    entered_at = NOW.isoformat().replace("+00:00", "Z")
+    element = world.add("見積あり", own_estimate_hours="12.5")
+    assert [(r["target_type"], r["target_id"], r["hours"], r["input_value"], r["input_unit"], r["method"],
+             r["assumptions"], r["references"], r["entered_by"], r["entered_at"]) for r in history(element["id"])] == [
+        ("ELEMENT", element["id"], 12.5, 12.5, "HOUR", None, None, None, planner, entered_at)]
+    bare = world.add("見積なし")
+    assert history(bare["id"]) == []
+
+    patch(element["id"], {"own_estimate_hours": "12.50"})  # 同じ値
+    patch(element["id"], {"name": "見積あり（改名）"})  # 見積以外
+    assert len(history(element["id"])) == 1
+    assert patch(element["id"], {"own_estimate_hours": "20"})["own_estimate_hours"] == 20.0
+    assert [(r["hours"], r["input_unit"]) for r in history(element["id"])] == [(12.5, "HOUR"), (20.0, "HOUR")]
+    assert patch(element["id"], {"own_estimate_hours": None})["own_estimate_hours"] is None  # 空にする
+    assert len(history(element["id"])) == 2
+    patch(element["id"], {"own_estimate_hours": "8"})  # 空から置き直す
+    assert [r["hours"] for r in history(element["id"])] == [12.5, 20.0, 8.0]
+    patch(bare["id"], {"own_estimate_hours": "3", "name": "見積を後で置く"})
+    assert [(r["hours"], r["entered_by"]) for r in history(bare["id"])] == [(3.0, planner)]
+
+    # 承認待ちの間は 409 で、要素も記録も書かない（RULE-WBS-006）
+    world.set_status("PENDING_APPROVAL")
+    patch(element["id"], {"own_estimate_hours": "30"}, expect=409)
+    refused = world.client.post(world.url("/elements"), json={"kind": "DELIVERABLE", "name": "拒む", "own_estimate_hours": "1"},
+                                headers=world.headers["planner"])
+    assert refused.status_code == 409, refused.text
+    assert [r["hours"] for r in history(element["id"])] == [12.5, 20.0, 8.0]
+    world.session.expire_all()
+    assert world.session.scalar(select(func.count()).select_from(EstimateRecord)) == 4
 
 
 # ---------------------------------------------------------------------------

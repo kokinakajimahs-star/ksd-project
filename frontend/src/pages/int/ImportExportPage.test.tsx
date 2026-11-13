@@ -7,7 +7,7 @@ import type { ImportResult } from "../../api/int";
 import { readBlobText, stubDownloads } from "../../test/download";
 import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
-import ImportExportPage, { describeImportResult } from "./ImportExportPage";
+import ImportExportPage, { describeImportResult, exportTargets } from "./ImportExportPage";
 import { formatFromFilename } from "./labels";
 
 const BASE = "/api/v1/projects/3";
@@ -21,7 +21,8 @@ function meWith(permissions: string[]) {
   });
 }
 
-const PLANNER = meWith(["data.export", "data.import"]);
+// 9.2 の PLANNER：data.export・data.import と effort.view（実績工数の出力に要る。CR-015）を持つ
+const PLANNER = meWith(["data.export", "data.import", "effort.view"]);
 
 function makeResult(overrides: Partial<ImportResult> = {}): ImportResult {
   return {
@@ -115,6 +116,32 @@ describe("UI-INT-001 入出力（Excel・CSV）", () => {
 
     expect(await screen.findByRole("form", { name: "出力する" })).toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "取り込む" })).toBeNull();
+  });
+
+  it("effort.view が無ければ、出力で実績工数を選ばせない（CR-015）。取込の対象は今どおり", async () => {
+    // 9.2 の VIEWER 相当：data.export を持ち effort.view を持たない
+    mockApi(routes({ "GET /api/v1/me": () => jsonResponse(200, meWith(["data.export", "data.import"])) }));
+    renderAt();
+    const exportForm = within(await screen.findByRole("form", { name: "出力する" }));
+
+    const exportOptions = within(exportForm.getByLabelText("対象")).getAllByRole("option");
+    expect(exportOptions.map((o) => o.getAttribute("value"))).toEqual(["wbs", "activities"]);
+    expect(screen.getByText("実績工数の出力には、工数を読む権限（effort.view）が要ります")).toBeInTheDocument();
+    const importForm = within(screen.getByRole("form", { name: "取り込む" }));
+    const importOptions = within(importForm.getByLabelText("対象")).getAllByRole("option");
+    expect(importOptions.map((o) => o.getAttribute("value"))).toEqual(["wbs", "activities", "time-entries"]);
+  });
+
+  it("effort.view があれば、出力で実績工数を選べる", async () => {
+    mockApi(routes());
+    renderAt();
+    const exportForm = within(await screen.findByRole("form", { name: "出力する" }));
+
+    const options = within(exportForm.getByLabelText("対象")).getAllByRole("option");
+    expect(options.map((o) => o.getAttribute("value"))).toEqual(["wbs", "activities", "time-entries"]);
+    expect(screen.queryByText("実績工数の出力には、工数を読む権限（effort.view）が要ります")).toBeNull();
+    expect(exportTargets(false)).toEqual(["wbs", "activities"]);
+    expect(exportTargets(true)).toEqual(["wbs", "activities", "time-entries"]);
   });
 
   it("入出力の権限が無ければ、部品を出さずにその旨を示す", async () => {

@@ -1,5 +1,6 @@
 // UI-INT-001 入出力（Excel・CSV）（設計書 7.1 のルート /projects/:projectId/import-export。INT-01）。
-// WBS・活動（計画）・実績工数を 6.3 の列で出力し（API-INT-001。権限は data.export）、取り込む（API-INT-002。権限は data.import）。
+// WBS・活動（計画）・実績工数を 6.3 の列で出力し（API-INT-001。権限は data.export。実績工数は effort.view も。CR-015）、
+// 取り込む（API-INT-002。権限は data.import）。
 // 取込はサーバが全行を先に検査し、誤りが 1 件でもあれば何も書かない。「検査する」は dry_run で、書かずに結果だけを見る。
 // 権限の無い操作の部品は出さない（7.2）。正の判定はサーバが行う
 import { useState, type ChangeEvent, type FormEvent } from "react";
@@ -44,10 +45,25 @@ export function describeImportResult(result: ImportResult): string {
   return `取り込みました（${counts}）`;
 }
 
-function TargetSelect({ id, value, onChange }: { id: string; value: IoTarget; onChange: (v: IoTarget) => void }) {
+/** 出力で選べる対象。実績工数は effort.view も要る（設計書 1.3 の API-INT-001・CR-015。無い人には選ばせない） */
+export function exportTargets(canViewEffort: boolean): readonly IoTarget[] {
+  return canViewEffort ? IO_TARGETS : IO_TARGETS.filter((t) => t !== "time-entries");
+}
+
+function TargetSelect({
+  id,
+  value,
+  onChange,
+  targets = IO_TARGETS,
+}: {
+  id: string;
+  value: IoTarget;
+  onChange: (v: IoTarget) => void;
+  targets?: readonly IoTarget[];
+}) {
   return (
     <select id={id} value={value} onChange={(e) => onChange(e.target.value as IoTarget)}>
-      {IO_TARGETS.map((t) => (
+      {targets.map((t) => (
         <option key={t} value={t}>
           {TARGET_LABELS[t]}
         </option>
@@ -79,7 +95,8 @@ function ColumnDefinition({ target }: { target: IoTarget }) {
   );
 }
 
-function ExportSection({ projectId }: { projectId: number }) {
+function ExportSection({ projectId, canViewEffort }: { projectId: number; canViewEffort: boolean }) {
+  const targets = exportTargets(canViewEffort);
   const [target, setTarget] = useState<IoTarget>("wbs");
   const [format, setFormat] = useState<IoFormat>("csv");
   const [busy, setBusy] = useState(false);
@@ -108,7 +125,7 @@ function ExportSection({ projectId }: { projectId: number }) {
       <h3 id="export-heading">出力する</h3>
       <form aria-label="出力する" onSubmit={(e) => void handleSubmit(e)} className="filters">
         <label htmlFor="export-target">対象</label>
-        <TargetSelect id="export-target" value={target} onChange={setTarget} />
+        <TargetSelect id="export-target" value={target} onChange={setTarget} targets={targets} />
         <label htmlFor="export-format">形式</label>
         <FormatSelect id="export-format" value={format} onChange={setFormat} />
         <button type="submit" disabled={busy}>
@@ -116,6 +133,9 @@ function ExportSection({ projectId }: { projectId: number }) {
         </button>
       </form>
       <ColumnDefinition target={target} />
+      {!canViewEffort && (
+        <p className="note">実績工数の出力には、工数を読む権限（effort.view）が要ります</p>
+      )}
       <ErrorAlert error={error} />
       {notice !== null && <p role="status">{notice}</p>}
     </section>
@@ -294,6 +314,7 @@ export default function ImportExportPage() {
 
   const canExport = me !== null && hasProjectPermission(me, projectId, "data.export");
   const canImport = me !== null && hasProjectPermission(me, projectId, "data.import");
+  const canViewEffort = me !== null && hasProjectPermission(me, projectId, "effort.view");
 
   return (
     <section data-screen-id="UI-INT-001" className="import-export-page">
@@ -305,7 +326,7 @@ export default function ImportExportPage() {
       <ErrorAlert error={meError} />
       {me === null && meError === null && <p>読み込み中…</p>}
       {me !== null && !canExport && !canImport && <p>このプロジェクトで入出力を行う権限がありません</p>}
-      {canExport && <ExportSection projectId={projectId} />}
+      {canExport && <ExportSection projectId={projectId} canViewEffort={canViewEffort} />}
       {canImport && <ImportSection projectId={projectId} />}
     </section>
   );

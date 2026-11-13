@@ -8,7 +8,9 @@
 - 変更履歴（``audit_logs``）：検索（期間・変更者・対象・WBS ID）。記録は infra のイベント（``app.infra.audit_listener``）が行う
 
 権限は 9 章（RULE-AUTH-001）を ``authorize_project`` で判定する。委託先だけで読む利用者（9.2 の注記）には、自分の割当の活動と
-その WBS の経路に関わる変更要求・是正措置だけを見せる。1 つの操作を 1 つのトランザクションにする（1.3）。
+その WBS の経路に関わる変更要求・是正措置だけを見せる。委託先には変更要求の影響（``impact``）と操作（``operations``）を返さず
+（変更要求を返す全ての応答で ``ChangeRequestView.hide_details``）、影響分析（API-CHG-004）は 403 にする（設計書 1.3 の 9.2・CR-016）。
+1 つの操作を 1 つのトランザクションにする（1.3）。
 判断の記録は docs/decisions/ASSUMPTIONS.md A-37。
 
 **同時実行**（A-49 の 3）：変更要求の状態を判定して変える操作（修正・提出・取り下げ・判断・反映）は、``change_requests`` の行を
@@ -72,10 +74,16 @@ from app.models.wbs import (
     WbsReviewComment,
     WbsScopeLink,
 )
-from app.services.auth import User, authorize_project, principal_of
+from app.services.auth import User, authorize_project, forbidden, principal_of
 from app.services.clock import business_period
 from app.services.project_access import ProjectAccess
-from app.services.schedule import calculate_and_store, load_plan, work_calendar
+from app.services.schedule import (
+    before_project_start,
+    calculate_and_store,
+    load_plan,
+    starts_before_project,
+    work_calendar,
+)
 from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, numbering_rule_row
 
 # 4.1 の schedule_baselines.name の列の長さ（A-19）
@@ -172,6 +180,14 @@ class _Visible:
 
     activity_ids: frozenset[int]
     element_ids: frozenset[int]
+
+
+def _reads_all(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, table: Mapping[str, frozenset[str]]
+) -> bool:
+    """project.view で全てを読めるか（偽なら委託先だけで読む利用者。``_visible`` が範囲を返すのと同じ判定。9.2 の注記）。"""
+    membership = access.membership(session, project_id, actor.id)
+    return project_view_level(principal_of(actor), role_permissions=table, membership=membership) is ViewLevel.ALL
 
 
 def _visible(
@@ -278,8 +294,11 @@ def _check_targets(session: Session, project_id: int, target_codes: Sequence[str
 
 @dataclass(frozen=True)
 class ChangeRequestView:
+    """返す変更要求。``hide_details`` が真なら影響（``impact``）と操作（``operations``）を返さない（null。委託先。9.2・CR-016）。"""
+
     change_request: ChangeRequest
     approval_request_id: int | None
+    hide_details: bool
 
 
 def _latest_approval_id(session: Session, change_request: ChangeRequest) -> int | None:
@@ -293,9 +312,9 @@ def _latest_approval_id(session: Session, change_request: ChangeRequest) -> int 
     )
 
 
-def _view(session: Session, change_request: ChangeRequest) -> ChangeRequestView:
+def _view(session: Session, change_request: ChangeRequest, *, hide_details: bool) -> ChangeRequestView:
     return ChangeRequestView(change_request=change_request,
-                             approval_request_id=_latest_approval_id(session, change_request))
+                             approval_request_id=_latest_approval_id(session, change_request), hide_details=hide_details)
 
 
 def create_change_request(
@@ -315,7 +334,7 @@ def create_change_request(
     （RULE-CHG-001。形の誤りは 400、参照・業務ルールの違反は 422。本計画には書かない）。希望開始日は次の稼働日へ寄せて
     保存する（BR-04。API-SCH-002・003 と同じ）。
     """
-    authorize_project(session, access, actor, project_id, "change.create")
+    table = authorize_project(session, access, actor, project_id, "change.create")
     codes = _check_targets(session, project_id, target_codes)
     ops = [dict(op) for op in operations]
     _apply(_plan_model(session, project_id), ops)
@@ -325,7 +344,8 @@ def create_change_request(
                                    target_codes=codes, operations=ops, created_by=actor.id)
     session.add(change_request)
     session.commit()
-    return ChangeRequestView(change_request=change_request, approval_request_id=None)
+    return ChangeRequestView(change_request=change_request, approval_request_id=None,
+                             hide_details=not _reads_all(session, access, actor, project_id, table))
 
 
 def _visible_change_request(change_request: ChangeRequest, visible: _Visible, coded: Sequence[CodedElement],
@@ -362,7 +382,7 @@ def list_change_requests(
         history = _code_history(session, project_id)
         rows = [r for r in rows if _visible_change_request(r, visible, coded, history)]
     page = rows[offset:offset + limit]
-    return [_view(session, r) for r in page], len(rows)
+    return [_view(session, r, hide_details=visible is not None) for r in page], len(rows)
 
 
 def update_change_request(
@@ -377,7 +397,7 @@ def update_change_request(
 
     載せた項目（title・reason・target_codes・operations）だけを変える。検査は起票と同じ。
     """
-    authorize_project(session, access, actor, project_id, "change.create")
+    table = authorize_project(session, access, actor, project_id, "change.create")
     change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         ensure_change_request_editable(change_request.status)
@@ -393,7 +413,7 @@ def update_change_request(
         if name in changes:
             setattr(change_request, name, changes[name])
     session.commit()
-    return _view(session, change_request)
+    return _view(session, change_request, hide_details=not _reads_all(session, access, actor, project_id, table))
 
 
 _IMPACT_CLOSED = ("APPLIED", "REJECTED")
@@ -406,16 +426,13 @@ def analyze_change_request(
 
     今の計画の写しに保存した変更内容を当て、5.9 の形（終了日・マイルストーン・クリティカルパス・総工数・要素）を返す。
     反映済み（APPLIED）・却下（REJECTED）の変更要求は当てる先が無いので 404 ではなく 409 ``INVALID_STATE``（A-37）。
-    委託先だけで読む利用者には、一覧に出ない変更要求（対象が自分の割当の WBS の経路に入らないもの）を見つからないものとして
-    扱う（9.2 の注記。一覧と同じ 404。A-47）。
+    委託先だけで読む利用者は影響分析を流せない（403。影響はプロジェクト全体の計画からしか求まらない。設計書 1.3 の 9.2・CR-016）。
+    変更要求を読む前に拒むので、変更要求の有無（一覧に出ないものを含む）を明かさない。
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
+    if not _reads_all(session, access, actor, project_id, table):
+        raise forbidden()
     change_request = _change_request_of(session, project_id, change_request_id)
-    visible = _visible(session, access, actor, project_id, table)
-    if visible is not None and not _visible_change_request(
-        change_request, visible, _coded(_elements(session, project_id)), _code_history(session, project_id)
-    ):
-        raise AppError(404, "NOT_FOUND", "変更要求が見つかりません", details=[{"change_request_id": change_request_id}])
     if change_request.status in _IMPACT_CLOSED:
         raise AppError(409, "INVALID_STATE", f"変更要求が {change_request.status} のときは影響分析を流せません",
                        details=[{"change_request_id": change_request.id, "status": change_request.status}])
@@ -432,7 +449,7 @@ def submit_change_request(
     影響分析（RULE-CHG-002）を流して ``impact`` に保存し、承認申請（``target_type = CHANGE_REQUEST``）を作る。
     申請者は提出した人（承認・却下は別の人だけ。5.10）。DRAFT でなければ 409、変更内容を当てられなければ 400・422。
     """
-    authorize_project(session, access, actor, project_id, "change.create")
+    table = authorize_project(session, access, actor, project_id, "change.create")
     change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
         transition = transition_change_request(change_request.status, ChangeRequestAction.SUBMIT)
@@ -448,7 +465,8 @@ def submit_change_request(
                                requested_by=actor.id, requested_at=now)
     session.add(approval)
     session.commit()
-    return ChangeRequestView(change_request=change_request, approval_request_id=approval.id)
+    return ChangeRequestView(change_request=change_request, approval_request_id=approval.id,
+                             hide_details=not _reads_all(session, access, actor, project_id, table))
 
 
 def withdraw_change_request(
@@ -460,7 +478,7 @@ def withdraw_change_request(
     消したことは変更履歴に残る）。保存した影響分析は残し、提出し直すときに流し直す。提出日時は空に戻す（A-48）。
     SUBMITTED でなければ 409。
     """
-    authorize_project(session, access, actor, project_id, "change.create")
+    table = authorize_project(session, access, actor, project_id, "change.create")
     # 承認の判断と競わせない（OQ-42 (24)）：変更要求の行を先に、保留中の承認申請の行を後にロックして読み直す（A-49 の 3）
     change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
@@ -480,7 +498,7 @@ def withdraw_change_request(
     change_request.status = transition.to_status.value
     change_request.submitted_at = None
     session.commit()
-    return _view(session, change_request)
+    return _view(session, change_request, hide_details=not _reads_all(session, access, actor, project_id, table))
 
 
 class ChangeRequestStateMachine:
@@ -518,6 +536,7 @@ class AppliedView:
     approval_request_id: int | None
     scope_baseline: ScopeBaseline
     schedule_baseline: ScheduleBaseline
+    hide_details: bool  # 委託先には影響と操作を返さない（ChangeRequestView と同じ。CR-016）
 
 
 def _refuse_removing_elements(session: Session, removed: Sequence[int]) -> None:
@@ -655,6 +674,22 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
             session.flush()
 
 
+def _refuse_starts_before_project(project: Project, applied: AppliedChange) -> None:
+    """当てた後の活動の希望開始日が今と違う値でプロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（CR-018）。
+
+    新しい活動は ``activity_id`` を null にして変更内容の ``ref`` で指す。書く前に判定するので何も書かない。
+    """
+    before = {a.id: a.requested_start for a in applied.before.activities}
+    refs = {activity_id: ref for ref, activity_id in applied.activity_refs.items()}
+    early = [
+        ({"activity_id": a.id if a.id > 0 else None, "ref": refs.get(a.id), "name": a.name}, a.requested_start)
+        for a in applied.plan.activities
+        if a.requested_start is not None and starts_before_project(project.start_date, a.requested_start, before.get(a.id))
+    ]
+    if early:
+        raise before_project_start(project.start_date, early)
+
+
 def _write_baselines(
     session: Session, project_id: int, change_request: ChangeRequest, actor: User, now: datetime
 ) -> tuple[ScopeBaseline, ScheduleBaseline]:
@@ -724,13 +759,14 @@ def apply_change_request(
     1. RULE-CHG-003 の APPLY（APPROVED → APPLIED。それ以外は 409 ``INVALID_STATE``）。WBS が ``BASELINED`` でなければ
        （承認を経ていない・承認待ち・基準の後に直接変えた）409 ``INVALID_STATE``。5.10 で ``BASELINED`` へ入るのは承認だけで、
        反映で承認を飛ばさない（A-47）
-    2. RULE-CHG-001 で今の計画へ当て（当てられなければ 400・422）、本計画へ書く。日程を計算し直す（RULE-SCH-001〜003）
+    2. RULE-CHG-001 で今の計画へ当て（当てられなければ 400・422）、本計画へ書く。日程を計算し直す（RULE-SCH-001〜003）。
+       当てた後の活動の希望開始日が今と違い、プロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）
     3. RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る。旧版は残す（BR-12）
     4. 計画は新しい版と一致するので、計画を書いて ``DRAFT`` に戻った WBS の状態を ``BASELINED`` に保つ
 
     基準の写しは変えない（版に入った要素・活動も消せる。設計書 1.1 の 4.2。CR-002）。どこかで止まれば何も書かない。
     """
-    authorize_project(session, access, actor, project_id, "change.apply")
+    table = authorize_project(session, access, actor, project_id, "change.apply")
     # 二重の反映・WBS の承認の操作と競わせない：変更要求、プロジェクトの順に行をロックし、読み直した値で判定する（A-49 の 3）
     change_request = _change_request_of(session, project_id, change_request_id, for_update=True)
     try:
@@ -743,6 +779,7 @@ def apply_change_request(
         raise AppError(409, "INVALID_STATE", "WBS が承認済み（BASELINED）のときだけ変更を反映できます",
                        details=[{"wbs_status": project.wbs_status}])
     applied = _apply(_plan_model(session, project_id), change_request.operations or [])
+    _refuse_starts_before_project(project, applied)
     try:
         _write_plan(session, project_id, applied)
         calculate_and_store(session, project_id)
@@ -756,7 +793,8 @@ def apply_change_request(
     change_request.applied_at = now
     session.commit()
     return AppliedView(change_request=change_request, approval_request_id=_latest_approval_id(session, change_request),
-                       scope_baseline=scope, schedule_baseline=schedule)
+                       scope_baseline=scope, schedule_baseline=schedule,
+                       hide_details=not _reads_all(session, access, actor, project_id, table))
 
 
 # ---------------------------------------------------------------------------

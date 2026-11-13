@@ -171,6 +171,24 @@ class World:
         self.session.expire_all()
         return int(self.session.scalar(select(func.count()).select_from(model)) or 0)
 
+    def assign_contractor_to_a(self) -> None:
+        """委託先を活動 A（WP1）の担当にする（委託先に見えるのは A と WP1・D の経路。9.2 の注記）。"""
+        assign = self.client.put(self.url(f"/activities/{self.a}/assignments"),
+                                 json={"assignments": [{"user_id": self.uid("contractor"), "planned_hours": 8}]},
+                                 headers=self.h["planner"])
+        assert assign.status_code == 200, assign.text
+
+    def grant(self, role: str, *permissions: str) -> None:
+        """プロジェクトのロール権限表（API-PRJ-012）で、ロールに権限を足す。"""
+        table = self.client.get(self.url("/role-permissions"), headers=self.admin_h)
+        assert table.status_code == 200, table.text
+        roles = [
+            {"role": r["role"], "permissions": [*r["permissions"], *permissions] if r["role"] == role else r["permissions"]}
+            for r in table.json()["roles"]
+        ]
+        put = self.client.put(self.url("/role-permissions"), json={"roles": roles}, headers=self.admin_h)
+        assert put.status_code == 200, put.text
+
 
 @pytest.fixture()
 def world(client: TestClient, db_session: Session) -> World:
@@ -364,22 +382,80 @@ def test_impact_analysis_reports_differences_without_writing(world: World) -> No
                              headers=world.h["viewer"]).status_code == 404
 
 
-def test_impact_analysis_hides_change_requests_outside_contractor_scope(world: World) -> None:
-    """API-CHG-004 影響分析を流す：委託先には、一覧に出ない変更要求（自分の WBS の経路の外が対象）を 404 で返す（9.2）。"""
+def test_impact_analysis_is_forbidden_for_contractor(world: World) -> None:
+    """API-CHG-004 影響分析を流す：委託先には、一覧に出る変更要求でも 403 を返す（設計書 1.3 の 9.2・CR-016）。
+
+    変更要求を読む前に拒むので、一覧に出ない変更要求（自分の WBS の経路の外が対象）・無い変更要求も同じ 403 で、有無を明かさない。
+    委託先のほかに全てを読めるロールも持つ利用者は絞らない（9.2 の注記。一覧と同じ判定）。
+    """
     inside = world.create()  # 対象は WP1（活動 A の WP）
     outside = world.create(target_codes=[world.wp2_code], operations=[])
-    assign = world.client.put(world.url(f"/activities/{world.a}/assignments"),
-                              json={"assignments": [{"user_id": world.uid("contractor"), "planned_hours": 8}]},
-                              headers=world.h["planner"])
-    assert assign.status_code == 200, assign.text
-    hidden = world.client.post(world.url(f"/change-requests/{outside['id']}/impact"), headers=world.h["contractor"])
-    assert hidden.status_code == 404, hidden.text
-    assert hidden.json()["error"]["code"] == "NOT_FOUND"
-    seen = world.client.post(world.url(f"/change-requests/{inside['id']}/impact"), headers=world.h["contractor"])
-    assert seen.status_code == 200, seen.text
+    world.assign_contractor_to_a()
+    for change_request_id in (inside["id"], outside["id"], MISSING):
+        refused = world.client.post(world.url(f"/change-requests/{change_request_id}/impact"),
+                                    headers=world.h["contractor"])
+        assert refused.status_code == 403, refused.text
+        assert error_code(refused) == "FORBIDDEN"
     # 全て読めるロールには、同じ変更要求の影響分析を返す
-    assert world.client.post(world.url(f"/change-requests/{outside['id']}/impact"),
-                             headers=world.h["viewer"]).status_code == 200
+    for change_request_id in (inside["id"], outside["id"]):
+        assert world.client.post(world.url(f"/change-requests/{change_request_id}/impact"),
+                                 headers=world.h["viewer"]).status_code == 200
+    both = world.client.put(f"/api/v1/projects/{world.pid}/members/{world.uid('contractor')}",
+                            json={"roles": ["CONTRACTOR", "VIEWER"]}, headers=world.admin_h)
+    assert both.status_code == 200, both.text
+    assert world.client.post(world.url(f"/change-requests/{inside['id']}/impact"),
+                             headers=world.h["contractor"]).status_code == 200
+
+
+def test_contractor_gets_change_requests_without_impact_and_operations(world: World) -> None:
+    """API-CHG-001・002・003・005・006・011：委託先には、変更要求を返す全ての応答で影響（``impact``）と操作（``operations``）を
+    null で返す。件名・理由・状態などは返し、保存する値は変えない（設計書 1.3 の 9.2・CR-016）。全てを読めるロールには今どおり返す。
+
+    委託先が起票・提出・反映する場面を作るため、委託先のロールに change.create・change.apply を足す（9.2 の表は持たせない）。
+    """
+    world.baseline_wbs()
+    world.assign_contractor_to_a()
+    world.grant("CONTRACTOR", "change.create", "change.apply")
+
+    def hidden(body: Any) -> None:
+        assert body["operations"] is None and body["impact"] is None, body
+
+    created = world.create(who="contractor")  # API-CHG-001
+    hidden(created)
+    assert (created["title"], created["reason"], created["status"]) == ("C を足す", "顧客の追加要望", "DRAFT")
+    assert created["target_codes"] == [world.wp1_code]
+    url = world.url(f"/change-requests/{created['id']}")
+    patched = world.client.patch(url, json={"title": "C を足す（直した）"}, headers=world.h["contractor"])  # API-CHG-003
+    assert patched.status_code == 200, patched.text
+    hidden(patched.json())
+    assert patched.json()["title"] == "C を足す（直した）"
+    submitted = world.submit(created["id"], who="contractor")  # API-CHG-005
+    hidden(submitted)
+    assert submitted["status"] == "SUBMITTED" and submitted["approval_request_id"] is not None
+    withdrawn = world.client.post(f"{url}/withdraw", headers=world.h["contractor"])  # API-CHG-011
+    assert withdrawn.status_code == 200, withdrawn.text
+    hidden(withdrawn.json())
+    assert withdrawn.json()["status"] == "DRAFT"
+    resubmitted = world.submit(created["id"], who="contractor")
+    world.decide(resubmitted["approval_request_id"], "APPROVE")
+
+    # API-CHG-002：委託先は null、全てを読めるロールは値を受け取る（保存した影響と操作はそのまま）
+    seen = world.client.get(world.url("/change-requests"), headers=world.h["contractor"])
+    assert seen.status_code == 200, seen.text
+    assert [i["number"] for i in seen.json()["items"]] == [1]
+    hidden(seen.json()["items"][0])
+    assert seen.json()["items"][0]["status"] == "APPROVED"
+    full = world.client.get(world.url("/change-requests"), headers=world.h["viewer"]).json()["items"][0]
+    assert [op["op"] for op in full["operations"]] == ["add_activity", "add_dependency"]
+    assert full["impact"]["project_finish"]["shift_days"] == 2
+
+    applied = world.apply(created["id"], who="contractor")  # API-CHG-006
+    hidden(applied["change_request"])
+    assert applied["change_request"]["status"] == "APPLIED"
+    assert applied["scope_baseline"]["version"] == 2  # 反映そのものは今どおり（版 1 は WBS の承認）
+    world.session.expire_all()
+    stored = world.session.get(ChangeRequest, created["id"])
+    assert stored is not None and stored.impact is not None and len(stored.operations) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +605,30 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert project["wbs_status"] == "BASELINED"
     again = world.apply(draft["id"], expect=409)
     assert again["error"]["code"] == "INVALID_STATE"
+
+
+def test_apply_refuses_requested_start_before_project_start(world: World) -> None:
+    """API-CHG-006：反映した後の活動の希望開始日がプロジェクトの開始日（2026-12-01）より前になるなら 422
+    ``BEFORE_PROJECT_START`` で何も書かない（5.5・CR-018）。新しい活動は変更内容の ``ref`` で指す。
+    """
+    world.baseline_wbs()
+    approved = world.approved(operations=[
+        {"op": "add_activity", "wp_code": world.wp1_code, "name": "C", "duration_days": 2, "estimate_hours": 16,
+         "ref": "c", "requested_start": "2026-11-30"},
+        {"op": "update_activity", "activity_id": world.b, "fields": {"requested_start": "2026-11-27"}},
+        {"op": "update_activity", "activity_id": world.a, "fields": {"requested_start": "2026-12-01"}},  # ちょうどは通す
+    ])
+    activities_before, scopes_before = world.count(Activity), world.count(ScopeBaseline)
+    refused = world.apply(approved["id"], expect=422)
+    assert refused["error"]["code"] == "BEFORE_PROJECT_START"
+    assert [(d["activity_id"], d["ref"], d["name"], d["requested_start"], d["project_start"])
+            for d in refused["error"]["details"]] == [
+        (world.b, None, "B", "2026-11-27", "2026-12-01"), (None, "c", "C", "2026-11-30", "2026-12-01")]
+    assert (world.count(Activity), world.count(ScopeBaseline)) == (activities_before, scopes_before)
+    world.session.expire_all()
+    b, stored = world.session.get(Activity, world.b), world.session.get(ChangeRequest, approved["id"])
+    assert b is not None and b.requested_start is None
+    assert stored is not None and stored.status == "APPROVED"
 
 
 def test_apply_adds_first_level_element_without_reusing_numbers(world: World) -> None:

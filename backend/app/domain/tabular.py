@@ -3,7 +3,9 @@
 - 列の定義（6.3）：target ごとの列（この順）を ``COLUMNS`` に持つ。1 行目が見出し、2 行目からがデータ。
   日付は ``YYYY-MM-DD``、工数は人時の小数（2 桁まで）、マイルストーンは ``0``/``1``、複数の値は ``;`` 区切り
 - 変換：6.3 の 1 行（``WbsRow``・``ActivityRow``・``TimeEntryRow``）↔ 文字列のセルの並び（``export_grid``・取込の各関数）。
-  CSV（UTF-8 の BOM 付き・カンマ区切り）は ``encode_csv``・``decode_csv``。xlsx のセルの値（数・日付・真偽）は ``cell_text`` で
+  CSV（UTF-8 の BOM 付き・カンマ区切り）は ``encode_csv``・``decode_csv``。表計算ソフトが式として読まないよう、CSV の出力では
+  ``=``・``+``・``-``・``@``・タブ・復帰・``'`` で始まるセルの先頭へ ``'`` を 1 つ足し、取込では先頭の ``'`` の次の文字がそれらの
+  ときに ``'`` を 1 つ外す（往復で一致する。6.3・CR-019）。xlsx のセルの値（数・日付・真偽）は ``cell_text`` で
   同じ文字列に直す（xlsx のファイルの読み書きは外部のライブラリが要るので、この層では行わない。1.3 の「標準ライブラリのみ」）
 - 行ごとの検査：見出し、必須、形式（日付・整数・数・0/1・区分）、範囲（負の値・上限・小数 3 桁）、文字数、
   照合キーの重複、参照先（WBS ID・ログインID・活動ID）の有無。誤りは ``{行, 列, コード, メッセージ}``（``ImportIssue``）で全件を返す
@@ -43,6 +45,9 @@ from app.domain.wbs_rules import ActivityRef, HierarchyIssue, HierarchyIssueCode
 CSV_ENCODING: Final = "utf-8-sig"
 CSV_DELIMITER: Final = ","
 CSV_LINE_TERMINATOR: Final = "\r\n"
+# 6.3（CR-019）：表計算ソフトが式として読む先頭の文字。CSV の出力ではこれで始まるセルの先頭へ CSV_FORMULA_ESCAPE を足す
+CSV_FORMULA_TRIGGERS: Final = frozenset({"=", "+", "-", "@", "\t", "\r", "'"})
+CSV_FORMULA_ESCAPE: Final = "'"
 # 6.3：先行の活動ID・担当者のログインIDの区切り
 LIST_SEPARATOR: Final = ";"
 # 見出しの行の行番号（データは次の行から）
@@ -126,6 +131,8 @@ class ImportIssueCode(StrEnum):
     ACTIVITY_NOT_ON_WORK_PACKAGE = "ACTIVITY_NOT_ON_WORK_PACKAGE"
     # 依存の循環（RULE-SCH-001）
     SCHEDULE_CYCLE = "SCHEDULE_CYCLE"
+    # 希望開始日がプロジェクトの開始日より前（5.5・CR-018。開始日はサービス層が DB から読んで判定する）
+    BEFORE_PROJECT_START = "BEFORE_PROJECT_START"
     # 実績工数の入力検査（RULE-EFF-005）
     NOT_ASSIGNED = "NOT_ASSIGNED"
     LOCKED_DATE = "LOCKED_DATE"
@@ -311,11 +318,24 @@ def export_grid(target: TabularTarget | str, rows: Iterable[WbsRow | ActivityRow
     return grid
 
 
+def _escape_formula(cell: str) -> str:
+    """式として読まれる文字で始まるセルの先頭へ ``'`` を 1 つ足す（6.3・CR-019）。"""
+    return CSV_FORMULA_ESCAPE + cell if cell[:1] in CSV_FORMULA_TRIGGERS else cell
+
+
+def _unescape_formula(cell: str) -> str:
+    """先頭の ``'`` の次の文字が式として読まれる文字なら、``'`` を 1 つ外す（``_escape_formula`` の逆。6.3・CR-019）。"""
+    return cell[1:] if cell[:1] == CSV_FORMULA_ESCAPE and cell[1:2] in CSV_FORMULA_TRIGGERS else cell
+
+
 def encode_csv(grid: Iterable[Sequence[str]]) -> bytes:
-    """表を CSV（UTF-8 の BOM 付き・カンマ区切り・改行は CRLF・必要なセルだけ引用符）のバイト列にする（6.3）。"""
+    """表を CSV（UTF-8 の BOM 付き・カンマ区切り・改行は CRLF・必要なセルだけ引用符）のバイト列にする（6.3）。
+
+    ``=``・``+``・``-``・``@``・タブ・復帰・``'`` で始まるセルは先頭へ ``'`` を 1 つ足す（式にしない。CR-019）。
+    """
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, delimiter=CSV_DELIMITER, lineterminator=CSV_LINE_TERMINATOR, quoting=csv.QUOTE_MINIMAL)
-    writer.writerows(grid)
+    writer.writerows([_escape_formula(cell) for cell in row] for row in grid)
     return buffer.getvalue().encode(CSV_ENCODING)
 
 
@@ -323,6 +343,7 @@ def decode_csv(data: bytes) -> list[list[str]]:
     """CSV のバイト列を表にする。先頭の BOM は外す（BOM の無い UTF-8 も読む。A-34）。
 
     UTF-8 として読めない・引用符が閉じていないときは ``TabularFileError``（行は誤りのあった行）。
+    先頭の ``'`` の次の文字が ``=``・``+``・``-``・``@``・タブ・復帰・``'`` のセルは ``'`` を 1 つ外す（``encode_csv`` の逆。CR-019）。
     """
     try:
         text = data.decode(CSV_ENCODING)
@@ -335,7 +356,7 @@ def decode_csv(data: bytes) -> list[list[str]]:
     grid: list[list[str]] = []
     try:
         for record in reader:
-            grid.append(record)
+            grid.append([_unescape_formula(cell) for cell in record])
     except csv.Error as exc:
         row = len(grid) + 1
         raise TabularFileError(

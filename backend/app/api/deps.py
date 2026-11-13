@@ -88,6 +88,16 @@ def get_login_lock_policy(request: Request) -> LoginLockPolicy:
     )
 
 
+def get_import_max_bytes(request: Request) -> int:
+    """取込のファイルの大きさの上限（バイト。設定の ``PMT_IMPORT_MAX_BYTES``。6.3・CR-019）。"""
+    return int(request.app.state.settings.import_max_bytes)
+
+
+def get_import_max_rows(request: Request) -> int:
+    """取込のファイルの行の上限（見出しを除く。設定の ``PMT_IMPORT_MAX_ROWS``。6.3・CR-019）。"""
+    return int(request.app.state.settings.import_max_rows)
+
+
 def get_password_min_length(request: Request) -> int:
     """パスワードの最小の長さ（設定の ``PMT_PASSWORD_MIN_LENGTH``。NFR-04）。"""
     return int(request.app.state.settings.password_min_length)

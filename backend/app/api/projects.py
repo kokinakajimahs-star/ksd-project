@@ -154,7 +154,8 @@ def update_project(
     """API-PRJ-004 基本情報・設定を更新する。
 
     権限は project.manage。載せた項目だけを変える（``settings`` は載せた項目だけを重ねる）。開始日を変えたら日程を再計算する。
-    コードの重複は 409 ``DUPLICATE_PROJECT_CODE``。
+    コードの重複は 409 ``DUPLICATE_PROJECT_CODE``。新しい開始日より前の希望開始日の活動が残る開始日の変更は
+    422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     # 載せた項目だけ（入れ子の settings も載せた項目だけになる）
     changes = body.model_dump(exclude_unset=True)

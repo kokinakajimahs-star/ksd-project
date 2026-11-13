@@ -1,12 +1,13 @@
 """表形式の入出力の API の試験（設計書 6.2 の API-INT-001・002、6.3、9 章。要求仕様書 INT-01・BR-02）。
 
 SQLite の一時ファイルの DB と TestClient で、正常系（出力・往復の一致・追加・更新・移動・日程の再計算・実績工数）と、
-401・403・409・422・400 と ``dry_run`` を確かめる。
+401・403・409・422・400 と ``dry_run``、取込の大きさ・行の上限（CR-019）を確かめる。
 WBS は 成果物 D（1.0）の下に WP1（1.1。活動 A・B）と WP2（1.2）、管理 M（2.0）の下に WP3（2.1。活動 C。委託先の割当）。
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -18,9 +19,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
+from starlette.requests import Request
+from starlette.types import Message
 
+from app.api.io import read_import_file
 from app.domain.tabular import ACTIVITY_COLUMNS, TIME_ENTRY_COLUMNS, WBS_COLUMNS, decode_csv, encode_csv
 from app.infra.security import generate_token, hash_token
 from app.models.chg import AuditLog
@@ -29,6 +33,7 @@ from app.models.eff import Assignment, TimeEntry
 from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency
+from app.errors import AppError
 from app.models.wbs import WbsDictionaryEntry, WbsElement, WbsNumberingRule
 from app.services.clock import get_now
 
@@ -258,6 +263,35 @@ def test_export_xlsx_keeps_cells_as_text(world: World) -> None:
     assert "<f>" not in sheet_xml and "<f " not in sheet_xml  # 式のセルが無い
 
 
+def test_export_csv_escapes_formula_cells_and_import_restores_them(world: World, db_session: Session) -> None:
+    """API-INT-001・002：CSV の出力は =・+・-・@・タブ・' で始まるセルの先頭へ ' を 1 つ足し（表計算ソフトが式として読まない）、
+    出力したファイルを取り込むと ' を外して変更は 0 件（往復の一致。6.3・CR-019）。xlsx は文字列の型で書き、' を足さない。
+    """
+    names = ("=1+1", "+加算", "-減算", "@参照", "\tタブ", "'引用")
+    for name in names:
+        world.element(name, world.d, "WORK_PACKAGE")
+    db_session.add(TimeEntry(user_id=world.users["contractor"].id, activity_id=world.c, work_date=date(2026, 12, 2),
+                             hours=Decimal("1"), note="=cmd|' /C calc'!A0"))
+    db_session.commit()
+
+    wbs = world.export("wbs").content
+    text = wbs.decode("utf-8-sig")
+    for cell in ("'=1+1", "'+加算", "'-減算", "'@参照", "'\tタブ", "''引用"):
+        assert f",WORK_PACKAGE,{cell}," in text
+    added = slice(4, 4 + len(names))  # 成果物 1.0 の下の 1.3〜（見出し・1.0・1.1・1.2 の後）
+    assert [row[3] for row in decode_csv(wbs)[added]] == list(names)
+    body = world.load("wbs", wbs)
+    assert (body["created"], body["updated"], body["unchanged"], body["changes"]) == (0, 0, 5 + len(names), [])
+
+    entries = world.export("time-entries").content
+    assert ",'=cmd|' /C calc'!A0" in entries.decode("utf-8-sig")
+    body = world.load("time-entries", entries)
+    assert (body["unchanged"], body["changes"]) == (1, [])
+
+    grid = xlsx_grid(world.export("wbs", "xlsx").content)
+    assert [row[3] for row in grid[added]] == list(names)
+
+
 def test_export_permission_is_data_export(world: World) -> None:
     """API-INT-001：権限は data.export（9.2：PM・PLANNER・PROGRESS_MANAGER・VIEWER）。無ければ 403、未認証は 401。"""
     world.export("wbs", who="viewer")
@@ -265,6 +299,27 @@ def test_export_permission_is_data_export(world: World) -> None:
         world.export("wbs", who=who, expect=403)
     response = world.client.get(world.url("/export"), params={"target": "wbs"})
     assert response.status_code == 401
+
+
+def test_export_time_entries_also_requires_effort_view(world: World, db_session: Session) -> None:
+    """API-INT-001：実績工数（``time-entries``）の出力は data.export に加えて effort.view も要る（設計書 1.3・CR-015）。
+
+    VIEWER は data.export を持ち effort.view を持たない（9.2）ので、WBS・活動は出せるが実績工数は 403。
+    effort.view を足せば出せる。両方を持つ PLANNER は今どおり出せる。
+    """
+    db_session.add(TimeEntry(user_id=world.users["planner"].id, activity_id=world.a, work_date=date(2026, 12, 2),
+                             hours=Decimal(3), note="他人の実績"))
+    db_session.commit()
+    world.export("wbs", who="viewer")
+    world.export("activities", who="viewer")
+    for fmt in ("csv", "xlsx"):
+        refused = world.export("time-entries", fmt, who="viewer", expect=403)
+        assert refused.json()["error"]["code"] == "FORBIDDEN"
+        assert "他人の実績" not in refused.text
+    assert world.grid("time-entries")[1:] == [[lid("planner"), str(world.a), "2026-12-02", "3.00", "他人の実績"]]
+    world.grant("VIEWER", "effort.view")
+    assert world.grid("time-entries", who="viewer")[1:] == [
+        [lid("planner"), str(world.a), "2026-12-02", "3.00", "他人の実績"]]
 
 
 def test_export_rejects_unknown_target_and_format(world: World) -> None:
@@ -278,13 +333,18 @@ def test_export_rejects_unknown_target_and_format(world: World) -> None:
 
 
 def test_export_for_contractor_is_limited_to_own_assignments(world: World, db_session: Session) -> None:
-    """API-INT-001：委託先だけで読む利用者は、自分の割当の活動とその WBS の経路だけ（RULE-AUTH-001・9.2 の注記）。"""
+    """API-INT-001：委託先だけで読む利用者は、自分の割当の活動とその WBS の経路だけ（RULE-AUTH-001・9.2 の注記）。
+
+    実績工数は effort.view も要る（CR-015）ので、data.export だけでは 403。effort.view を足しても自分の割当の範囲だけ。
+    """
     world.grant("CONTRACTOR", "data.export")
     db_session.add(TimeEntry(user_id=world.users["planner"].id, activity_id=world.a, work_date=date(2026, 12, 2),
                              hours=Decimal(1)))
     db_session.commit()
     assert [r[0] for r in world.grid("wbs", who="contractor")[1:]] == ["2.0", "2.1"]
     assert [r[0] for r in world.grid("activities", who="contractor")[1:]] == [str(world.c)]
+    world.export("time-entries", who="contractor", expect=403)
+    world.grant("CONTRACTOR", "effort.view")
     assert world.grid("time-entries", who="contractor")[1:] == []
 
 
@@ -507,6 +567,115 @@ def test_import_xlsx_reads_typed_cells(world: World) -> None:
     assert (a.requested_start, a.duration_days, a.estimate_hours) == (date(2026, 12, 7), 4, Decimal("6.5"))
 
 
+def xlsx_of(rows: list[list[str]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    for row in rows:
+        sheet.append(row)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def limit_import(app: FastAPI, **limits: int) -> None:
+    """取込の上限（``PMT_IMPORT_MAX_BYTES``・``PMT_IMPORT_MAX_ROWS``）をこの試験の app だけで小さくする。"""
+    app.state.settings = app.state.settings.model_copy(update=limits)
+
+
+def post_import(world: World, content: bytes, *, fmt: str = "csv", dry_run: bool = False) -> Any:
+    media = "text/csv" if fmt == "csv" else XLSX
+    return world.client.post(world.url("/import"), params={"target": "wbs", "format": fmt, "dry_run": str(dry_run).lower()},
+                             content=content, headers={**world.h["planner"], "Content-Type": media})
+
+
+def test_import_file_over_max_bytes_is_400_and_writes_nothing(world: World, app: FastAPI) -> None:
+    """API-INT-002：ファイルが ``PMT_IMPORT_MAX_BYTES`` を超えれば 400 ``VALIDATION_ERROR`` で何も書かない（dry_run でも。CR-019）。
+    上限ちょうどは読む。"""
+    grid = world.grid("wbs")
+    grid[2][3] = "WP1（改）"
+    for fmt, content in (("csv", csv_of(grid)), ("xlsx", xlsx_of(grid))):
+        limit_import(app, import_max_bytes=len(content) - 1)
+        for dry_run in (True, False):
+            response = post_import(world, content, fmt=fmt, dry_run=dry_run)
+            assert response.status_code == 400, response.text
+            error = response.json()["error"]
+            assert error["code"] == "VALIDATION_ERROR"
+            assert [d["loc"] for d in error["details"]] == [["body"]]
+            assert str(len(content) - 1) in error["details"][0]["message"]
+        assert world.elements()["WP1"].name == "WP1"
+
+    content = csv_of(grid)
+    limit_import(app, import_max_bytes=len(content))
+    response = post_import(world, content)
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] is True and "WP1（改）" in world.elements()
+
+
+def test_import_rows_over_max_rows_is_400_and_writes_nothing(world: World, app: FastAPI) -> None:
+    """API-INT-002：見出しを除く行が ``PMT_IMPORT_MAX_ROWS`` を超えれば 400 ``VALIDATION_ERROR`` で何も書かない
+    （CSV・xlsx、dry_run でも。CR-019）。上限ちょうどは読む。"""
+    grid = world.grid("wbs")
+    grid[2][3] = "WP1（改）"
+    rows = len(grid) - 1
+    limit_import(app, import_max_rows=rows - 1)
+    for fmt, content in (("csv", csv_of(grid)), ("xlsx", xlsx_of(grid))):
+        for dry_run in (True, False):
+            response = post_import(world, content, fmt=fmt, dry_run=dry_run)
+            assert response.status_code == 400, response.text
+            error = response.json()["error"]
+            assert error["code"] == "VALIDATION_ERROR"
+            assert [d["loc"] for d in error["details"]] == [["body"]]
+            assert str(rows - 1) in error["details"][0]["message"]
+    assert world.elements()["WP1"].name == "WP1"
+
+    limit_import(app, import_max_rows=rows)
+    preview = post_import(world, xlsx_of(grid), fmt="xlsx", dry_run=True)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["ok"] is True and preview.json()["updated"] == 1
+    response = post_import(world, csv_of(grid))
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] is True and "WP1（改）" in world.elements()
+
+
+def test_import_file_reader_stops_reading_at_max_bytes() -> None:
+    """API-INT-002：本体は ``PMT_IMPORT_MAX_BYTES`` を超えた時点で読むのを止める（残りを受け取らない。CR-019）。
+    ``Content-Length`` が上限を超えていれば 1 度も受け取らない。上限ちょうどは全て読む。"""
+
+    def run(chunks: list[bytes], max_bytes: int, headers: list[tuple[bytes, bytes]]) -> tuple[bytes | AppError, int]:
+        received = 0
+
+        async def receive() -> Message:
+            nonlocal received
+            received += 1
+            index = received - 1
+            return {"type": "http.request", "body": chunks[index], "more_body": index + 1 < len(chunks)}
+
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": headers}, receive)
+        try:
+            result: bytes | AppError = asyncio.run(read_import_file(request, max_bytes=max_bytes))
+        except AppError as exc:
+            result = exc
+        return result, received
+
+    chunks = [b"x" * 10] * 100
+    too_large, received = run(chunks, 25, [])
+    assert isinstance(too_large, AppError) and (too_large.status_code, too_large.code) == (400, "VALIDATION_ERROR")
+    assert received == 3
+
+    declared, received = run(chunks, 25, [(b"content-length", b"1000")])
+    assert isinstance(declared, AppError) and declared.code == "VALIDATION_ERROR"
+    assert received == 0
+
+    understated, received = run(chunks, 25, [(b"content-length", b"20")])
+    assert isinstance(understated, AppError) and understated.code == "VALIDATION_ERROR"
+    assert received == 3
+
+    exact, received = run([b"x" * 10, b"y" * 10, b"z" * 5], 25, [(b"content-length", b"25")])
+    assert exact == b"x" * 10 + b"y" * 10 + b"z" * 5
+    assert received == 3
+
+
 # ---------------------------------------------------------------------------
 # API-INT-002 取り込む：activities
 # ---------------------------------------------------------------------------
@@ -565,6 +734,38 @@ def test_import_activities_rejects_assignee_who_is_not_a_member(world: World) ->
     grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "", "5", "0", "", "", lid("outsider")]]
     body = world.load("activities", csv_of(grid), dry_run=True)
     assert [(i["row"], i["code"]) for i in body["issues"]] == [(2, "NOT_FOUND")]
+
+
+def test_import_activities_rejects_requested_start_before_project_start(world: World, db_session: Session) -> None:
+    """API-INT-002：書く希望開始日がプロジェクトの開始日（2026-12-01）より前になる行は ``BEFORE_PROJECT_START``（5.5・CR-018）。
+    6.3 の検査の誤り（``{行, 列, コード, メッセージ}``）として該当する行の全てを返し、何も書かない。開始日ちょうどと、今の値のまま
+    （この版より前に保存された、開始日より前の希望開始日）の行は拒まない。
+    """
+    db_session.execute(update(Activity).where(Activity.id == world.c).values(requested_start=date(2026, 11, 27)))
+    db_session.commit()
+    grid = [
+        list(ACTIVITY_COLUMNS),
+        [str(world.a), "1.1", "A", "2026-11-30", "5", "0", "", "", ""],
+        [str(world.b), "1.1", "B", "2026-12-01", "3", "0", "", "", ""],
+        ["", "1.2", "新", "2026-11-27", "1", "0", "", "", ""],
+        [str(world.c), "2.1", "C 改", "2026-11-27", "4", "0", "", "", lid("contractor")],
+    ]
+    expected = [(2, "希望開始日", "BEFORE_PROJECT_START"), (4, "希望開始日", "BEFORE_PROJECT_START")]
+    dry = world.load("activities", csv_of(grid), dry_run=True)
+    assert [(i["row"], i["column"], i["code"]) for i in dry["issues"]] == expected
+    assert dry["issues"][0]["message"] == "希望開始日 2026-11-30 がプロジェクトの開始日 2026-12-01 より前です"
+    body = world.load("activities", csv_of(grid), expect=422)
+    assert body["error"]["code"] == "IMPORT_INVALID"
+    assert [(d["row"], d["column"], d["code"]) for d in body["error"]["details"]] == expected
+    a, b, c = world.activity(world.a), world.activity(world.b), world.activity(world.c)
+    assert (a.requested_start, b.requested_start, c.name, c.duration_days) == (None, None, "C", 2)
+    assert db_session.scalar(select(func.count()).select_from(Activity).where(Activity.project_id == world.pid)) == 3
+
+    # 誤りの行を直せば、今の値のまま（11-27）の C は名称・期間を変えて書ける
+    written = world.load("activities", csv_of([grid[0], grid[4]]))
+    assert written["written"] is True
+    c = world.activity(world.c)
+    assert (c.name, c.duration_days, c.requested_start) == ("C 改", 4, date(2026, 11, 27))
 
 
 # ---------------------------------------------------------------------------

@@ -369,6 +369,41 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
     expect(screen.queryByRole("button", { name: "反映する（再基準化）" })).toBeNull();
   });
 
+  it("委託先には変更内容・影響分析が null で届くので、壊れずに表示しない旨を出し、影響分析・直すを出さない（CR-016）", async () => {
+    const contractor = makeMe({
+      user: makeUser({ id: 5, is_system_admin: false }),
+      system_permissions: [],
+      projects: [
+        { project_id: 3, roles: ["CONTRACTOR"], permissions: ["project.view", "change.create"], view_level: "OWN_ASSIGNMENTS" },
+      ],
+    });
+    const hiddenDraft = makeChangeRequest({ operations: null, impact: null });
+    const hiddenSubmitted: ChangeRequest = { ...SUBMITTED, operations: null, impact: null };
+    const { calls } = mockApi(
+      routes(contractor, {
+        [`GET ${BASE}/change-requests`]: () => jsonResponse(200, page([hiddenDraft, hiddenSubmitted])),
+      }),
+    );
+    renderAt();
+
+    await openRequest(1);
+    const draft = screen.getByRole("heading", { name: /^変更要求 #1「/ }).closest("section")!;
+    expect(draft).toHaveTextContent("顧客の追加要望");
+    expect(within(draft).getByText("変更内容と影響分析は表示しない（委託先には返さない）")).toBeInTheDocument();
+    expect(within(draft).queryByRole("list", { name: "変更内容" })).toBeNull();
+    expect(within(draft).queryByRole("button", { name: "影響分析を流す" })).toBeNull();
+    // 直すと変更内容を空で送ってしまうので出さない。提出はできる
+    expect(within(draft).queryByRole("button", { name: "直す" })).toBeNull();
+    expect(within(draft).getByRole("button", { name: "提出する" })).toBeInTheDocument();
+
+    await openRequest(2);
+    const submitted = screen.getByRole("heading", { name: /^変更要求 #2「/ }).closest("section")!;
+    expect(within(submitted).getByText("変更内容と影響分析は表示しない（委託先には返さない）")).toBeInTheDocument();
+    expect(within(submitted).queryByRole("region", { name: "提出のときの影響分析" })).toBeNull();
+    expect(within(submitted).getByRole("button", { name: "提出を取り下げる" })).toBeInTheDocument();
+    expect(calls.filter((c) => c.path.endsWith("/impact"))).toHaveLength(0);
+  });
+
   it("提出済みは承認待ち一覧へ案内し、提出のときの影響分析を出す", async () => {
     mockApi(routes(meWith(PM)));
     renderAt();

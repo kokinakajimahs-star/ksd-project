@@ -7,6 +7,9 @@
 - 採番・移動・改番は RULE-WBS-001・002（``app.domain.wbs_code``）、木の整合は RULE-WBS-003、集計は RULE-EST-001、
   検査は RULE-WBS-004・005、責任分担表は RULE-WBS-007、横断照会は RULE-WBS-008、承認は RULE-WBS-006 を使う
 - 承認申請（API-WBS-018〜020）は WBS と変更要求で共通の表（``approval_requests``）。判断は wbs.approve か change.approve
+- 要素を足す・変える（API-WBS-002・003）で自分の見積を置いた・変えたら、同じトランザクションで見積の記録（``estimate_records``）を
+  1 行足す（API-EST-001 と同じ形。単位は人時、手法・前提・参照資料は空。EST-08・CR-017）。見積を空にしたときは記録しない
+  （記録の ``hours`` は空にできない。4.1）
 
 **別の群の表を読む口・書く口**（どれも ``app.main.create_app`` で ``app.state`` に載せる。A-17・A-18）：
 
@@ -45,7 +48,16 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ViewLevel, VisibleScope, authorize, own_assignment_scope, project_view_level
-from app.domain.estimate import ActivityEstimate, EstimateError, EstimateRollup, WbsNode, rollup_estimates
+from app.domain.estimate import (
+    ActivityEstimate,
+    EstimateError,
+    EstimateRollup,
+    InputUnit,
+    TargetType,
+    WbsNode,
+    record_estimate,
+    rollup_estimates,
+)
 from app.domain.wbs_code import (
     CodedElement,
     CodeHistoryEntry,
@@ -98,7 +110,7 @@ from app.models.chg import ChangeRequest, CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import TimeEntry, VarianceNote
 from app.models.est import EstimateRecord
-from app.models.prj import Project, ProjectMember, ScopeItem
+from app.models.prj import HOURS_PER_DAY_DEFAULT, Calendar, Project, ProjectMember, ScopeItem
 from app.models.sch import Activity
 from app.models.wbs import (  # API 層は as を付けた型をここから取る（1.3：API はモデルを直接 import しない）
     COMMENT_STATUS_INITIAL,
@@ -442,6 +454,34 @@ def mark_wbs_edited(project: Project) -> None:
     project.wbs_status = transition.to_status.value
 
 
+def project_hours_per_day(session: Session, project_id: int) -> Decimal:
+    """人日→人時の換算に使う 1 日の稼働時間（PRJ-04）。カレンダーの行が無いプロジェクトは 4.1 の既定。
+
+    見積の記録を足す口（API-EST-001・WBS の要素・取込）で共通に使う（``app.services.estimate`` が import するのでここに置く）。
+    """
+    value = session.scalar(select(Calendar.hours_per_day).where(Calendar.project_id == project_id))
+    return Decimal(HOURS_PER_DAY_DEFAULT if value is None else value)
+
+
+def _add_own_estimate_record(
+    session: Session, element: WbsElement, hours: Decimal, actor: User, now: datetime
+) -> None:
+    """要素の自分の見積を置いた・変えた記録を 1 行足す（EST-08・CR-017）。
+
+    API-EST-001 と同じ形で、単位は人時（入力の値＝人時）、手法・前提・参照資料は空。要素の ID が要るので flush の後に呼ぶ。
+    """
+    record = record_estimate(
+        project_id=element.project_id, target_type=TargetType.ELEMENT, target_id=element.id, input_value=hours,
+        input_unit=InputUnit.HOUR, hours_per_day=project_hours_per_day(session, element.project_id),
+        entered_by=actor.id, entered_at=now,
+    )
+    session.add(EstimateRecord(
+        project_id=record.project_id, target_type=record.target_type.value, target_id=record.target_id,
+        hours=record.hours, input_value=record.input_value, input_unit=record.input_unit.value, method=None,
+        assumptions=None, references=None, entered_by=record.entered_by, entered_at=record.entered_at,
+    ))
+
+
 def _check_responsible(session: Session, project_id: int, user_id: int | None, loc: list[Any]) -> None:
     """責任者はそのプロジェクトのメンバーである有効な利用者（WBS-10）。そうでなければ 400。"""
     if user_id is None:
@@ -664,10 +704,12 @@ def add_element(
     own_estimate_hours: Decimal | None = None,
     responsible_user_id: int | None = None,
     responsible_team: str | None = None,
+    now: datetime,
 ) -> WbsElement:
     """要素を足す（wbs.edit）。順番と WBS ID は RULE-WBS-002 の新規（親の last_child_seq + 1）と RULE-WBS-001 で決める。
 
     親がこのプロジェクトに無ければ 400、WP の下に足すのは 422 ``WORK_PACKAGE_HAS_CHILDREN``（RULE-WBS-003）。表示順は兄弟の末尾。
+    自分の見積を置いたら見積の記録を 1 行足す（EST-08・CR-017。``now`` は記録の入力日時）。
     """
     context = _editing(session, access, actor, activities, project_id)
     parent = None
@@ -709,6 +751,9 @@ def add_element(
         parent.last_child_seq = code.parent_last_child_seq
     mark_wbs_edited(context.project)
     session.add(element)
+    if own_estimate_hours is not None:
+        session.flush()  # 記録の対象の ID を決める
+        _add_own_estimate_record(session, element, own_estimate_hours, actor, now)
     session.commit()
     return element
 
@@ -721,10 +766,14 @@ def update_element(
     project_id: int,
     element_id: int,
     changes: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> WbsElement:
     """名称・区分・責任者・担当チーム・自分の見積を変える（wbs.edit）。載せた列だけを変える。WBS ID は変えない。
 
     名称・区分の null は 400。区分を変えた後の木が RULE-WBS-003 に合わなければ 422（WP に子がある・活動のある要素を WP 以外にする）。
+    自分の見積が今と違う値になったら見積の記録を 1 行足す（EST-08・CR-017。``now`` は記録の入力日時）。同じ値を載せたとき・
+    空（null）にしたときは記録しない（記録の ``hours`` は空にできない。4.1）。
     """
     context = _editing(session, access, actor, activities, project_id)
     element = _element_of(context, element_id)
@@ -739,9 +788,13 @@ def update_element(
     if "kind" in changes:
         _ensure_tree([_node(e, kind=changes["kind"]) if e.id == element_id else _node(e) for e in context.elements],
                      context.activities)
+    new_hours = changes.get("own_estimate_hours")
+    estimate_changed = new_hours is not None and new_hours != element.own_estimate_hours
     for name, value in changes.items():
         setattr(element, name, value)
     mark_wbs_edited(context.project)
+    if estimate_changed:
+        _add_own_estimate_record(session, element, new_hours, actor, now)
     session.commit()
     return element
 

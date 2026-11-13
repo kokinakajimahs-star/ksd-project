@@ -162,6 +162,37 @@ def test_csv_round_trip_keeps_commas_quotes_and_newlines() -> None:
     assert decode_csv(encode_csv(grid)) == grid
 
 
+def test_csv_escapes_cells_read_as_formulas() -> None:
+    """RULE-INT-001：CSV の出力は =・+・-・@・タブ・復帰・' で始まるセルの先頭へ ' を 1 つ足す（表計算ソフトが式として読まない）。
+    途中にあるだけ・空のセルには足さない。取り込むと元の文字に戻る（6.3・CR-019）。
+    """
+    row = ["=1+1", "+1", "-1", "@SUM(A1)", "\tタブ", "\r復帰", "'引用", "''", "'", "a=b", "", "名称"]
+    data = encode_csv([row])
+    assert data.decode("utf-8-sig") == "'=1+1,'+1,'-1,'@SUM(A1),'\tタブ,\"'\r復帰\",''引用,''','',a=b,,名称\r\n"
+    assert decode_csv(data) == [row]
+
+
+def test_csv_import_removes_one_quote_only_before_formula_characters() -> None:
+    """RULE-INT-001：取込で外す ' は、先頭の ' の次の文字が =・+・-・@・タブ・復帰・' のときの 1 つだけ（6.3・CR-019）。
+    手で書いたファイルの '=… は =… として読み、次の文字がそれら以外の ' と途中の ' はそのまま読む。
+    """
+    data = "名称\r\n'=1+1\r\n'abc\r\na'=b\r\n'''x\r\n'\r\n'-\r\n".encode()
+    assert decode_csv(data) == [["名称"], ["=1+1"], ["'abc"], ["a'=b"], ["''x"], ["'"], ["-"]]
+
+
+def test_wbs_names_like_formulas_round_trip_without_changes() -> None:
+    """RULE-INT-001：式として読まれる文字で始まる名称・辞書の項目も、CSV の往復で変更は 0 件（6.3・CR-019）。"""
+    current = {
+        **WBS_NOW,
+        2: WbsRow("1.1", "1.0", WP, '=HYPERLINK("x")', "pm1", Decimal("16.00"), "+成果物", "-範囲", "@完了", "'前提"),
+        3: WbsRow("1.2", "1.0", WP, "'=ちょうど", None, None, None, None, "\t完了", None),
+    }
+    text = encode_csv(export_grid(TabularTarget.WBS, current.values())).decode("utf-8-sig")
+    assert "'=HYPERLINK" in text and "''=ちょうど" in text
+    plan = wbs_plan(decode_csv(text.encode("utf-8-sig")), current=current)
+    assert plan.ok and plan.changes == () and plan.unchanged == len(current)
+
+
 def test_decode_csv_reads_without_bom_and_rejects_non_utf8() -> None:
     """RULE-INT-001：BOM の無い UTF-8 は読み、UTF-8 でないバイト列は読めない行を示して拒む。"""
     assert decode_csv("ログインID,活動ID\r\nu1,10\r\n".encode()) == [["ログインID", "活動ID"], ["u1", "10"]]
