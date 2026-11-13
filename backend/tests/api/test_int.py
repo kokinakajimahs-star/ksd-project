@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.tabular import ACTIVITY_COLUMNS, TIME_ENTRY_COLUMNS, WBS_COLUMNS, decode_csv, encode_csv
@@ -591,6 +591,38 @@ def test_import_activities_rejects_assignee_who_is_not_a_member(world: World) ->
     grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "", "5", "0", "", "", lid("outsider")]]
     body = world.load("activities", csv_of(grid), dry_run=True)
     assert [(i["row"], i["code"]) for i in body["issues"]] == [(2, "NOT_FOUND")]
+
+
+def test_import_activities_rejects_requested_start_before_project_start(world: World, db_session: Session) -> None:
+    """API-INT-002：書く希望開始日がプロジェクトの開始日（2026-12-01）より前になる行は ``BEFORE_PROJECT_START``（5.5・CR-018）。
+    6.3 の検査の誤り（``{行, 列, コード, メッセージ}``）として該当する行の全てを返し、何も書かない。開始日ちょうどと、今の値のまま
+    （この版より前に保存された、開始日より前の希望開始日）の行は拒まない。
+    """
+    db_session.execute(update(Activity).where(Activity.id == world.c).values(requested_start=date(2026, 11, 27)))
+    db_session.commit()
+    grid = [
+        list(ACTIVITY_COLUMNS),
+        [str(world.a), "1.1", "A", "2026-11-30", "5", "0", "", "", ""],
+        [str(world.b), "1.1", "B", "2026-12-01", "3", "0", "", "", ""],
+        ["", "1.2", "新", "2026-11-27", "1", "0", "", "", ""],
+        [str(world.c), "2.1", "C 改", "2026-11-27", "4", "0", "", "", lid("contractor")],
+    ]
+    expected = [(2, "希望開始日", "BEFORE_PROJECT_START"), (4, "希望開始日", "BEFORE_PROJECT_START")]
+    dry = world.load("activities", csv_of(grid), dry_run=True)
+    assert [(i["row"], i["column"], i["code"]) for i in dry["issues"]] == expected
+    assert dry["issues"][0]["message"] == "希望開始日 2026-11-30 がプロジェクトの開始日 2026-12-01 より前です"
+    body = world.load("activities", csv_of(grid), expect=422)
+    assert body["error"]["code"] == "IMPORT_INVALID"
+    assert [(d["row"], d["column"], d["code"]) for d in body["error"]["details"]] == expected
+    a, b, c = world.activity(world.a), world.activity(world.b), world.activity(world.c)
+    assert (a.requested_start, b.requested_start, c.name, c.duration_days) == (None, None, "C", 2)
+    assert db_session.scalar(select(func.count()).select_from(Activity).where(Activity.project_id == world.pid)) == 3
+
+    # 誤りの行を直せば、今の値のまま（11-27）の C は名称・期間を変えて書ける
+    written = world.load("activities", csv_of([grid[0], grid[4]]))
+    assert written["written"] is True
+    c = world.activity(world.c)
+    assert (c.name, c.duration_days, c.requested_start) == ("C 改", 4, date(2026, 11, 27))
 
 
 # ---------------------------------------------------------------------------

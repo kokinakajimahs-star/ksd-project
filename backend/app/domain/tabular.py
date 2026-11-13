@@ -126,6 +126,8 @@ class ImportIssueCode(StrEnum):
     ACTIVITY_NOT_ON_WORK_PACKAGE = "ACTIVITY_NOT_ON_WORK_PACKAGE"
     # 依存の循環（RULE-SCH-001）
     SCHEDULE_CYCLE = "SCHEDULE_CYCLE"
+    # 希望開始日がプロジェクトの開始日より前（5.5・CR-018。開始日はサービス層が DB から読んで判定する）
+    BEFORE_PROJECT_START = "BEFORE_PROJECT_START"
     # 実績工数の入力検査（RULE-EFF-005）
     NOT_ASSIGNED = "NOT_ASSIGNED"
     LOCKED_DATE = "LOCKED_DATE"

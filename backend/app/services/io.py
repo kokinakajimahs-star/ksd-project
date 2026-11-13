@@ -12,7 +12,7 @@
   誤りのある取込（``dry_run`` でない）は 422 ``IMPORT_INVALID``（``details`` が ``{row, column, code, message}`` の配列）
 - 書くときは 1 つのトランザクションで、既存の API と同じ規則を当てる：WBS は RULE-WBS-002 の採番（``new_element_code``）・
   移動（``move_element``。ID は変えない）・RULE-WBS-006 の EDIT（承認待ちは 409）、活動は希望開始日を稼働日へ寄せて日程を計算し直す
-  （RULE-SCH-002・003）、見積の値の変更は見積の記録（``estimate_records``。EST-08）を足す、実績工数の 0 時間は行を持たない
+  （RULE-SCH-002・003。寄せた希望開始日が今と違いプロジェクトの開始日より前なら検査の誤り ``BEFORE_PROJECT_START``。CR-018）、見積の値の変更は見積の記録（``estimate_records``。EST-08）を足す、実績工数の 0 時間は行を持たない
 - 書き込みは ORM を通すので変更履歴（``audit_logs``）に残る（6.1。A-37。割当の置き換えの一括 DELETE は A-37 の限界のとおり記録されない）
 
 詳細と、6.2・6.3 に定めの無かったことの判断は docs/decisions/ASSUMPTIONS.md A-39。
@@ -76,7 +76,14 @@ from app.models.wbs import WbsCodeHistory, WbsDictionaryEntry, WbsElement
 from app.services.auth import authorize_project
 from app.services.estimate import project_hours_per_day, visible_scope
 from app.services.project_access import ProjectAccess
-from app.services.schedule import Plan, ScheduleLinks, calculate_and_store, load_plan, resolve_activity_dates
+from app.services.schedule import (
+    Plan,
+    ScheduleLinks,
+    calculate_and_store,
+    load_plan,
+    resolve_activity_dates,
+    starts_before_project,
+)
 from app.services.wbs import (
     ActivitiesReader,
     WbsContext,
@@ -718,6 +725,16 @@ def _import_activities(
             if login not in assignable:
                 issues.append(ImportIssue(change.line, column, ImportIssueCode.NOT_FOUND,
                                           f"ログインID {login!r} はプロジェクトのメンバーである有効な利用者でない"))
+    # 書く希望開始日（次の稼働日へ寄せた値。_write_activities と同じ）が今と違い、プロジェクトの開始日より前なら拒む（5.5・CR-018）
+    project_start = plan.project.start_date
+    for change in result.changes:
+        if change.action is ChangeAction.UPDATE and not set(change.changed) & set(_SCHEDULE_COLUMNS):
+            continue
+        start = _written_start(plan, change)
+        old = None if change.activity_id is None else plan.activity_by_id[change.activity_id].requested_start
+        if start is not None and starts_before_project(project_start, start, old):
+            issues.append(ImportIssue(change.line, ACTIVITY_COLUMNS[3], ImportIssueCode.BEFORE_PROJECT_START,
+                                      f"希望開始日 {start.isoformat()} がプロジェクトの開始日 {project_start.isoformat()} より前です"))
     if issues:
         return _rejected(target, file_format, dry_run, issues)
     if any(_changes_estimate(c.action, c.changed, c.row.estimate_hours, "見積（人時）") for c in result.changes):
@@ -737,6 +754,14 @@ def _import_activities(
     return ImportResult(target, file_format, dry_run, True, (),
                         tuple(ChangeSummary(c.line, c.action.value, keys[c.line], c.changed) for c in result.changes),
                         result.unchanged)
+
+
+def _written_start(plan: Plan, change: ActivityChange) -> date | None:
+    """取込の行から書く希望開始日（次の稼働日へ寄せる。API-SCH-002・003 と同じ。BR-04）。"""
+    row = change.row
+    start, _ = resolve_activity_dates(plan.calendar, start=row.requested_start, finish=None,
+                                      duration=row.duration_days, is_milestone=row.is_milestone)
+    return start
 
 
 def _write_activities(

@@ -193,6 +193,7 @@ def apply_change_request(
 
     権限は change.apply。APPROVED → APPLIED（それ以外は 409）。変更内容を本計画へ当て（RULE-CHG-001）、日程を計算し直し、
     スコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る（RULE-CHG-004。旧版は残す）。
+    活動の希望開始日が今と違う値でプロジェクトの開始日より前になるなら何も書かずに 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = change_service.apply_change_request(session, access, user, project_id, change_request_id, now=now)
     return AppliedOut(

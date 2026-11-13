@@ -564,6 +564,33 @@ def test_changing_start_date_recalculates_schedule(app: FastAPI, client: TestCli
     assert recorder.calls == [world.pid]
 
 
+def test_start_date_after_remaining_requested_start_is_422(client: TestClient, db_session: Session, world: World) -> None:
+    """API-PRJ-004：新しい開始日より前の希望開始日の活動が残る開始日の変更は 422 ``BEFORE_PROJECT_START`` で、何も書かない
+    （5.5・CR-018）。希望開始日ちょうど・それより前への変更と、希望開始日の無い活動は拒まない。
+    """
+    url = f"/api/v1/projects/{world.pid}"
+    wp = WbsElement(project_id=world.pid, kind="WORK_PACKAGE", name="WP", wbs_code="1.0", sibling_seq=1, sort_order=1)
+    db_session.add(wp)
+    db_session.flush()
+    early = Activity(project_id=world.pid, work_package_id=wp.id, name="12/3 から", sort_order=1, duration_days=1,
+                     requested_start=date(2026, 12, 3))
+    db_session.add_all([early, Activity(project_id=world.pid, work_package_id=wp.id, name="希望なし", sort_order=2,
+                                        duration_days=1)])
+    db_session.commit()
+    name = client.get(url, headers=world.pm_h).json()["name"]
+
+    refused = client.patch(url, json={"start_date": "2026-12-04", "name": "変えない"}, headers=world.pm_h)
+    assert refused.status_code == 422, refused.text
+    assert error_code(refused) == "BEFORE_PROJECT_START"
+    assert refused.json()["error"]["details"] == [
+        {"loc": ["body", "start_date"], "activity_id": early.id, "requested_start": "2026-12-03",
+         "project_start": "2026-12-04", "message": "希望開始日 2026-12-03 がプロジェクトの開始日 2026-12-04 より前です"}]
+    current = client.get(url, headers=world.pm_h).json()
+    assert (current["start_date"], current["name"]) == ("2026-12-01", name)
+    assert client.patch(url, json={"start_date": "2026-12-03"}, headers=world.pm_h).status_code == 200
+    assert client.patch(url, json={"start_date": "2026-11-20"}, headers=world.pm_h).status_code == 200
+
+
 def test_failed_recalculation_rolls_back_start_date(app: FastAPI, client: TestClient, world: World) -> None:
     app.state.schedule_recalculator = Recorder(fail=True)
     with pytest.raises(RuntimeError):

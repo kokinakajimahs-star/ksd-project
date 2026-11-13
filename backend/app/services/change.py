@@ -76,7 +76,13 @@ from app.models.wbs import (
 )
 from app.services.auth import User, authorize_project, forbidden, principal_of
 from app.services.project_access import ProjectAccess
-from app.services.schedule import calculate_and_store, load_plan, work_calendar
+from app.services.schedule import (
+    before_project_start,
+    calculate_and_store,
+    load_plan,
+    starts_before_project,
+    work_calendar,
+)
 from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, numbering_rule_row
 
 # 4.1 の schedule_baselines.name の列の長さ（A-19）
@@ -667,6 +673,22 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
             session.flush()
 
 
+def _refuse_starts_before_project(project: Project, applied: AppliedChange) -> None:
+    """当てた後の活動の希望開始日が今と違う値でプロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（CR-018）。
+
+    新しい活動は ``activity_id`` を null にして変更内容の ``ref`` で指す。書く前に判定するので何も書かない。
+    """
+    before = {a.id: a.requested_start for a in applied.before.activities}
+    refs = {activity_id: ref for ref, activity_id in applied.activity_refs.items()}
+    early = [
+        ({"activity_id": a.id if a.id > 0 else None, "ref": refs.get(a.id), "name": a.name}, a.requested_start)
+        for a in applied.plan.activities
+        if a.requested_start is not None and starts_before_project(project.start_date, a.requested_start, before.get(a.id))
+    ]
+    if early:
+        raise before_project_start(project.start_date, early)
+
+
 def _write_baselines(
     session: Session, project_id: int, change_request: ChangeRequest, actor: User, now: datetime
 ) -> tuple[ScopeBaseline, ScheduleBaseline]:
@@ -736,7 +758,8 @@ def apply_change_request(
     1. RULE-CHG-003 の APPLY（APPROVED → APPLIED。それ以外は 409 ``INVALID_STATE``）。WBS が ``BASELINED`` でなければ
        （承認を経ていない・承認待ち・基準の後に直接変えた）409 ``INVALID_STATE``。5.10 で ``BASELINED`` へ入るのは承認だけで、
        反映で承認を飛ばさない（A-47）
-    2. RULE-CHG-001 で今の計画へ当て（当てられなければ 400・422）、本計画へ書く。日程を計算し直す（RULE-SCH-001〜003）
+    2. RULE-CHG-001 で今の計画へ当て（当てられなければ 400・422）、本計画へ書く。日程を計算し直す（RULE-SCH-001〜003）。
+       当てた後の活動の希望開始日が今と違い、プロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）
     3. RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る。旧版は残す（BR-12）
     4. 計画は新しい版と一致するので、計画を書いて ``DRAFT`` に戻った WBS の状態を ``BASELINED`` に保つ
 
@@ -755,6 +778,7 @@ def apply_change_request(
         raise AppError(409, "INVALID_STATE", "WBS が承認済み（BASELINED）のときだけ変更を反映できます",
                        details=[{"wbs_status": project.wbs_status}])
     applied = _apply(_plan_model(session, project_id), change_request.operations or [])
+    _refuse_starts_before_project(project, applied)
     try:
         _write_plan(session, project_id, applied)
         calculate_and_store(session, project_id)

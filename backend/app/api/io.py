@@ -70,7 +70,8 @@ def import_file(
     権限は data.import。要求の本体がファイルそのもの（``Content-Type`` は ``text/csv``・xlsx の型・``application/octet-stream``）。
     全行を先に検査し（RULE-INT-001）、誤りは ``{row, column, code, message}`` の配列。``dry_run=true`` は検査と書く行の一覧だけを返す
     （誤りがあっても 200 で ``ok`` が偽）。``dry_run`` でなく誤りがあれば何も書かずに 422 ``IMPORT_INVALID``（``details`` が誤りの配列）。
-    WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006）。
+    WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006）。活動の希望開始日が今と違う値でプロジェクトの
+    開始日より前になる行は、誤りのコード ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     result = io_service.import_data(
         session, access, user, activities, links, project_id, target, file_format, content, dry_run=dry_run, now=now

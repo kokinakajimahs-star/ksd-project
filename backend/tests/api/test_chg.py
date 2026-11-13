@@ -607,6 +607,30 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert again["error"]["code"] == "INVALID_STATE"
 
 
+def test_apply_refuses_requested_start_before_project_start(world: World) -> None:
+    """API-CHG-006：反映した後の活動の希望開始日がプロジェクトの開始日（2026-12-01）より前になるなら 422
+    ``BEFORE_PROJECT_START`` で何も書かない（5.5・CR-018）。新しい活動は変更内容の ``ref`` で指す。
+    """
+    world.baseline_wbs()
+    approved = world.approved(operations=[
+        {"op": "add_activity", "wp_code": world.wp1_code, "name": "C", "duration_days": 2, "estimate_hours": 16,
+         "ref": "c", "requested_start": "2026-11-30"},
+        {"op": "update_activity", "activity_id": world.b, "fields": {"requested_start": "2026-11-27"}},
+        {"op": "update_activity", "activity_id": world.a, "fields": {"requested_start": "2026-12-01"}},  # ちょうどは通す
+    ])
+    activities_before, scopes_before = world.count(Activity), world.count(ScopeBaseline)
+    refused = world.apply(approved["id"], expect=422)
+    assert refused["error"]["code"] == "BEFORE_PROJECT_START"
+    assert [(d["activity_id"], d["ref"], d["name"], d["requested_start"], d["project_start"])
+            for d in refused["error"]["details"]] == [
+        (world.b, None, "B", "2026-11-27", "2026-12-01"), (None, "c", "C", "2026-11-30", "2026-12-01")]
+    assert (world.count(Activity), world.count(ScopeBaseline)) == (activities_before, scopes_before)
+    world.session.expire_all()
+    b, stored = world.session.get(Activity, world.b), world.session.get(ChangeRequest, approved["id"])
+    assert b is not None and b.requested_start is None
+    assert stored is not None and stored.status == "APPROVED"
+
+
 def test_apply_adds_first_level_element_without_reusing_numbers(world: World) -> None:
     """API-CHG-006：第 1 階層への追加は数え（top_last_child_seq）+ 1 で採番し、数えを進める（設計書 1.1 の 5.2。CR-003）。"""
     extra, _ = world.element("消す成果物", None, "DELIVERABLE")

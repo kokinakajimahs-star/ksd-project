@@ -180,6 +180,7 @@ def create_activity(
 
     権限は schedule.edit。開始日・期間・終了日は 2 つから残りを求める（SCH-03。RULE-CAL-001）。期間 0 はマイルストーン。
     WP 以外の要素の下は 422 ``ACTIVITY_NOT_ON_WORK_PACKAGE``（RULE-WBS-003）。足した後に全ての活動の日程を計算し直す。
+    希望開始日（次の稼働日へ寄せた値）がプロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = schedule_service.add_activity(
         session, access, user, links, project_id,
@@ -202,6 +203,7 @@ def update_activity(
     """API-SCH-003 活動を変える（日程を再計算する）。
 
     権限は schedule.edit。載せた項目だけを変える。終了日だけなら期間を保って開始日を動かす（SCH-03）。
+    希望開始日が今と違う値でプロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = schedule_service.update_activity(
         session, access, user, links, project_id, activity_id, body.model_dump(exclude_unset=True)
@@ -221,6 +223,7 @@ def bulk_update_activities(
     """API-SCH-004 活動をまとめて変える（全件か無しか）。
 
     権限は schedule.edit。RULE-SCH-006 で全件を検査し、1 件でも不正なら何も保存せず 422（``details`` に全ての不正）。
+    希望開始日が今と違う値でプロジェクトの開始日より前になる活動があれば何も保存せず 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     changes = [c.model_dump(exclude_unset=True) | {"activity_id": c.activity_id} for c in body.changes]
     views = schedule_service.bulk_update_activities(session, access, user, links, project_id, changes)

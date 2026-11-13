@@ -49,6 +49,7 @@ from app.models.wbs import WbsNumberingRule
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of
 from app.services.progress import refresh_open_entries_of_project
 from app.services.project_access import ProjectAccess
+from app.services.schedule import before_project_start
 
 # PATCH で変えられる列と、そのうち空（null）にできない列（API-PRJ-004）
 UPDATABLE_FIELDS = frozenset(
@@ -319,7 +320,8 @@ def update_project(
     - ``settings`` は載せた項目だけを今の設定に重ねる（4.2 の項目に無い名前は呼び手の誤り）
     - code・name・start_date・owner_user_id・settings（とその項目）の null・終了予定日が開始日より前・責任者が無い／無効は 400
     - コードが他のプロジェクトと重なれば 409 ``DUPLICATE_PROJECT_CODE``
-    - 開始日（日程の軸の原点・活動の下限。5.4・5.5）を変えたら日程を再計算する
+    - 開始日（日程の軸の原点・活動の下限。5.4・5.5）を変えたら日程を再計算する。新しい開始日より前の希望開始日の活動が
+      残るなら 422 ``BEFORE_PROJECT_START``（``details`` はその活動の全て。何も書かない。5.5・CR-018）
     """
     authorize_project(session, access, actor, project_id, "project.manage")
     unknown = set(changes) - UPDATABLE_FIELDS
@@ -345,6 +347,17 @@ def update_project(
         raise _duplicate_code(code)
 
     start_changed = start_date != project.start_date
+    if start_changed:
+        early = session.execute(
+            select(Activity.id, Activity.requested_start)
+            .where(Activity.project_id == project.id, Activity.requested_start < start_date)
+            .order_by(Activity.id)
+        ).all()
+        if early:
+            raise before_project_start(
+                start_date, [({"loc": ["body", "start_date"], "activity_id": r.id}, r.requested_start) for r in early],
+                message=f"開始日より前の希望開始日の活動が残るため、開始日を {start_date.isoformat()} にできません",
+            )
     method_changed = ("progress_method_default" in settings_changes
                       and settings_changes["progress_method_default"] != project.settings.get("progress_method_default"))
     for name, value in changes.items():

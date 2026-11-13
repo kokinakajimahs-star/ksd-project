@@ -281,6 +281,43 @@ describe("UI-SCH-001 タスクリスト", () => {
     });
   });
 
+  it("希望開始日がプロジェクトの開始日より前なら、サーバの理由（422 BEFORE_PROJECT_START）を出す（CR-018）", async () => {
+    const { calls } = mockApi(
+      routes(EDITOR, {
+        [`POST ${BASE}/activities`]: () =>
+          jsonResponse(422, {
+            error: {
+              code: "BEFORE_PROJECT_START",
+              message: "希望開始日はプロジェクトの開始日（2026-04-01）以降にします",
+              details: [
+                {
+                  loc: ["body", "requested_start"],
+                  requested_start: "2026-03-30",
+                  project_start: "2026-04-01",
+                  message: "希望開始日 2026-03-30 がプロジェクトの開始日 2026-04-01 より前です",
+                },
+              ],
+            },
+          }),
+      }),
+    );
+    renderAt();
+    const form = await screen.findByRole("form", { name: "活動を足す" });
+    await waitFor(() => expect(within(form).getAllByRole("option")).toHaveLength(3));
+
+    fireEvent.change(within(form).getByLabelText("置き場の WP"), { target: { value: "102" } });
+    fireEvent.change(within(form).getByLabelText("名称"), { target: { value: "前倒し" } });
+    fireEvent.change(within(form).getByLabelText("開始日"), { target: { value: "2026-03-30" } });
+    fireEvent.change(within(form).getByLabelText("期間（稼働日）"), { target: { value: "2" } });
+    fireEvent.click(within(form).getByRole("button", { name: "足す" }));
+
+    const alert = await within(form).findByRole("alert");
+    expect(alert).toHaveTextContent("希望開始日はプロジェクトの開始日（2026-04-01）以降にします");
+    expect(alert).toHaveTextContent("希望開始日 2026-03-30 がプロジェクトの開始日 2026-04-01 より前です");
+    expect(sent(calls, "POST", `${BASE}/activities`)).toHaveLength(1);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("マイルストーンは期間 0 で足す（SCH-09）。WP・名称が無ければ送らない", async () => {
     const { calls } = mockApi(
       routes(EDITOR, { [`POST ${BASE}/activities`]: () => jsonResponse(201, makeActivity({ id: 25, name: "リリース" })) }),
