@@ -1,9 +1,9 @@
 // プロジェクトの責任者（PRJ-01）を選ぶ欄。候補は有効なユーザーの一覧（activeUsers.ts。API-CMN-003）。
 // 一覧は user.admin か member.manage が無いと読めない（9.1）ので、読めなければ「必ず出す人」（自分・今の責任者）だけから選ぶ
-import type { User } from "../../api/cmn";
+import type { UserListItem } from "../../api/cmn";
 import type { UserSummary } from "../../api/prj";
 
-export function ownerOptions(always: UserSummary[], candidates: User[] | null): UserSummary[] {
+export function ownerOptions(always: UserSummary[], candidates: UserListItem[] | null): UserSummary[] {
   const options: UserSummary[] = [];
   for (const user of [...always, ...(candidates ?? [])]) {
     if (!options.some((option) => option.id === user.id)) {
@@ -26,7 +26,7 @@ export default function OwnerSelect({
   onChange: (userId: number) => void;
   /** 一覧を読めなくても選べる人（作る人自身・今の責任者） */
   always: UserSummary[];
-  candidates: User[] | null;
+  candidates: UserListItem[] | null;
   disabled?: boolean;
 }) {
   return (

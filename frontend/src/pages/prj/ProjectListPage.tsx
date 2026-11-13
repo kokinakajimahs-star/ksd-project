@@ -4,7 +4,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 
-import { canCreateProject, getMe, hasProjectPermission, type Me, type Page, type User } from "../../api/cmn";
+import { canCreateProject, getMe, hasProjectPermission, type Me, type Page, type UserListItem } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import { createProject, listProjects, type Project } from "../../api/prj";
 import ErrorAlert from "../../components/ErrorAlert";
@@ -47,7 +47,7 @@ function ProjectCreateForm({
   onCreated,
 }: {
   me: Me;
-  ownerCandidates: User[] | null;
+  ownerCandidates: UserListItem[] | null;
   onCreated: (project: Project) => void;
 }) {
   const [code, setCode] = useState("");
@@ -195,7 +195,7 @@ export default function ProjectListPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [ownerCandidates, setOwnerCandidates] = useState<User[] | null>(null);
+  const [ownerCandidates, setOwnerCandidates] = useState<UserListItem[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;

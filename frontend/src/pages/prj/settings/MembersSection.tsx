@@ -1,9 +1,10 @@
 // UI-PRJ-002 のメンバー（PRJ-06。API-PRJ-009〜011）。メンバーに 3 章のロールと所属を割り当て、足す・変える・外す。
 // 変えられるのは member.manage を持つ人だけ（9.1）。足す人の候補はユーザーの一覧（API-CMN-003。member.manage で読める）から、
-// 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの
+// 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの。
+// 最後の PM を外す・最後の PM から PM のロールを外す変更はサーバが 409 LAST_PM で断る（CR-019）ので、その文言を出す
 import { useEffect, useState, type FormEvent } from "react";
 
-import type { User } from "../../../api/cmn";
+import type { UserListItem } from "../../../api/cmn";
 import { toErrorView, type ErrorView } from "../../../api/errors";
 import { fetchAllPages } from "../../../api/pages";
 import { listMembers, removeMember, upsertMember, type Member, type MemberList } from "../../../api/prj";
@@ -30,7 +31,7 @@ function MemberForm({
 }: {
   /** 変えるメンバー（足すときは null） */
   member: Member | null;
-  candidates: User[];
+  candidates: UserListItem[];
   onSubmit: (userId: number, roles: string[], organization: string | null, team: string | null) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -138,7 +139,7 @@ export default function MembersSection({
   const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<User[] | null>(null);
+  const [candidates, setCandidates] = useState<UserListItem[] | null>(null);
   /** 全ての頁のメンバーの利用者 ID（足す候補から除く）。読むまで・読めなければ null */
   const [allMemberIds, setAllMemberIds] = useState<ReadonlySet<number> | null>(null);
   const [allMembersError, setAllMembersError] = useState<ErrorView | null>(null);

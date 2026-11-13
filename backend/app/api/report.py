@@ -8,7 +8,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_project_access
+from app.api.deps import get_current_user, get_project_access, get_share_link_max_days
 from app.api.schedule import gantt_out, get_schedule_links
 from app.schemas.progress import OverlaidVertexOut
 from app.schemas.report import (
@@ -131,14 +131,16 @@ def create_share_link(
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
     now: datetime = Depends(get_now),
+    max_days: int = Depends(get_share_link_max_days),
 ) -> ShareLinkCreated:
     """API-RPT-002 共有リンクを作る（トークンはこの応答でだけ返す）。
 
-    権限は share.manage。``scope`` は GANTT か REPORT、``expires_at`` は時差つきで今より後（有効期限付き。RPT-03）。
+    権限は share.manage。``scope`` は GANTT か REPORT、``expires_at`` は時差つきで今より後（有効期限付き。RPT-03）、かつ今から
+    ``PMT_SHARE_LINK_MAX_DAYS`` 日（既定 90）以内。外れれば 400 ``VALIDATION_ERROR``（CR-019）。
     DB にはトークンの SHA-256 のハッシュだけを保存する（4.2・NFR-04）。
     """
     created = report_service.create_share_link(session, access, user, project_id, scope=body.scope,
-                                               expires_at=body.expires_at, now=now)
+                                               expires_at=body.expires_at, now=now, max_days=max_days)
     out = _share_link_out(created.link)
     return ShareLinkCreated(**out.model_dump(), token=created.token)
 
@@ -192,6 +194,8 @@ def get_shared(
     最新の基準のガント、REPORT は 4.2 の最新の報告日の会議レポート（報告日が無ければ null）。トークンが無い・合わない・
     失効した・期限が切れたリンクは、どれも同じ 404（状態・コード・メッセージ・``details`` が同じ。理由は返さない）。
     REPORT で日程が計算されていない活動があれば API-RPT-001 と同じ 409 だが、``details`` は空（活動の ID を見せない）。
+    利用者の表示名・ログイン ID・利用者の ID は返さない。ガントの行の ``assignees`` は担当者の所属（project_members の
+    組織・チーム）だけ（CR-019）。
     """
     view = report_service.shared_view(session, links, token, now=now)
     project = view.project

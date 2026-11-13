@@ -81,7 +81,7 @@ export type ShareScope = "GANTT" | "REPORT";
 
 export interface ShareLinkInput {
   scope: ShareScope;
-  /** 時差つきの時刻で、今より後 */
+  /** 時差つきの時刻で、今より後、今から PMT_SHARE_LINK_MAX_DAYS 日（既定 90）以内（CR-019） */
   expires_at: string;
 }
 
@@ -112,7 +112,11 @@ export interface SharedProject {
   name: string;
 }
 
-/** 共有リンクで見せるもの（API-RPT-004。読むだけ）。GANTT なら gantt、REPORT なら meeting_report（報告日が無ければ null） */
+/**
+ * 共有リンクで見せるもの（API-RPT-004。読むだけ）。GANTT なら gantt、REPORT なら meeting_report（報告日が無ければ null）。
+ * 利用者の表示名・ログイン ID・利用者の ID は含まない。ガントの行の assignees は担当者の所属（「組織／チーム」。空なら
+ * 「所属なし」）で、API-SCH-010 の表示名とは違う（CR-019）
+ */
 export interface SharedView {
   scope: ShareScope;
   expires_at: string;

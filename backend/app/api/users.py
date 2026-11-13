@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_password_min_length, get_project_access
-from app.schemas.users import UserCreate, UserList, UserOut, UserUpdate
+from app.schemas.users import UserCreate, UserList, UserListItemOut, UserOut, UserUpdate
 from app.services import get_session
 from app.services import users as users_service
 from app.services.auth import User
@@ -16,6 +16,12 @@ from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
 
 router = APIRouter(tags=["users"])
+
+
+def _list_item(user: User, *, user_admin: bool) -> UserListItemOut:
+    """一覧の 1 件。user.admin を持たない人には ``locked_until``・``can_create_project`` を null で返す（CR-019）。"""
+    item = UserListItemOut.model_validate(user)
+    return item if user_admin else item.model_copy(update={"locked_until": None, "can_create_project": None})
 
 
 @router.get("/users", response_model=UserList)
@@ -29,9 +35,11 @@ def list_users(
     """API-CMN-003 ユーザーの一覧。
 
     権限は user.admin か、どれかのプロジェクトでの member.manage。``limit``（既定 100・上限 1000）・``offset``（6.1）。
+    ``locked_until``・``can_create_project`` は user.admin を持つ人にだけ返し、他は null（CR-019）。
     """
-    users, total = users_service.list_users(session, access, user, limit=limit, offset=offset)
-    return UserList(items=[UserOut.model_validate(item) for item in users], total=total, limit=limit, offset=offset)
+    users, total, user_admin = users_service.list_users(session, access, user, limit=limit, offset=offset)
+    return UserList(items=[_list_item(item, user_admin=user_admin) for item in users], total=total, limit=limit,
+                    offset=offset)
 
 
 @router.post("/users", response_model=UserOut, status_code=201)

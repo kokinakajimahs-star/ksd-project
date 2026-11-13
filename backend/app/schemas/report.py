@@ -159,6 +159,8 @@ class SharedViewOut(BaseModel):
 
     ``scope`` が ``GANTT`` なら ``gantt``（最新の進捗・最新の基準）、``REPORT`` なら ``meeting_report``（4.2 の最新の報告日の
     会議レポート。報告日が 1 つも無ければ null）。
+    利用者の表示名・ログイン ID・利用者の ID は含めない。ガントの行の ``assignees`` は担当者の所属（project_members の
+    「組織／チーム」。空なら「所属なし」。1 つの行で同じ所属は 1 つ）で、API-SCH-010 の表示名とは違う（CR-019）。
     """
 
     scope: str

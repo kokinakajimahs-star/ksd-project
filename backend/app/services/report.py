@@ -10,15 +10,17 @@
   報告日以前の実績で求め、是正措置は今の状態（A-35・OQ-32 (3)）
 - 委託先だけで読む利用者（9.2 の注記）には、自分の割当の活動の行・頂点・遅延・マイルストーンだけを返し、プロジェクト全体の値の
   KPI は返さない（``restricted``）
-- 共有リンクのトークンは作った応答でだけ返し、DB には SHA-256 のハッシュだけを保存する（4.2・NFR-04）。閲覧はガント
-  （``GANTT``）か、4.2 の最新の報告日の会議レポート（``REPORT``）。どちらもプロジェクトの全ての活動を見せる（読むだけ）
+- 共有リンクのトークンは作った応答でだけ返し、DB には SHA-256 のハッシュだけを保存する（4.2・NFR-04）。有効期限は今より後で、
+  今から ``max_days``（設定の ``PMT_SHARE_LINK_MAX_DAYS``。既定 90）日以内（CR-019）。閲覧はガント（``GANTT``）か、4.2 の
+  最新の報告日の会議レポート（``REPORT``）。どちらもプロジェクトの全ての活動を見せる（読むだけ）。認証が無く、リンクは転送されうる
+  ので、利用者の表示名・ログイン ID・利用者の ID は見せず、ガントの担当者は所属（project_members の組織・チーム）に置き換える（CR-019）
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -46,7 +48,7 @@ from app.models.chg import CorrectiveAction
 from app.models.cmn import ShareLink as ShareLink  # API 層は共有リンクの型をここから取る（1.3：API はモデルを直接 import しない）
 from app.models.cmn import User
 from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem, StatusReport
-from app.models.prj import Project
+from app.models.prj import Project, ProjectMember
 from app.models.sch import Activity, ScheduleBaseline
 from app.services.auth import authorize_project, principal_of
 from app.services.effort import load_basis
@@ -70,6 +72,8 @@ SCOPE_REPORT = "REPORT"
 
 # 4.2 の「最新」の報告日を選ぶ順（確定していない最新の報告日、無ければ最新の確定済みの報告日）
 _LATEST_REPORT_STATUS_ORDER = (StatusReportStatus.OPEN.value, StatusReportStatus.FINALIZED.value)
+# 共有ビューで、所属（組織・チーム）が空の担当者・メンバーでなくなった担当者の呼び名（CR-019）
+NO_AFFILIATION = "所属なし"
 
 
 def _decimal(value: object) -> Decimal:
@@ -175,6 +179,35 @@ def _require_schedule(activities: Sequence[Activity], *, with_ids: bool = True) 
                              details=[{"activity_ids": missing}] if with_ids else [])
 
 
+def _affiliation_label(organization: str | None, team: str | None) -> str:
+    """所属の呼び名（「組織／チーム」。片方だけならその片方、どちらも空なら「所属なし」）。"""
+    parts = [part for part in (organization, team) if part]
+    return "／".join(parts) if parts else NO_AFFILIATION
+
+
+def _with_affiliations(session: Session, links: ScheduleLinks, project_id: int, chart: GanttChart) -> GanttChart:
+    """認証の無い共有ビュー（API-RPT-004）のガント：行の担当者を所属（project_members の組織・チーム）に置き換える（CR-019）。
+
+    利用者の表示名・ログイン ID・利用者の ID は見せない（リンクは転送されうる）。1 つの行で同じ所属の担当者は 1 つにまとめる
+    （並びは担当者の利用者の ID の順に初めて出た順）。
+    """
+    affiliations = {
+        user_id: _affiliation_label(organization, team)
+        for user_id, organization, team in session.execute(
+            select(ProjectMember.user_id, ProjectMember.organization, ProjectMember.team)
+            .where(ProjectMember.project_id == project_id)
+        )
+    }
+    by_activity: dict[int, list[str]] = {}
+    for ref in sorted(links.assignments.assignments(session, project_id), key=lambda r: (r.activity_id, r.user_id)):
+        labels = by_activity.setdefault(ref.activity_id, [])
+        label = affiliations.get(ref.user_id, NO_AFFILIATION)
+        if label not in labels:
+            labels.append(label)
+    rows = tuple(replace(row, assignees=tuple(by_activity.get(row.activity_id, ()))) for row in chart.rows)
+    return replace(chart, rows=rows)
+
+
 def _effort_of(session: Session, project_id: int, report: StatusReport) -> EffortValues:
     """プロジェクトの工数の合計（RULE-EFF-002。報告日の進捗率・残工数、報告日以前の実績、最新の基準）。"""
     return load_basis(session, project_id, report_id=report.id).rollup.project
@@ -194,7 +227,8 @@ def _build(
 ) -> MeetingReportView:
     """報告日の会議レポートを組み立てる（RULE-RPT-001。権限は呼び手が確かめる）。
 
-    ``shared`` は認証の無い共有リンクの閲覧（API-RPT-004）：日程が計算されていない活動の 409 の ``details`` に ID を載せない。
+    ``shared`` は認証の無い共有リンクの閲覧（API-RPT-004）：日程が計算されていない活動の 409 の ``details`` に ID を載せず、
+    ガントの担当者を所属に置き換える（CR-019）。
     """
     project = plan.project
     entries: dict[int, ProgressEntry] = entries_of_report(session, report.id)
@@ -244,6 +278,8 @@ def _build(
         progress=LatestProgress(report_date=report.report_date, activities=gantt_progress),
         range_start=report.report_date - REPORT_WINDOW, range_end=report.report_date + REPORT_WINDOW,
     )
+    if shared:
+        chart = _with_affiliations(session, links, project.id, chart)
     restricted = visible is not None
     try:
         data = build_meeting_report(
@@ -309,16 +345,19 @@ class CreatedShareLink:
 
 def create_share_link(
     session: Session, access: ProjectAccess, actor: User, project_id: int, *, scope: str, expires_at: datetime,
-    now: datetime,
+    now: datetime, max_days: int,
 ) -> CreatedShareLink:
     """共有リンクを作る（share.manage。RPT-03）。トークンは戻り値でだけ渡し、DB にはハッシュだけを書く（4.2・NFR-04）。
 
-    ``expires_at`` が今以前なら 400（作った時点で見られないリンクは作らない）。
+    ``expires_at`` が今以前なら 400（作った時点で見られないリンクは作らない）。今から ``max_days`` 日を超えても 400（CR-019）。
     """
     authorize_project(session, access, actor, project_id, SHARE_MANAGE)
     if expires_at <= now:
         raise AppError(400, "VALIDATION_ERROR", "入力に誤りがあります",
                        details=[{"loc": ["body", "expires_at"], "message": "有効期限は今より後の時刻にします"}])
+    if expires_at - now > timedelta(days=max_days):
+        raise AppError(400, "VALIDATION_ERROR", "入力に誤りがあります",
+                       details=[{"loc": ["body", "expires_at"], "message": f"有効期限は今から {max_days} 日以内にします"}])
     token = generate_token()
     # 時刻は UTC で保存し、応答も保存した値で返す（2.4）
     link = ShareLink(project_id=project_id, token_hash=hash_token(token), scope=scope,
@@ -386,6 +425,7 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
     ``GANTT`` は最新の進捗・最新の基準のガント（API-SCH-010 と同じ）、
     ``REPORT`` は 4.2 の最新の報告日の会議レポート（API-RPT-001 と同じ。報告日が無ければ空）。日程が計算されていない活動が
     あれば API-RPT-001 と同じ 409 だが、``details`` は空（認証の無い閲覧者に活動の ID を見せない）。
+    どちらもガントの担当者は所属（組織・チーム）に置き換える（利用者の表示名・ログイン ID・ID を見せない。CR-019）。
     """
     row = session.scalar(select(ShareLink).where(ShareLink.token_hash == hash_token(token))) if token else None
     record = None
@@ -399,6 +439,7 @@ def shared_view(session: Session, links: ScheduleLinks, token: str, *, now: date
     if verdict.can_view(SCOPE_GANTT):
         progress = links.latest_progress(session, row.project_id)
         chart, baseline = plan_gantt(session, links, plan, visible=None, progress=progress)
+        chart = _with_affiliations(session, links, row.project_id, chart)
         return SharedView(link=row, project=plan.project, gantt=chart, gantt_report_date=progress.report_date,
                           gantt_baseline=baseline, meeting_report=None)
     if verdict.can_view(SCOPE_REPORT):

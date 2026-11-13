@@ -62,6 +62,21 @@ export function signedHoursText(value: number): string {
   return `${rounded > 0 ? "+" : ""}${rounded} 人時`;
 }
 
+/** 共有リンクの有効期限の入力の既定値：今から何日後か（サーバの上限 PMT_SHARE_LINK_MAX_DAYS（既定 90 日）の内。CR-019） */
+export const SHARE_LINK_DEFAULT_DAYS = 14;
+
+/**
+ * now の days 日後の端末の時刻を、画面の datetime-local の値（`YYYY-MM-DDTHH:mm`。秒は切り捨てる）にする。
+ * 日は端末の暦で足す（夏時間の切り替えをまたいでも同じ時刻）
+ */
+export function localDateTimeAfterDays(now: Date, days: number): string {
+  const later = new Date(now.getTime());
+  later.setDate(later.getDate() + days);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const day = `${later.getFullYear()}-${pad(later.getMonth() + 1)}-${pad(later.getDate())}`;
+  return `${day}T${pad(later.getHours())}:${pad(later.getMinutes())}`;
+}
+
 /**
  * 画面の datetime-local の値（端末の時刻。`YYYY-MM-DDTHH:mm`）を、時差つきの時刻（UTC の ISO 8601）にする。
  * 空・読めない値は null（API-RPT-002 の expires_at は時差つきの時刻を要る）

@@ -451,6 +451,35 @@ def test_list_users_allowed_by_member_manage_in_a_project(
         assert response.json()["error"]["code"] == "FORBIDDEN"
 
 
+def test_list_users_shows_lock_and_create_permission_only_to_user_admin(
+    client: TestClient, db_session: Session, admin: User, access: FakeProjectAccess, project: int, clock: Clock
+) -> None:
+    """API-CMN-003（CR-019）：``locked_until``・``can_create_project`` は user.admin を持つ人にだけ値を返し、member.manage
+    だけの人（PM）には null。ほかの項目は同じ。"""
+    pm = make_user(db_session, "pm")
+    access.add_member(project, pm.id, "PM")
+    locked = make_user(db_session, "locked")
+    locked.locked_until = NOW + timedelta(minutes=10)
+    locked.can_create_project = True
+    db_session.commit()
+
+    def items(login_id: str) -> dict[str, dict[str, object]]:
+        response = client.get("/api/v1/users", headers=bearer(login(client, login_id)))
+        assert response.status_code == 200, response.text
+        return {item["login_id"]: item for item in response.json()["items"]}
+
+    by_admin = items("admin")
+    assert by_admin["locked"]["can_create_project"] is True and by_admin["pm"]["can_create_project"] is False
+    assert str(by_admin["locked"]["locked_until"]).startswith("2026-11-10T09:10:00")
+    by_pm = items("pm")
+    assert set(by_pm) == set(by_admin) == {"admin", "owner-1", "pm", "locked"}
+    for login_id, item in by_pm.items():
+        assert (item["locked_until"], item["can_create_project"]) == (None, None), login_id
+        hidden = ("locked_until", "can_create_project")
+        assert {k: v for k, v in item.items() if k not in hidden} == {
+            k: v for k, v in by_admin[login_id].items() if k not in hidden}
+
+
 def test_list_users_follows_project_table_not_default(
     client: TestClient, db_session: Session, access: FakeProjectAccess, clock: Clock
 ) -> None:

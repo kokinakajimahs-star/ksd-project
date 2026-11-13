@@ -255,7 +255,7 @@ export interface AuditLog {
 
 export type AuditLogList = Page<AuditLog>;
 
-/** 検索の条件（期間は UTC の日付で両端を含む） */
+/** 検索の条件（期間は業務の時間帯（サーバの設定。既定 Asia/Tokyo）の日付で両端を含む。設計書 1.3・CR-019） */
 export interface AuditLogQuery extends PageQuery {
   date_from?: string;
   date_to?: string;

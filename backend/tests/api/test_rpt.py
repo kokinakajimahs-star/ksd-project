@@ -399,6 +399,77 @@ def test_create_share_link_returns_token_once_and_stores_hash(world: World, clie
     assert world.share("GANTT", expect=400, token="x")["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_create_share_link_limits_expiry_to_max_days(app: FastAPI, world: World, client: TestClient,
+                                                     db_session: Session) -> None:
+    """API-RPT-002：有効期限は今から ``PMT_SHARE_LINK_MAX_DAYS`` 日（既定 90）以内。ちょうどは作れ、1 秒でも超えれば 400 で何も
+    書かない（CR-019）。上限は設定に従う。"""
+    limit = NOW + timedelta(days=90)
+    assert world.share("GANTT", expires_at=limit.isoformat())["expires_at"].startswith("2027-03-05T09:00:00")
+    count = len(db_session.scalars(select(ShareLink)).all())
+    over = world.share("GANTT", expect=400, expires_at=(limit + timedelta(seconds=1)).isoformat())
+    assert over["error"]["code"] == "VALIDATION_ERROR"
+    assert over["error"]["details"] == [{"loc": ["body", "expires_at"], "message": "有効期限は今から 90 日以内にします"}]
+    assert len(db_session.scalars(select(ShareLink)).all()) == count
+
+    app.state.settings = app.state.settings.model_copy(update={"share_link_max_days": 7})
+    short = world.share("REPORT", expect=400, expires_at="2026-12-12T09:00:01Z")
+    assert short["error"]["details"][0]["message"] == "有効期限は今から 7 日以内にします"
+    assert world.share("REPORT", expires_at="2026-12-12T18:00:00+09:00")["scope"] == "REPORT"  # ちょうど 7 日
+
+
+def _keys(value: Any) -> set[str]:
+    """JSON の中の全てのキー（入れ子を含む）。"""
+    if isinstance(value, dict):
+        return set(value) | {k for v in value.values() for k in _keys(v)}
+    if isinstance(value, list):
+        return {k for v in value for k in _keys(v)}
+    return set()
+
+
+def test_shared_view_shows_assignee_affiliations_instead_of_users(world: World, client: TestClient) -> None:
+    """API-RPT-004：認証の無い共有ビューは、利用者の表示名・ログイン ID・利用者の ID を返さず、ガントの担当者は所属
+    （project_members の組織・チーム）だけ（CR-019）。1 つの行で同じ所属は 1 つ、所属が空なら「所属なし」。
+    ログインした人の API-SCH-010・API-RPT-001 は今どおり表示名を返す。"""
+    for name, organization, team in (("planner", "開発部", "基盤チーム"), ("executor", "開発部", "基盤チーム"),
+                                     ("contractor", "協力会社", None)):
+        role = dict(ROLES)[name]
+        put = client.put(world.url(f"/members/{world.users[name].id}"),
+                         json={"roles": [role], "organization": organization, "team": team}, headers=world.admin_h)
+        assert put.status_code == 200, put.text
+    for activity_id, names in ((world.a, ("planner", "executor", "contractor")), (world.b, ("progress",))):
+        put = client.put(world.url(f"/activities/{activity_id}/assignments"),
+                         json={"assignments": [{"user_id": world.users[n].id} for n in names]}, headers=world.h["pm"])
+        assert put.status_code == 200, put.text
+    affiliations = {world.a: ["開発部／基盤チーム", "協力会社"], world.b: ["所属なし"], world.m: []}
+
+    logged_in = world.get("/gantt")
+    names = {r["activity_id"]: r["assignees"] for r in logged_in["rows"]}
+    assert names[world.a] == [world.users[n].display_name for n in ("planner", "executor", "contractor")]
+
+    gantt = client.get(f"/api/v1/shared/{world.share('GANTT')['token']}")
+    assert gantt.status_code == 200, gantt.text
+    assert {r["activity_id"]: r["assignees"] for r in gantt.json()["gantt"]["rows"]} == affiliations
+    # 担当者のほかは API-SCH-010 と同じもの
+    shared_rows = [{k: v for k, v in r.items() if k != "assignees"} for r in gantt.json()["gantt"]["rows"]]
+    assert shared_rows == [{k: v for k, v in r.items() if k != "assignees"} for r in logged_in["rows"]]
+
+    report = world.delayed_report()
+    shared = client.get(f"/api/v1/shared/{world.share('REPORT')['token']}")
+    assert shared.status_code == 200, shared.text
+    meeting = shared.json()["meeting_report"]
+    assert {r["activity_id"]: r["assignees"] for r in meeting["gantt"]["rows"]} == affiliations
+    authenticated = world.meeting(report)
+    assert authenticated["gantt"]["rows"][0]["assignees"] == names[world.a]  # API-RPT-001 は表示名のまま
+    for row in authenticated["gantt"]["rows"]:
+        row["assignees"] = affiliations[row["activity_id"]]
+    assert meeting == authenticated
+
+    for response in (gantt, shared):
+        assert not _keys(response.json()) & {"user_id", "login_id", "display_name", "created_by", "owner_user_id"}
+        for user in world.users.values():
+            assert user.display_name not in response.text and user.login_id not in response.text
+
+
 def test_shared_view_shows_scope_without_login(world: World, client: TestClient) -> None:
     gantt_token = world.share("GANTT")["token"]
     report_token = world.share("REPORT")["token"]

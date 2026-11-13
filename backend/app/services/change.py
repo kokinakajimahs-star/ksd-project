@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, tzinfo
 from typing import Any
 
 from sqlalchemy import delete, func, or_, select, update
@@ -73,6 +73,7 @@ from app.models.wbs import (
     WbsScopeLink,
 )
 from app.services.auth import User, authorize_project, principal_of
+from app.services.clock import business_period
 from app.services.project_access import ProjectAccess
 from app.services.schedule import calculate_and_store, load_plan, work_calendar
 from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, numbering_rule_row
@@ -918,20 +919,23 @@ def search_audit_logs(
     wbs_code: str | None,
     limit: int,
     offset: int,
+    zone: tzinfo,
 ) -> tuple[list[AuditLog], int]:
     """変更履歴の検索（audit.view。期間・変更者・対象・WBS ID。新しい順。CHG-09）。
 
-    期間は UTC の日付で両端を含む（``date_from`` の 0 時 〜 ``date_to`` の翌日 0 時の前。A-37）。WBS ID は記録した時点の ID と一致するもの。
+    期間は業務の時間帯 ``zone`` の日付で両端を含む（``date_from`` の 0 時 〜 ``date_to`` の翌日 0 時の前を UTC の時刻の範囲に直して
+    探す。設計書 1.3・CR-019）。WBS ID は記録した時点の ID と一致するもの。
     """
     authorize_project(session, access, actor, project_id, "audit.view")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise AppError(400, "VALIDATION_ERROR", "入力に誤りがあります",
                        details=[{"loc": ["query", "date_from"], "message": "期間の始まりが終わりより後です"}])
     conditions: list[Any] = [AuditLog.project_id == project_id]
-    if date_from is not None:
-        conditions.append(AuditLog.occurred_at >= datetime.combine(date_from, time.min, tzinfo=UTC))
-    if date_to is not None:
-        conditions.append(AuditLog.occurred_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=UTC))
+    since, until = business_period(date_from, date_to, zone)
+    if since is not None:
+        conditions.append(AuditLog.occurred_at >= since)
+    if until is not None:
+        conditions.append(AuditLog.occurred_at < until)
     if user_id is not None:
         conditions.append(AuditLog.user_id == user_id)
     if entity_type is not None:

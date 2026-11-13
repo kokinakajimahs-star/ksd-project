@@ -2,7 +2,8 @@
 // 一覧は user.admin か member.manage で見られる。作成・変更・無効化は user.admin だけ（9.1）なので、
 // その権限が無ければ操作の部品を出さない（7.2。サーバでも必ず判定する）。
 // プロジェクトの作成の許可（can_create_project。9.1 の project.create）もここで設定する。
-// ログインのロック中（locked_until が今より後。NFR-04）を示し、パスワードを設定し直すとロックが解ける
+// ログインのロック中（locked_until が今より後。NFR-04）を示し、パスワードを設定し直すとロックが解ける。
+// 一覧のロックの状態と作成の許可は user.admin を持つ人にだけ返る（member.manage だけの人には null。CR-019）ので、null は「—」
 import { useEffect, useState, type FormEvent } from "react";
 
 import {
@@ -14,6 +15,7 @@ import {
   type Me,
   type Page,
   type User,
+  type UserListItem,
   type UserUpdateInput,
 } from "../../api/cmn";
 import { describeError, toErrorView, type ErrorView } from "../../api/errors";
@@ -159,7 +161,7 @@ function UserCreateForm({ onCreated }: { onCreated: (user: User) => void }) {
 
 /** 変えた項目だけを集める（API-CMN-005 は載せた項目だけを変える）。パスワードは入れたときだけ送る */
 export function collectChanges(
-  user: User,
+  user: UserListItem,
   form: {
     displayName: string;
     email: string;
@@ -202,7 +204,7 @@ function UserEditForm({
   onSaved,
   onCancel,
 }: {
-  user: User;
+  user: UserListItem;
   onSaved: (user: User) => void;
   onCancel: () => void;
 }) {
@@ -211,7 +213,8 @@ function UserEditForm({
   const [organization, setOrganization] = useState(user.organization ?? "");
   const [password, setPassword] = useState("");
   const [isSystemAdmin, setIsSystemAdmin] = useState(user.is_system_admin);
-  const [canCreateProject, setCanCreateProject] = useState(user.can_create_project);
+  // 変更の部品は user.admin を持つ人にだけ出すので値は返っている。返らなければ許していないものとして始める
+  const [canCreateProject, setCanCreateProject] = useState(user.can_create_project ?? false);
   const [isActive, setIsActive] = useState(user.is_active);
   const [error, setError] = useState<ErrorView | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -329,12 +332,12 @@ function UserEditForm({
 
 export default function UserAdminPage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [page, setPage] = useState<Page<User> | null>(null);
+  const [page, setPage] = useState<Page<UserListItem> | null>(null);
   const [offset, setOffset] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [editing, setEditing] = useState<User | null>(null);
+  const [editing, setEditing] = useState<UserListItem | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -412,7 +415,7 @@ export default function UserAdminPage() {
                   <td>{user.email ?? ""}</td>
                   <td>{user.organization ?? ""}</td>
                   <td>{user.is_system_admin ? "○" : ""}</td>
-                  <td>{user.can_create_project ? "○" : ""}</td>
+                  <td>{user.can_create_project === null ? "—" : user.can_create_project ? "○" : ""}</td>
                   <td>
                     {user.is_active ? "有効" : "無効"}
                     {isLocked(user) && user.locked_until !== null && (
