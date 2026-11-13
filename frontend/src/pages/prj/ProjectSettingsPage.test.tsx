@@ -6,7 +6,14 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import type { CalendarInput, Member, Project, RoleGrants, ScopeItem, ScopeItemInput } from "../../api/prj";
 import { makeMe, makeMember, makeProject, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import { PROJECT_PERMISSIONS } from "./labels";
 import ProjectSettingsPage, { parseProjectId } from "./ProjectSettingsPage";
 import { collectProjectChanges, formOf } from "./settings/BasicInfoSection";
@@ -405,6 +412,52 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     });
     await waitFor(() => expect(within(section).getByRole("table")).toHaveTextContent("実行担当者・委託先"));
     expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(2);
+  });
+
+  it("メンバーを足す候補から、今の頁に無い（他の頁の）メンバーも除く（OQ-42 (21) の d・A-49 の 2）", async () => {
+    // 1001 人のメンバー。実行 花子は最後（11 頁目・全件では 2 頁目）にいて、一覧の今の頁（100 件）には出ない
+    const fillers = Array.from({ length: 999 }, (_, i) =>
+      makeMember({ user_id: 100 + i, login_id: `m${i}`, display_name: `メンバー${i}` }),
+    );
+    const execMember = makeMember({ user_id: 9, login_id: "exec", display_name: "実行 花子", roles: ["EXECUTOR"] });
+    const all = [PM_MEMBER, ...fillers, execMember];
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`GET ${BASE}/members`]: (call) => pagedResponse(all, call, { project_id: 3 }),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    const table = await within(section).findByRole("table", { name: "メンバーの一覧" });
+    expect(table).not.toHaveTextContent("exec");
+    const addButton = within(section).getByRole("button", { name: "メンバーを足す" });
+    await waitFor(() => expect(addButton).toBeEnabled());
+    fireEvent.click(addButton);
+    const form = within(section).getByRole("form", { name: "メンバーを足す" });
+    // 今の頁に無い実行 花子も、メンバーなので候補に出さない
+    expect(within(form).getAllByRole("option").map((o) => o.textContent)).toEqual(["計画 太郎（planner）"]);
+    expect(sent(calls, "GET", `${BASE}/members`).map((c) => c.url)).toEqual(
+      expect.arrayContaining([`${BASE}/members?limit=1000&offset=0`, `${BASE}/members?limit=1000&offset=1000`]),
+    );
+  });
+
+  it("メンバーの全件を読めなければ、メンバーを足させずに理由を出す", async () => {
+    mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`GET ${BASE}/members`]: (call) =>
+          call.url.includes("limit=1000")
+            ? errorResponse(500, "INTERNAL_ERROR", "サーバの内部で誤りが起きました")
+            : jsonResponse(200, membersPage([PM_MEMBER, PLANNER_MEMBER])),
+      }),
+    );
+
+    renderAt();
+    const section = await region("メンバー");
+    await within(section).findByRole("table", { name: "メンバーの一覧" });
+    expect(await within(section).findByText("メンバーの全件を読めないため、メンバーを足せません")).toBeInTheDocument();
+    expect(within(section).getByRole("alert")).toHaveTextContent("サーバの内部で誤りが起きました");
+    expect(within(section).getByRole("button", { name: "メンバーを足す" })).toBeDisabled();
   });
 
   it("ロールを 1 つも選ばなければ送らずに伝える", async () => {

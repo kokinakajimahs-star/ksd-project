@@ -10,6 +10,7 @@ import { Link, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import {
   getLightningLine,
   getLightningLines,
@@ -35,6 +36,7 @@ import {
   JUDGEMENT_LABELS,
   rangeToRefetch,
   UNIT_LABELS,
+  unplacedVertexCounts,
   type DateRange,
   type GanttUnit,
 } from "../../components/gantt/scale";
@@ -91,7 +93,7 @@ export default function GanttPage() {
   const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
   const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
 
-  // 自分の権限・基準の版・報告日（画面を開いたときに 1 回）
+  // 自分の権限・基準の版・報告日（全件。画面を開いたときに 1 回）
   useEffect(() => {
     if (projectId === null) {
       return;
@@ -100,14 +102,14 @@ export default function GanttPage() {
     Promise.all([
       getMe(),
       listScheduleBaselines(projectId, { limit: LIST_LIMIT_MAX }),
-      listStatusReports(projectId, { limit: LIST_LIMIT_MAX }),
+      fetchAllPages((page) => listStatusReports(projectId, page)),
     ]).then(
-      ([meResult, baselineList, reportList]) => {
+      ([meResult, baselineList, reportItems]) => {
         if (!cancelled) {
           setMe(meResult);
           setBaselines(baselineList.items);
-          setReports(reportList.items);
-          setReportId(latestReport(reportList.items)?.id ?? null);
+          setReports(reportItems);
+          setReportId(latestReport(reportItems)?.id ?? null);
         }
       },
       (e: unknown) => {
@@ -197,6 +199,12 @@ export default function GanttPage() {
   // 描く範囲を広げる日付（GanttChart と同じ関数。7.3）
   const extraDates = useMemo(
     () => (gantt === null ? [] : chartExtraDates(gantt.rows, { lightning, pastLines })),
+    [gantt, lightning, pastLines],
+  );
+
+  // 今のガントの行に当てられず描かない頂点の数（GanttChart と同じ当て方。黙って落とさず注記する。A-49 の 13）
+  const unplaced = useMemo(
+    () => (gantt === null ? null : unplacedVertexCounts(gantt.rows, { lightning, pastLines })),
     [gantt, lightning, pastLines],
   );
 
@@ -355,6 +363,16 @@ export default function GanttPage() {
             {lightning !== null && `／報告日：${lightning.report.report_date}（許容幅 ${lightning.tolerance_days} 日）`}
           </p>
           <GanttChart gantt={gantt} unit={unit} lightning={lightning} pastLines={pastLines} />
+          {unplaced !== null && unplaced.lightning > 0 && (
+            <p className="note">{`今の計画に無い活動の頂点 ${unplaced.lightning} 件は描いていない`}</p>
+          )}
+          {unplaced?.pastLines
+            .filter((line) => line.count > 0)
+            .map((line) => (
+              <p key={line.reportId} className="note">
+                {`報告日 ${line.reportDate} の線：今の計画に無い活動の頂点 ${line.count} 件は描いていない`}
+              </p>
+            ))}
         </>
       )}
 

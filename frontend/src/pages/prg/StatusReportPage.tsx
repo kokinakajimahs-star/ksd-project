@@ -1,12 +1,15 @@
 // UI-PRG-001 進捗入力（報告日）（設計書 7.1 のルート /projects/:projectId/status-reports/:reportId）。
 // PRG-01・02・03・05・17、EFF-06。報告日の一覧と作成（API-PRG-001・002）、報告日の活動の進捗の一覧（API-PRG-006 の行）と
 // 入力（API-PRG-003）・算定方式（API-PRG-005）・算定項目（API-PRG-004）、報告日の確定（API-PRG-007）を 1 つの画面に並べる。
-// 権限の無い操作の部品は出さない（7.2。GET /api/v1/me の権限で決める。サーバでも必ず判定する）
+// 権限の無い操作の部品は出さない（7.2。GET /api/v1/me の権限で決める。サーバでも必ず判定する）。
+// progress.enter_all が無く progress.enter_own だけの人には、自分が担当（API-SCH-001 の assignees）の活動にだけ進捗の入力を出す
+// （OQ-42 (21)・A-49 の 13。RULE-AUTH-001 の「自分」の判定はサーバが行う）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import {
   finalizeStatusReport,
   getLightningLine,
@@ -15,6 +18,7 @@ import {
   type LightningRow,
   type StatusReport,
 } from "../../api/prg";
+import { listActivities } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
 import { JUDGEMENT_LABELS, judgementColor } from "../../components/gantt/scale";
 import { formatDateTime } from "../../lib/format";
@@ -22,7 +26,6 @@ import { parseProjectId } from "../prj/ProjectSettingsPage";
 import CreateReportForm from "./CreateReportForm";
 import EntryEditor from "./EntryEditor";
 import { newestFirst, progressMethodLabel, reportStatusLabel, signedDays } from "./labels";
-import { LIST_LIMIT_MAX } from "./limits";
 
 /** 残工数の表示：入力した値か自動（BR-10。EFF-06：自動か入力かを区別して出す） */
 export function remainingText(hours: number | null): string {
@@ -42,6 +45,8 @@ export default function StatusReportPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [reports, setReports] = useState<StatusReport[]>([]);
   const [line, setLine] = useState<LightningLine | null>(null);
+  /** 自分が担当の活動の ID（progress.enter_own だけの人のときに読む。読むまで・読めなければ null） */
+  const [myActivityIds, setMyActivityIds] = useState<ReadonlySet<number> | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -74,16 +79,16 @@ export default function StatusReportPage() {
     };
   }, [projectId, valid]);
 
-  // 報告日の一覧（作る・確定すると読み直す）
+  // 報告日の一覧（全件。作る・確定すると読み直す）
   useEffect(() => {
     if (projectId === null || !valid) {
       return;
     }
     let cancelled = false;
-    listStatusReports(projectId, { limit: LIST_LIMIT_MAX }).then(
-      (result) => {
+    fetchAllPages((page) => listStatusReports(projectId, page)).then(
+      (items) => {
         if (!cancelled) {
-          setReports(result.items);
+          setReports(items);
         }
       },
       (e: unknown) => {
@@ -120,6 +125,39 @@ export default function StatusReportPage() {
       cancelled = true;
     };
   }, [projectId, reportId, reloadKey]);
+
+  // progress.enter_own だけの人：自分が担当の活動（API-SCH-001 を全件読み、assignees に自分がいるもの）
+  const myUserId = me?.user.id ?? null;
+  const ownOnly =
+    me !== null &&
+    projectId !== null &&
+    !hasProjectPermission(me, projectId, "progress.enter_all") &&
+    hasProjectPermission(me, projectId, "progress.enter_own");
+  useEffect(() => {
+    if (projectId === null || !ownOnly || myUserId === null) {
+      setMyActivityIds(null);
+      return;
+    }
+    let cancelled = false;
+    fetchAllPages((page) => listActivities(projectId, page)).then(
+      (activities) => {
+        if (!cancelled) {
+          setMyActivityIds(
+            new Set(activities.filter((a) => a.assignees.some((x) => x.user_id === myUserId)).map((a) => a.id)),
+          );
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setMyActivityIds(null);
+          setError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, ownOnly, myUserId]);
 
   // 別の報告日へ移ったら、開いていた編集と確定の確認を閉じる
   useEffect(() => {
@@ -160,6 +198,9 @@ export default function StatusReportPage() {
   const canEnter = canEnterAll || can("progress.enter_own");
   const canEditMethod = can("schedule.edit");
   const canEditRows = isOpen && (canEnter || canEditMethod);
+  /** その活動の進捗を書けるか（enter_all は全て、enter_own だけなら自分が担当の活動だけ） */
+  const canEnterActivity = (activityId: number) =>
+    canEnterAll || (canEnter && myActivityIds !== null && myActivityIds.has(activityId));
 
   function saved(message: string) {
     setError(null);
@@ -298,7 +339,7 @@ export default function StatusReportPage() {
                     </td>
                     {canEditRows && (
                       <td>
-                        {isActivityRow(row) && (
+                        {isActivityRow(row) && (canEnterActivity(row.activity_id) || canEditMethod) && (
                           <button type="button" onClick={() => setEditingId(row.activity_id)}>
                             {`${row.name} を入力する`}
                           </button>
@@ -319,7 +360,7 @@ export default function StatusReportPage() {
           projectId={projectId}
           reportId={reportId}
           row={editingRow}
-          canEnter={canEnter}
+          canEnter={canEnterActivity(editingRow.activity_id)}
           canEditMethod={canEditMethod}
           onSaved={saved}
           onClose={() => setEditingId(null)}

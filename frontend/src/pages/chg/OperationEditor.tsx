@@ -1,8 +1,12 @@
-// 変更内容（5.9 の操作の配列）の編集。操作は足した順に当たる（5.9）
+// 変更内容（5.9 の操作の配列）の編集。操作は足した順に当たる（5.9）。
+// 依存の端は「今ある活動（一覧から選ぶ）」か「この変更要求で足す活動の仮の名前」かを選ばせる（OQ-38 (2)・A-49 の 1）
 import { useState } from "react";
 
 import type { ChangeOperation } from "../../api/chg";
+import type { ErrorView } from "../../api/errors";
+import type { Activity } from "../../api/sch";
 import type { ElementKind } from "../../api/wbs";
+import ErrorAlert from "../../components/ErrorAlert";
 import { ELEMENT_KIND_LABELS, ELEMENT_KINDS, WBS_CODE_MAX } from "./labels";
 import {
   buildOperation,
@@ -10,17 +14,31 @@ import {
   emptyDraft,
   OPERATION_LABELS,
   OPERATION_NAMES,
+  type EndpointBy,
   type OperationDraft,
   type OperationName,
 } from "./operations";
 
+/** 依存の端に選べる今ある活動（API-SCH-001 を全件読んだもの） */
+export type EndpointActivity = Pick<Activity, "id" | "wbs_code" | "name">;
+
 export interface OperationEditorProps {
   operations: ChangeOperation[];
   onChange: (operations: ChangeOperation[]) => void;
+  /** 依存の端に選べる今ある活動。読むまで・読めなければ null */
+  activities: EndpointActivity[] | null;
+  /** 今ある活動を読めなかった理由 */
+  activitiesError?: ErrorView | null;
   disabled?: boolean;
 }
 
-export default function OperationEditor({ operations, onChange, disabled = false }: OperationEditorProps) {
+export default function OperationEditor({
+  operations,
+  onChange,
+  activities,
+  activitiesError = null,
+  disabled = false,
+}: OperationEditorProps) {
   const [draft, setDraft] = useState<OperationDraft>(() => emptyDraft());
   const [message, setMessage] = useState<string | null>(null);
 
@@ -82,6 +100,42 @@ export default function OperationEditor({ operations, onChange, disabled = false
       <input inputMode="numeric" value={draft.activityId} onChange={(e) => set("activityId", e.target.value)} />
     </label>
   );
+  function endpointFields(side: "predecessor" | "successor", label: string) {
+    const byKey = side === "predecessor" ? "predecessorBy" : "successorBy";
+    const idKey = side === "predecessor" ? "predecessorId" : "successorId";
+    const refKey = side === "predecessor" ? "predecessorRef" : "successorRef";
+    return (
+      <fieldset>
+        <legend>{label}</legend>
+        <label>
+          {`${label}の指し方`}
+          <select value={draft[byKey]} onChange={(e) => set(byKey, e.target.value as EndpointBy)}>
+            <option value="id">今ある活動（一覧から選ぶ）</option>
+            <option value="ref">この変更要求で足す活動の仮の名前</option>
+          </select>
+        </label>
+        {draft[byKey] === "id" ? (
+          <label>
+            {`${label}の活動`}
+            <select value={draft[idKey]} onChange={(e) => set(idKey, e.target.value)} disabled={activities === null}>
+              <option value="">{activities === null ? "（活動の一覧を読めていない）" : "選んでください"}</option>
+              {(activities ?? []).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {`${a.id} ${a.wbs_code} ${a.name}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label>
+            {`${label}の仮の名前`}
+            <input value={draft[refKey]} onChange={(e) => set(refKey, e.target.value)} />
+          </label>
+        )}
+      </fieldset>
+    );
+  }
+
   const activityFields = (
     <>
       <label>
@@ -214,16 +268,12 @@ export default function OperationEditor({ operations, onChange, disabled = false
         {(op === "add_dependency" || op === "remove_dependency") && (
           <>
             <p className="note">
-              活動は ID（数字）か、この変更要求で足す活動の仮の名前で指す（数字だけの入力は ID とみなす。OQ-38）。
+              今ある活動は一覧から選ぶ（活動の ID を送る）。この変更要求で足す活動は、「活動を足す」の操作で付けた仮の名前で指す
+              （数字だけの名前も仮の名前として送る）。
             </p>
-            <label>
-              先行
-              <input value={draft.predecessor} onChange={(e) => set("predecessor", e.target.value)} />
-            </label>
-            <label>
-              後続
-              <input value={draft.successor} onChange={(e) => set("successor", e.target.value)} />
-            </label>
+            <ErrorAlert error={activitiesError} />
+            {endpointFields("predecessor", "先行")}
+            {endpointFields("successor", "後続")}
           </>
         )}
 

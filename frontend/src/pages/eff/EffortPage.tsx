@@ -22,6 +22,7 @@ import {
   type SummaryRow,
 } from "../../api/eff";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import { listStatusReports, type StatusReport } from "../../api/prg";
 import { listScheduleBaselines, type ScheduleBaseline } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
@@ -175,10 +176,10 @@ export default function EffortPage() {
       return;
     }
     let cancelled = false;
-    listStatusReports(projectId, { limit: LIST_LIMIT_MAX, offset: 0 }).then(
-      (page) => {
+    fetchAllPages((page) => listStatusReports(projectId, page)).then(
+      (items) => {
         if (!cancelled) {
-          setReports(newestFirst(page.items));
+          setReports(newestFirst(items));
         }
       },
       () => {

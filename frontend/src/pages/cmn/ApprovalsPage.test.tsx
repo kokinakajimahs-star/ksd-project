@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setAuthToken } from "../../api/client";
 import type { Me, PendingApproval } from "../../api/cmn";
 import { makeMe, makePendingApproval, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall } from "../../test/mockApi";
+import { errorResponse, jsonResponse, mockApi, pagedResponse, type RecordedCall } from "../../test/mockApi";
 import ApprovalsPage from "./ApprovalsPage";
 
 /** プロジェクト 3 で APPROVER（wbs.approve は持つが change.approve は持たない。9.2 の既定） */
@@ -78,7 +78,27 @@ describe("UI-CMN-003 承認待ち一覧", () => {
     // WBS は「差戻し」、変更要求は「却下」（WBS-21・CHG-03）
     expect(within(rows[1]!).getByRole("button", { name: "差戻し" })).toBeInTheDocument();
     expect(within(rows[2]!).getByRole("button", { name: "却下" })).toBeInTheDocument();
-    expect(listCalls(calls)[0]?.url).toBe("/api/v1/approval-requests?limit=100&offset=0");
+    expect(listCalls(calls)[0]?.url).toBe("/api/v1/approval-requests?limit=1000&offset=0");
+  });
+
+  it("1000 件を超える承認待ちも total まで頁を読み足して全件を出す（6.1・A-49 の 2）", async () => {
+    const all = Array.from({ length: 1001 }, (_, i) =>
+      makePendingApproval({ id: 1000 + i, project_id: 3, target_type: "WBS", target_id: 3 }),
+    );
+    const { calls } = mockApi({
+      "GET /api/v1/me": () => jsonResponse(200, APPROVER_ME),
+      "GET /api/v1/approval-requests": (call) => pagedResponse(all, call),
+    });
+
+    const { container } = renderPage();
+
+    expect(await screen.findByText("全 1001 件")).toBeInTheDocument();
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(1001);
+    expect(container.querySelector('input[aria-label="申請 2000 のコメント"]')).not.toBeNull();
+    expect(listCalls(calls).map((c) => c.url)).toEqual([
+      "/api/v1/approval-requests?limit=1000&offset=0",
+      "/api/v1/approval-requests?limit=1000&offset=1000",
+    ]);
   });
 
   it("判断の権限の無い申請には判断の部品を出さない", async () => {
