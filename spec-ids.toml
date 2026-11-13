@@ -1,7 +1,8 @@
 # spec-ids.toml — PMT（WBS・工数・進捗管理システム）の設計ID ↔ 実装の対応
 #
 # 設計書（docs/pmt-design.md）の 4.1・5.1・6.2・7.1 の表の 1 行が 1 件である。
-#   db 35 / rule 40 / api 90 / ui 22 = 187 件（2026-11-10 に kloop bootstrap --survey と手の数えで検算）
+#   db 35 / rule 40 / api 96 / ui 22 = 193 件（2026-11-10 に kloop bootstrap --survey と手の数えで検算した 187 件に、
+#   2026-11-12 の設計書 1.1（CR-004）で API を 6 件足した）
 #
 # このファイルは kloop の検証器（scripts/verify.sh → kloop verify）の設定であり、
 # ksdx（trace.toml の from_spec_ids）が設計層の抽出に再利用する。**設計層の抽出式はここだけに置く。**
@@ -79,7 +80,7 @@ signature = '`(?P<sig>[A-Z][A-Z/]*\s+/[^`]*)`'
 group_from = '^API-(?P<group>[A-Z]{3})-'
 target_dirs = ["backend/app/api"]
 evidence = "declaration"
-baseline = 90
+baseline = 96
 chapter = "6.2"
 hint = 'backend/app/api/ にルート関数を実装し、docstring の先頭を """{id} {name}""" とすること（メソッドとパスは設計書 6.2 の行どおり。backend/tests/api/ に試験を置く）'
 

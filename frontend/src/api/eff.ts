@@ -150,6 +150,8 @@ export interface EffortBaselineRef {
  * - member：user_id（null は「未割当」）・name（表示名）
  * - organization：bucket_kind（ORGANIZATION／NO_ORGANIZATION／UNASSIGNED）・name（所属）
  * - week・month：bucket_kind（PERIOD／REMAINING／UNSCHEDULED）・period_start（PERIOD の初日）
+ * - どの軸も、版にあって今は無い活動・WP の基準は最後の行 bucket_kind＝BASELINE_REMOVED（基準だけを持つ。
+ *   WBS の軸ではプロジェクトの直下＝parent_id・element_id が null。設計書 5.8）。無ければ行は来ない
  */
 export interface SummaryRow {
   bucket_kind: string;

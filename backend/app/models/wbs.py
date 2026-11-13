@@ -50,6 +50,7 @@ PAD_FIRST_LEVEL_DEFAULT = True
 # レビュー・指摘（4.1 の wbs_reviews・wbs_review_comments。要求 WBS-20）
 REVIEW_STATUSES = ("OPEN", "CLOSED")
 REVIEW_STATUS_INITIAL = "OPEN"
+REVIEW_STATUS_CLOSED = "CLOSED"
 COMMENT_CATEGORIES = ("OMISSION", "DUPLICATION", "AMBIGUITY", "OTHER")
 COMMENT_STATUSES = ("OPEN", "RESOLVED", "REJECTED")
 COMMENT_STATUS_INITIAL = "OPEN"
@@ -83,6 +84,8 @@ class WbsElement(Base):
         CheckConstraint("sibling_seq >= 1", name="sibling_seq"),
         CheckConstraint("last_child_seq >= 0", name="last_child_seq"),
         CheckConstraint("own_estimate_hours IS NULL OR own_estimate_hours >= 0", name="own_estimate_hours"),
+        # 内部キーを再利用しない（設計書 1.1 の 4.2。写しの値が後から作った別の行を指さないため）
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -106,10 +109,15 @@ class WbsNumberingRule(Base):
 
     プロジェクトに 1 つ（``project_id`` は一意）。プロジェクトを作るとき（API-PRJ-001）に既定の行を作る。
     ``min_digits`` は順番を 0 詰めする桁数（1 以上）。区切り文字・接頭辞の形の検査は規則を変える API（API-WBS-006）が行う。
+    ``top_last_child_seq`` は第 1 階層で今まで使った最大の順番（設計書 1.1 の 4.1・5.2。第 1 階層の親の ``last_child_seq`` に当たる。
+    減らさない：第 1 階層の要素を消しても番号を再利用しない）。
     """
 
     __tablename__ = "wbs_numbering_rules"
-    __table_args__ = (CheckConstraint("min_digits >= 1", name="min_digits"),)
+    __table_args__ = (
+        CheckConstraint("min_digits >= 1", name="min_digits"),
+        CheckConstraint("top_last_child_seq >= 0", name="top_last_child_seq"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), unique=True)
@@ -121,6 +129,7 @@ class WbsNumberingRule(Base):
     )
     prefix: Mapped[str] = mapped_column(String(20), default=PREFIX_DEFAULT, server_default=text(f"'{PREFIX_DEFAULT}'"))
     pad_first_level: Mapped[bool] = mapped_column(Boolean, default=PAD_FIRST_LEVEL_DEFAULT, server_default=true())
+    top_last_child_seq: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 # DB-WBS-003
@@ -276,6 +285,7 @@ class ScopeBaselineElement(Base):
     """スコープベースラインの版に固定した要素の写し（要求 WBS-22：その時点の WBS と辞書を後から変更されない形で照会できる）。
 
     ``element_id``・``parent_element_id`` は写した時点の要素とその親の内部キー（木は版の中でこの 2 つでたどる）。
+    写しの値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2：基準の後に要素を消しても版は変わらない。CR-002）。
     WBS ID・区分・名称・自分の見積は写した時点の値、``dictionary`` は WBS 辞書の写し（辞書が無ければ空）。
     """
 
@@ -287,8 +297,8 @@ class ScopeBaselineElement(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scope_baseline_id: Mapped[int] = mapped_column(ForeignKey("scope_baselines.id"), index=True)
-    element_id: Mapped[int] = mapped_column(ForeignKey("wbs_elements.id"), index=True)
-    parent_element_id: Mapped[int | None] = mapped_column(ForeignKey("wbs_elements.id"), index=True)
+    element_id: Mapped[int] = mapped_column(Integer, index=True)
+    parent_element_id: Mapped[int | None] = mapped_column(Integer, index=True)
     wbs_code: Mapped[str] = mapped_column(String(100))
     kind: Mapped[str] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(200))

@@ -158,6 +158,8 @@ class SummaryRowOut(BaseModel):
     - member：``user_id``（空は「未割当」）・``name``（表示名）
     - organization：``bucket_kind``（ORGANIZATION／NO_ORGANIZATION／UNASSIGNED）・``name``（所属）
     - week・month：``bucket_kind``（PERIOD／REMAINING／UNSCHEDULED）・``period_start``（PERIOD の初日）
+    - どの軸も、版にあって今は無い活動・WP の基準は最後の行 ``bucket_kind``＝BASELINE_REMOVED（基準にあって今は無い）に置く
+      （基準だけを持つ。WBS の軸ではプロジェクトの直下＝``parent_id`` が空。5.8）。無ければ行を出さない
     """
 
     bucket_kind: str

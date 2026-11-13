@@ -1,5 +1,6 @@
 // レポート・共有の画面（UI-RPT-001・002）の呼び名と小さな書式
-import type { ReportSource, ShareLinkFailure, ShareScope } from "../../api/rpt";
+import type { ReportSource, ShareLink, ShareLinkFailure, ShareScope } from "../../api/rpt";
+import { serverTime } from "../../lib/format";
 
 /** 値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値 */
 export function sourceLabel(source: ReportSource): string {
@@ -20,6 +21,26 @@ export const SHARE_FAILURE_LABELS: Record<ShareLinkFailure, string> = {
   REVOKED: "このリンクは失効しています",
   EXPIRED: "このリンクは有効期限が切れています",
 };
+
+/** 共有リンクの今の状態（一覧の表示用。閲覧の可否の正はサーバの RULE-AUTH-002） */
+export type ShareLinkState = "ACTIVE" | "REVOKED" | "EXPIRED";
+
+export const SHARE_LINK_STATE_LABELS: Record<ShareLinkState, string> = {
+  ACTIVE: "有効",
+  REVOKED: "失効",
+  EXPIRED: "期限切れ",
+};
+
+/**
+ * 共有リンクの状態：失効させた（revoked_at あり）を有効期限より先に見て、有効期限の時刻ちょうどからは期限切れ
+ * （サーバの共有リンクの判定と同じ順と境界）。now はエポックからのミリ秒
+ */
+export function shareLinkState(link: Pick<ShareLink, "expires_at" | "revoked_at">, now: number): ShareLinkState {
+  if (link.revoked_at !== null) {
+    return "REVOKED";
+  }
+  return now >= serverTime(link.expires_at) ? "EXPIRED" : "ACTIVE";
+}
 
 /** 小数 2 桁で丸めた数（サーバの値は丸め済みのことが多いが、浮動小数の端を見せない） */
 function round2(value: number): number {

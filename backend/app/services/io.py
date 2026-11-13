@@ -1,6 +1,8 @@
 """表形式の入出力（INT）のユースケース（設計書 6.2 の API-INT-001・002、6.3、9 章。要求仕様書 INT-01・BR-02）。
 
-- 権限（RULE-AUTH-001）：出力は data.export、取込は data.import。委託先だけで読む利用者（9.2 の注記）の出力は、
+- 権限（RULE-AUTH-001）：出力は data.export、取込は data.import と対象の書く権限（``wbs`` は wbs.edit、``activities`` は
+  schedule.edit。どちらも見積の列を変える行があれば estimate.edit も。``time-entries`` は data.import だけ。設計書 1.1・CR-006）。
+  委託先だけで読む利用者（9.2 の注記）の出力は、
   自分の割当の活動とその WBS の経路に絞る（見えない活動の先行・実績は出さない）
 - 列・照合・検査・往復の一致は RULE-INT-001（``app.domain.tabular``）。このモジュールは DB の行を 6.3 の行へ直して渡し、
   取込の計画（``ImportPlan``）を DB へ書く
@@ -19,7 +21,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -82,11 +84,13 @@ from app.services.wbs import (
     _load,
     _mark_edited,
     _preorder,
-    _top_last_child_seq,
 )
 
 DATA_EXPORT: Final = "data.export"
 DATA_IMPORT: Final = "data.import"
+WBS_EDIT: Final = "wbs.edit"
+SCHEDULE_EDIT: Final = "schedule.edit"
+ESTIMATE_EDIT: Final = "estimate.edit"
 STATUS_FINALIZED: Final = "FINALIZED"
 WORK_PACKAGE: Final = "WORK_PACKAGE"
 
@@ -437,21 +441,46 @@ def import_data(
     dry_run: bool,
     now: datetime,
 ) -> ImportResult:
-    """6.3 の表を取り込む（data.import。INT-01・BR-02）。全行を検査し、誤りが 1 件でもあれば何も書かない。
+    """6.3 の表を取り込む（data.import と対象の書く権限。INT-01・BR-02）。全行を検査し、誤りが 1 件でもあれば何も書かない。
 
     ``dry_run`` は検査と書く行の一覧だけを返す（誤りがあっても 200）。``dry_run`` でなく誤りがあれば 422 ``IMPORT_INVALID``。
     WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006。``dry_run`` でも同じ）。
+    権限（設計書 1.1 の API-INT-002・CR-006）：data.import に加えて、``wbs`` は wbs.edit、``activities`` は schedule.edit を
+    初めに確かめる（無ければ 403。何も読まない）。見積の列を変える行があれば estimate.edit も確かめる（行の検査の後。``dry_run`` でも同じ）。
     """
     authorize_project(session, access, actor, project_id, DATA_IMPORT)
+    write_permission = _WRITE_PERMISSIONS.get(target)
+    if write_permission is not None:
+        authorize_project(session, access, actor, project_id, write_permission)
+
+    def require_estimate_edit() -> None:
+        authorize_project(session, access, actor, project_id, ESTIMATE_EDIT)
+
     try:
         grid = read_grid(file_format, data)
     except TabularFileError as exc:
         return _rejected(target, file_format, dry_run, exc.issues)
     if target is TabularTarget.WBS:
-        return _import_wbs(session, actor, activities, project_id, grid, file_format, dry_run=dry_run, now=now)
+        return _import_wbs(session, actor, activities, project_id, grid, file_format, dry_run=dry_run, now=now,
+                           require_estimate_edit=require_estimate_edit)
     if target is TabularTarget.ACTIVITIES:
-        return _import_activities(session, actor, links, project_id, grid, file_format, dry_run=dry_run, now=now)
+        return _import_activities(session, actor, links, project_id, grid, file_format, dry_run=dry_run, now=now,
+                                  require_estimate_edit=require_estimate_edit)
     return _import_time_entries(session, project_id, grid, file_format, dry_run=dry_run)
+
+
+# 取込の対象ごとの書く権限（設計書 1.1 の API-INT-002）。time-entries は data.import だけ（他人の行を書く権限が 9.1 に無い）
+_WRITE_PERMISSIONS: Final[Mapping[TabularTarget, str]] = {
+    TabularTarget.WBS: WBS_EDIT,
+    TabularTarget.ACTIVITIES: SCHEDULE_EDIT,
+}
+
+
+def _changes_estimate(action: ChangeAction, changed: Sequence[str], value: Decimal | None, column: str) -> bool:
+    """取込の行が見積の列を変えるか（追加の行は値があれば、更新の行はその列が変わっていれば。estimate.edit を要する）。"""
+    if action is ChangeAction.CREATE:
+        return value is not None
+    return column in changed
 
 
 # --- wbs -------------------------------------------------------------------
@@ -468,7 +497,7 @@ def _check_wbs_editable(status: str) -> None:
 
 def _import_wbs(
     session: Session, actor: User, activities: ActivitiesReader, project_id: int, grid: Sequence[Sequence[object]],
-    file_format: FileFormat, *, dry_run: bool, now: datetime,
+    file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.WBS
     context = _load(session, project_id, activities)
@@ -498,6 +527,8 @@ def _import_wbs(
     ]
     if issues:
         return _rejected(target, file_format, dry_run, issues)
+    if any(_changes_estimate(c.action, c.changed, c.row.own_estimate_hours, "自分の見積（人時）") for c in plan.changes):
+        require_estimate_edit()
     if plan.changes:
         _check_wbs_editable(context.project.wbs_status)
     if dry_run or not plan.changes:
@@ -548,7 +579,7 @@ def _write_wbs(
         parent = None if parent_id is None else by_id[parent_id]
         try:
             code = new_element_code(None if parent is None else _coded(parent), rule,
-                                    top_last_child_seq=_top_last_child_seq(elements) if parent is None else None)
+                                    top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None)
         except WbsCodeError as exc:
             raise code_error(exc) from exc
         element = WbsElement(
@@ -558,7 +589,9 @@ def _write_wbs(
             responsible_user_id=None if row.responsible_login_id is None else assignable[row.responsible_login_id],
             needs_renumber=code.needs_renumber,
         )
-        if parent is not None:
+        if parent is None:
+            context.rule_row.top_last_child_seq = code.parent_last_child_seq
+        else:
             parent.last_child_seq = code.parent_last_child_seq
         session.add(element)
         session.flush()
@@ -589,13 +622,16 @@ def _write_wbs(
         try:
             result = move_element(
                 [_coded(e) for e in elements], element_id, new_parent_id, rule,
-                top_last_child_seq=_top_last_child_seq(elements)
+                top_last_child_seq=context.rule_row.top_last_child_seq
                 if new_parent_id is None and element.parent_id is not None else None,
             )
         except WbsCodeError as exc:
             raise code_error(exc) from exc
-        if result.parent_last_child_seq is not None and new_parent_id is not None:
-            by_id[new_parent_id].last_child_seq = result.parent_last_child_seq
+        if result.parent_last_child_seq is not None:
+            if new_parent_id is None:
+                context.rule_row.top_last_child_seq = result.parent_last_child_seq
+            else:
+                by_id[new_parent_id].last_child_seq = result.parent_last_child_seq
         element.sort_order = end_of(new_parent_id, excluding=element_id)
         element.parent_id = new_parent_id
         element.sibling_seq = result.sibling_seq
@@ -644,7 +680,7 @@ def _write_dictionary(session: Session, element_id: int, row: WbsRow, entry: Wbs
 
 def _import_activities(
     session: Session, actor: User, links: ScheduleLinks, project_id: int, grid: Sequence[Sequence[object]],
-    file_format: FileFormat, *, dry_run: bool, now: datetime,
+    file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.ACTIVITIES
     plan = load_plan(session, project_id)
@@ -677,6 +713,8 @@ def _import_activities(
                                           f"ログインID {login!r} はプロジェクトのメンバーである有効な利用者でない"))
     if issues:
         return _rejected(target, file_format, dry_run, issues)
+    if any(_changes_estimate(c.action, c.changed, c.row.estimate_hours, "見積（人時）") for c in result.changes):
+        require_estimate_edit()
 
     def key(change: ActivityChange) -> str:
         return "" if change.activity_id is None else str(change.activity_id)

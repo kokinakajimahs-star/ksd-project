@@ -1,12 +1,13 @@
 // ガントとイナズマ線の描画（設計書 7.3）。SVG のレイヤ（下から）：
 // ①非稼働日の帯 ②ベースラインのバー ③予定のバー（クリティカルは赤い枠） ④実績のバー ⑤依存の矢印
 // ⑥報告日線 ⑦イナズマ線 ⑧過去の線。行の順はサーバが返す順（RULE-SCH-005）。見えている行だけを描く（NFR-02）
-import { useMemo, useState, type UIEvent } from "react";
+import { Fragment, useMemo, useState, type UIEvent } from "react";
 
 import type { Judgement, LightningLine, OverlaidLine } from "../../api/prg";
 import type { ReportLightning } from "../../api/rpt";
 import type { AxisPoint, Gantt, GanttBar, GanttRow } from "../../api/sch";
 import {
+  chartExtraDates,
   chartRange,
   type DateRange,
   DAY_WIDTH,
@@ -19,6 +20,7 @@ import {
   rangeWidth,
   ROW_HEIGHT,
   ticks,
+  vertexMark,
   visibleRows,
   xOfDate,
   xOfPoint,
@@ -126,25 +128,13 @@ export default function GanttChart({
     return null;
   }, [gantt.rows, lightning, reportLightning, positionOfActivity, positionOfRow]);
 
+  // 範囲を広げる日付は GanttPage（非稼働日を受け取る範囲）と同じ関数で集める（7.3）
   const range = useMemo((): DateRange | null => {
     if (fixedRange !== null) {
       return fixedRange;
     }
-    const extra: string[] = [];
-    if (mainLine !== null) {
-      extra.push(mainLine.reportLine.calendar.date);
-      for (const v of mainLine.vertices) {
-        extra.push(v.point.calendar.date);
-      }
-    }
-    for (const line of pastLines) {
-      extra.push(line.report_line.calendar.date);
-      for (const v of line.vertices) {
-        extra.push(v.point.calendar.date);
-      }
-    }
-    return chartRange(gantt, extra);
-  }, [gantt, mainLine, pastLines, fixedRange]);
+    return chartRange(gantt, chartExtraDates(gantt.rows, { lightning, reportLightning, pastLines }));
+  }, [gantt, lightning, reportLightning, pastLines, fixedRange]);
 
   if (range === null || gantt.rows.length === 0) {
     return <p className="gantt-empty">描く活動がありません</p>;
@@ -358,16 +348,18 @@ export default function GanttChart({
               {lightningVertices
                 .filter((v) => isVisible(v.row))
                 .map((v) => (
-                  <circle
-                    key={v.row}
-                    data-judgement={v.judgement}
-                    cx={v.x}
-                    cy={rowCenter(v.row)}
-                    r={4}
-                    fill={judgementColor(v.judgement)}
-                  >
-                    <title>{v.title}</title>
-                  </circle>
+                  <Fragment key={v.row}>
+                    <circle
+                      data-judgement={v.judgement}
+                      cx={v.x}
+                      cy={rowCenter(v.row)}
+                      r={4}
+                      fill={judgementColor(v.judgement)}
+                    >
+                      <title>{v.title}</title>
+                    </circle>
+                    <VertexMarkPath judgement={v.judgement} cx={v.x} cy={rowCenter(v.row)} r={4} />
+                  </Fragment>
                 ))}
             </>
           )}
@@ -399,14 +391,16 @@ export default function GanttChart({
                 {vertices
                   .filter((v) => isVisible(v.row))
                   .map((v) => (
-                    <circle
-                      key={v.row}
-                      data-judgement={v.judgement}
-                      cx={v.x}
-                      cy={rowCenter(v.row)}
-                      r={2.5}
-                      fill={judgementColor(v.judgement)}
-                    />
+                    <Fragment key={v.row}>
+                      <circle
+                        data-judgement={v.judgement}
+                        cx={v.x}
+                        cy={rowCenter(v.row)}
+                        r={2.5}
+                        fill={judgementColor(v.judgement)}
+                      />
+                      <VertexMarkPath judgement={v.judgement} cx={v.x} cy={rowCenter(v.row)} r={2.5} />
+                    </Fragment>
                   ))}
               </g>
             );
@@ -445,5 +439,25 @@ export default function GanttChart({
         </g>
       </svg>
     </div>
+  );
+}
+
+/** 頂点に重ねる印（7.3：完了＝白いチェック、未着手（予定内）＝白い穴。色は予定どおりのまま） */
+function VertexMarkPath({ judgement, cx, cy, r }: { judgement: Judgement; cx: number; cy: number; r: number }) {
+  const mark = vertexMark(judgement, cx, cy, r);
+  if (mark === null) {
+    return null;
+  }
+  return (
+    <path
+      data-mark={mark.kind}
+      d={mark.d}
+      fill={mark.kind === "hole" ? "#ffffff" : "none"}
+      stroke={mark.kind === "check" ? "#ffffff" : "none"}
+      strokeWidth={Math.max(1, r * 0.35)}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      pointerEvents="none"
+    />
   );
 }

@@ -30,7 +30,7 @@ from app.domain.wbs_rules import (
 from app.domain.workflow import ApprovalStatus
 from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
-from app.models.cmn import AuthSession, User
+from app.models.cmn import AuthSession, RolePermission, User
 from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import (
@@ -175,6 +175,33 @@ def test_deleted_number_is_not_reused_under_parent(world: World) -> None:
     assert world.client.delete(world.url(f"/elements/{b['id']}"), headers=world.headers["planner"]).status_code == 204
     c = world.add("C", parent["id"])
     assert c["wbs_code"] == "1.3"
+
+
+def test_deleted_number_is_not_reused_at_first_level(world: World) -> None:
+    """API-WBS-002・003：第 1 階層も消した番号を再利用しない（設計書 1.1 の 4.1・5.2：top_last_child_seq。CR-003）。
+
+    順番が最大の第 1 階層の要素を消しても次は 3.0。第 1 階層へ移した要素も数えを進め、消しても番号を戻さない。
+    """
+    world.add("A")
+    b = world.add("B")
+    assert world.client.delete(world.url(f"/elements/{b['id']}"), headers=world.headers["planner"]).status_code == 204
+    c = world.add("C")
+    assert (c["wbs_code"], c["sibling_seq"]) == ("3.0", 3)
+
+    child = world.add("子", c["id"])
+    response = world.client.post(world.url(f"/elements/{child['id']}/move"), json={"parent_id": None},
+                                 headers=world.headers["planner"])
+    assert response.status_code == 200, response.text
+    assert response.json()["sibling_seq"] == 4
+    assert world.client.delete(world.url(f"/elements/{child['id']}"), headers=world.headers["planner"]).status_code == 204
+    d = world.add("D")
+    assert (d["wbs_code"], d["sibling_seq"]) == ("5.0", 5)
+
+    # 改番は兄弟を 1 から振り直すが、数えは減らさない（BR-02）
+    assert world.client.post(world.url("/renumber"), headers=world.headers["planner"]).status_code == 200
+    assert codes(world.tree()) == ["1.0", "2.0", "3.0"]
+    e = world.add("E")
+    assert (e["wbs_code"], e["sibling_seq"]) == ("6.0", 6)
 
 
 def test_add_element_rejections(world: World) -> None:
@@ -402,17 +429,25 @@ def test_delete_records_audit_logs_for_bulk_statements(world: World, db_session:
     assert (nulled.before["element_id"], nulled.after["element_id"]) == (child["id"], None)
 
 
-def test_delete_baselined_element_is_422(world: World, db_session: Session) -> None:
-    """API-WBS-005：スコープベースラインの版に入った要素は 422 ELEMENT_IN_BASELINE（CR-002 の暫定。版の写しを変えない）。"""
+def test_delete_baselined_element_keeps_baseline_copy(world: World, db_session: Session) -> None:
+    """API-WBS-005：スコープベースラインの版に入った要素も消せ、版の写しは変わらない（設計書 1.1 の 4.2・5.10。CR-002。WBS-22）。"""
     element = world.add("基準の要素")
     baseline = ScopeBaseline(project_id=world.pid, version=1, reason="INITIAL_APPROVAL", created_by=world.admin.id)
     db_session.add(baseline)
     db_session.flush()
-    db_session.add(ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"], wbs_code="1.0",
-                                        kind="DELIVERABLE", name="基準の要素"))
+    copy = ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"], wbs_code="1.0",
+                                kind="DELIVERABLE", name="基準の要素")
+    db_session.add(copy)
     db_session.commit()
+    copy_id = copy.id
     response = world.client.delete(world.url(f"/elements/{element['id']}"), headers=world.headers["planner"])
-    assert (response.status_code, response.json()["error"]["code"]) == (422, "ELEMENT_IN_BASELINE")
+    assert response.status_code == 204, response.text
+    db_session.expire_all()
+    assert db_session.get(WbsElement, element["id"]) is None
+    kept = db_session.get(ScopeBaselineElement, copy_id)
+    assert kept is not None and (kept.element_id, kept.wbs_code, kept.name) == (element["id"], "1.0", "基準の要素")
+    # 消した要素の内部キーは再利用しない（後から足した要素を写しが指さない）
+    assert world.add("後から足した要素")["id"] > element["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +521,44 @@ def test_scope_links_rejections(world: World) -> None:
     assert world.client.put(world.url(f"/elements/{MISSING}/scope-links"), json={"scope_item_ids": []},
                             headers=world.headers["planner"]).status_code == 404
     assert world.client.put(url, json={"scope_item_ids": []}, headers=world.headers["viewer"]).status_code == 403
+
+
+def test_get_scope_links_reads_current_links(world: World, app: FastAPI) -> None:
+    """API-WBS-026 要素とスコープ項目の紐付けを読む（設計書 1.1・CR-004）：今の紐付けを項目の ID の順で返す。
+
+    権限は project.view。無い要素は 404、委託先には割当の経路の要素だけ（他は 404）、メンバーでない人は 403。
+    """
+    parent = world.add("設計")
+    wp = world.add("基本設計", parent["id"], kind="WORK_PACKAGE")
+    other = world.add("管理", kind="WORK_PACKAGE")
+    items = world.client.put(f"/api/v1/projects/{world.pid}/scope-items",
+                             json={"items": [{"kind": "IN", "title": "a"}, {"kind": "IN", "title": "b"},
+                                             {"kind": "OUT", "title": "c"}]},
+                             headers=world.headers["pm"]).json()["items"]
+    ids = [i["id"] for i in items]
+    url = world.url(f"/elements/{wp['id']}/scope-links")
+    put = world.client.put(url, json={"scope_item_ids": [ids[2], ids[0]]}, headers=world.headers["planner"])
+    assert put.status_code == 200, put.text
+
+    got = world.client.get(url, headers=world.headers["viewer"])
+    assert got.status_code == 200, got.text
+    assert got.json()["element_id"] == wp["id"]
+    assert got.json()["scope_item_ids"] == sorted(put.json()["scope_item_ids"])  # 置き換えた紐付け（項目の ID の順）
+    empty = world.client.get(world.url(f"/elements/{other['id']}/scope-links"), headers=world.headers["viewer"])
+    assert empty.status_code == 200 and empty.json()["scope_item_ids"] == []
+    assert world.client.get(world.url(f"/elements/{MISSING}/scope-links"),
+                            headers=world.headers["viewer"]).status_code == 404
+    assert world.client.get(url, headers=world.headers["outsider"]).status_code == 403
+
+    # 委託先：割当の活動（101）の WP とその上だけが見える
+    contractor = world.users["contractor"].id
+    app.state.wbs_activities = FakeActivities({101: wp["id"]})
+    app.state.project_access = ProjectMembersTable(assignments=FakeAssigned({contractor: frozenset({101})}))
+    assert world.client.get(url, headers=world.headers["contractor"]).json()["scope_item_ids"] == sorted([ids[2], ids[0]])
+    assert world.client.get(world.url(f"/elements/{parent['id']}/scope-links"),
+                            headers=world.headers["contractor"]).status_code == 200
+    hidden = world.client.get(world.url(f"/elements/{other['id']}/scope-links"), headers=world.headers["contractor"])
+    assert hidden.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +648,10 @@ def test_review_start_comment_and_update(world: World) -> None:
 
 
 def test_review_rejections(world: World, db_session: Session) -> None:
-    """API-WBS-014〜017：レビュー中の開始は 409、メンバーでない人は 400、権限なしは 403、無いものは 404、閉じたレビューは 409。"""
+    """API-WBS-014〜017：レビュー中の開始は 409、メンバーでない人は 400、権限なしは 403、無いものは 404。
+
+    閉じたレビューに指摘を書くのは 409。閉じたレビューの指摘の状態は変えられる（5.10。設計書 1.1・CR-004）。
+    """
     element = world.add("要素")
     outsider = world.users["outsider"].id
     assert world.client.post(world.url("/reviews"), json={"reviewer_ids": [outsider]},
@@ -606,8 +682,81 @@ def test_review_rejections(world: World, db_session: Session) -> None:
     db_review.status, db_review.closed_at = "CLOSED", NOW
     db_session.commit()
     assert world.client.post(comments_url, json=body, headers=world.headers["pm"]).status_code == 409
-    assert world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "OPEN"},
-                              headers=world.headers["planner"]).status_code == 409
+    reopened = world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "OPEN"},
+                                  headers=world.headers["planner"])
+    assert (reopened.status_code, reopened.json()["status"]) == (200, "OPEN")
+    assert world.client.patch(f"{comments_url}/{comment['id']}", json={"status": "RESOLVED"},
+                              headers=world.headers["viewer"]).status_code == 403
+
+
+def test_review_list_and_close(world: World, db_session: Session) -> None:
+    """API-WBS-025 レビューの一覧・API-WBS-024 レビューを閉じる（IN_REVIEW → DRAFT。設計書 1.1・CR-004）。
+
+    一覧は新しい順（project.view）。閉じると CLOSED と閉じた時刻が入り、WBS は DRAFT に戻る（指摘は残る）。
+    閉じるのは wbs.edit。閉じたレビューは 409、無いレビューは 404。
+    """
+    element = world.add("要素")
+    pm = world.users["pm"].id
+    reviews_url = world.url("/reviews")
+    empty = world.client.get(reviews_url, headers=world.headers["viewer"])
+    assert empty.status_code == 200, empty.text
+    assert (empty.json()["items"], empty.json()["total"]) == ([], 0)
+
+    first = world.client.post(reviews_url, json={"reviewer_ids": [pm]}, headers=world.headers["planner"]).json()
+    comment = world.client.post(world.url(f"/reviews/{first['id']}/comments"),
+                                json={"element_id": element["id"], "category": "OTHER", "body": "b"},
+                                headers=world.headers["pm"]).json()
+    close_url = world.url(f"/reviews/{first['id']}/close")
+    assert world.client.post(close_url, headers=world.headers["viewer"]).status_code == 403
+    assert world.client.post(world.url(f"/reviews/{MISSING}/close"), headers=world.headers["planner"]).status_code == 404
+    # PM がロールの表から project.view を外し wbs.edit だけを持つロールでは、応答（レビューと指摘）を読めないので閉じる前に 403
+    view = db_session.scalars(select(RolePermission).where(
+        RolePermission.project_id == world.pid, RolePermission.role == "PLANNER", RolePermission.permission == "project.view",
+    )).one()
+    db_session.delete(view)
+    db_session.commit()
+    assert world.client.post(close_url, headers=world.headers["planner"]).status_code == 403
+    db_session.add(RolePermission(project_id=world.pid, role="PLANNER", permission="project.view"))
+    db_session.commit()
+    still = world.client.get(world.url(f"/reviews/{first['id']}"), headers=world.headers["viewer"]).json()
+    assert (still["status"], world.tree()["wbs_status"]) == ("OPEN", "IN_REVIEW")  # 403 の前に何も変えていない
+    closed = world.client.post(close_url, headers=world.headers["planner"])
+    assert closed.status_code == 200, closed.text
+    body = closed.json()
+    assert (body["status"], body["closed_at"]) == ("CLOSED", NOW.isoformat().replace("+00:00", "Z"))
+    assert [(c["id"], c["status"]) for c in body["comments"]] == [(comment["id"], "OPEN")]  # 指摘は残る
+    assert world.tree()["wbs_status"] == "DRAFT"
+    again = world.client.post(close_url, headers=world.headers["planner"])
+    assert (again.status_code, again.json()["error"]["code"]) == (409, "INVALID_STATE")
+
+    second = world.client.post(reviews_url, json={"reviewer_ids": [pm]}, headers=world.headers["planner"])
+    assert second.status_code == 201, second.text  # 閉じた後は新しいレビューを始められる
+    listed = world.client.get(reviews_url, headers=world.headers["viewer"]).json()
+    assert [(r["id"], r["status"]) for r in listed["items"]] == [(second.json()["id"], "OPEN"), (first["id"], "CLOSED")]
+    assert (listed["project_id"], listed["total"], listed["limit"], listed["offset"]) == (world.pid, 2, 100, 0)
+    assert listed["items"][1]["reviewer_ids"] == [pm] and listed["items"][1]["requested_by"] == world.users["planner"].id
+    paged = world.client.get(reviews_url, params={"limit": 1, "offset": 1}, headers=world.headers["viewer"]).json()
+    assert [r["id"] for r in paged["items"]] == [first["id"]]
+    assert world.client.get(reviews_url, params={"limit": 1001}, headers=world.headers["viewer"]).status_code == 400
+    assert world.client.get(reviews_url, headers=world.headers["outsider"]).status_code == 403
+
+    # WBS が IN_REVIEW でなければ閉じられない（レビューが OPEN のまま状態だけずれた場合も 409）
+    world.set_status("DRAFT")
+    stale = world.client.post(world.url(f"/reviews/{second.json()['id']}/close"), headers=world.headers["planner"])
+    assert (stale.status_code, stale.json()["error"]["code"]) == (409, "INVALID_STATE")
+
+    # 閉じたレビューに残った未対応の指摘は申請の前提（5.10）に数え、閉じた後でも対応すれば前提から外れる（申請が塞がらない）
+    def unmet() -> list[str]:
+        response = world.client.post(world.url("/approval-requests"), headers=world.headers["planner"])
+        assert response.status_code in (201, 422), response.text
+        return [] if response.status_code == 201 else [d["condition"] for d in response.json()["error"]["details"]]
+
+    assert "open_comments" in unmet()
+    resolved = world.client.patch(world.url(f"/reviews/{first['id']}/comments/{comment['id']}"),
+                                  json={"status": "RESOLVED", "resolution": "直した"}, headers=world.headers["planner"])
+    assert resolved.status_code == 200, resolved.text
+    assert (resolved.json()["status"], resolved.json()["resolution"]) == ("RESOLVED", "直した")
+    assert "open_comments" not in unmet()
 
 
 # ---------------------------------------------------------------------------

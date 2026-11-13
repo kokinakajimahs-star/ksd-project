@@ -520,7 +520,7 @@ def test_time_entry_value_and_key_checks() -> None:
 
 
 def test_time_entry_effort_rules_are_applied() -> None:
-    """RULE-INT-001：書く行に RULE-EFF-005 を当てる（自分の割当・1 日の合計 24 時間以下・確定した報告日より前の日）。"""
+    """RULE-INT-001：書く行に RULE-EFF-005 を当てる（自分の割当・1 日の合計 24 時間以下・確定した報告日以前の日）。"""
     not_assigned = entry_plan(entry_grid(["u2", "10", "2026-11-05", "1", ""]))
     assert codes(not_assigned) == [(2, "活動ID", ImportIssueCode.NOT_ASSIGNED)]
 
@@ -529,7 +529,7 @@ def test_time_entry_effort_rules_are_applied() -> None:
     over = entry_plan(entry_grid(["u1", "11", "2026-11-04", "4.01", ""]))
     assert codes(over) == [(2, "工数（人時）", ImportIssueCode.DAY_TOTAL_EXCEEDED)]
 
-    finalized = [date(2026, 11, 3)]
+    finalized = [date(2026, 11, 2)]  # 報告日の当日も締める（設計書 1.1・CR-005）
     locked = entry_plan(entry_grid(["u1", "10", "2026-11-02", "6", "初日"]), finalized)
     assert codes(locked) == [(2, "作業日", ImportIssueCode.LOCKED_DATE)]
     note_only = entry_plan(entry_grid(["u1", "10", "2026-11-02", "8", "初日（訂正）"]), finalized)

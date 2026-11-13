@@ -6,14 +6,14 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import type { WbsElement } from "../../api/wbs";
 import { makeMe, makeMember, makeUser } from "../../test/fixtures";
-import { jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
 import { activityList, makeActivity } from "../../test/schFixtures";
+import { makeEstimateRecord } from "../../test/wbsFixtures";
 import ActivityListPage from "./ActivityListPage";
 import { toCreateInput, type FormState } from "./activities/AddActivityForm";
 import { toAssignmentInputs } from "./activities/AssignmentEditor";
 import { assignmentTotals, collectChanges, draftOf, parseIdList } from "./activities/bulkEdit";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
 const BASE = "/api/v1/projects/3";
 
 function meWith(permissions: string[]): Me {
@@ -26,6 +26,8 @@ function meWith(permissions: string[]): Me {
 
 const EDITOR = meWith(["project.view", "schedule.edit"]);
 const VIEWER = meWith(["project.view"]);
+/** 見積だけを書ける人（schedule.edit は持たない） */
+const ESTIMATOR = meWith(["project.view", "estimate.edit"]);
 
 const PLANNER = makeMember({ user_id: 2, display_name: "計画 太郎" });
 const EXECUTOR = makeMember({ user_id: 9, login_id: "exec", display_name: "実行 花子", roles: ["EXECUTOR"] });
@@ -110,7 +112,7 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
 
 function renderAt(path = "/projects/3/activities") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/projects/:projectId/activities" element={<ActivityListPage />} />
       </Routes>
@@ -371,6 +373,108 @@ describe("UI-SCH-001 タスクリスト", () => {
         { user_id: 9, planned_hours: 20 },
       ],
     });
+  });
+
+  it("estimate.edit を持つ人は活動の見積を書き（API-EST-001 の ACTIVITY。EST-01）、一覧を読み直す", async () => {
+    let saved = false;
+    const { calls } = mockApi(
+      routes(ESTIMATOR, {
+        [`GET ${BASE}/activities`]: () =>
+          jsonResponse(200, activityList([saved ? { ...A21, estimate_hours: 24 } : A21, A22, M23])),
+        [`PUT ${BASE}/estimates/ACTIVITY/21`]: () => {
+          saved = true;
+          const record = makeEstimateRecord({
+            id: 310,
+            target_type: "ACTIVITY",
+            target_id: 21,
+            hours: 24,
+            input_value: 3,
+            input_unit: "DAY",
+            method: "BOTTOM_UP",
+            assumptions: "画面 3 枚",
+            references: "見積表 第 2 版",
+          });
+          return jsonResponse(200, { record, current_hours: 24, wbs_status: "APPROVED", project_estimate_hours: 120 });
+        },
+      }),
+    );
+    renderAt();
+    const table = await screen.findByRole("table", { name: "活動の一覧" });
+    // schedule.edit が無いので、日程・担当を変える部品は出さない
+    expect(screen.queryByRole("form", { name: "活動を足す" })).toBeNull();
+    expect(screen.queryByLabelText("21 の名称")).toBeNull();
+    expect(screen.queryByRole("button", { name: "21 を消す" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "まとめて保存する" })).toBeNull();
+
+    fireEvent.click(await screen.findByRole("button", { name: "21 の見積" }));
+    const panel = screen.getByRole("region", { name: "活動 21 の見積" });
+    expect(panel).toHaveTextContent("今の見積：40 人時");
+    const form = within(panel).getByRole("form", { name: "見積を書く（活動 21 資料作成）" });
+    fireEvent.change(within(form).getByLabelText("見積"), { target: { value: "3" } });
+    fireEvent.change(within(form).getByLabelText("単位"), { target: { value: "DAY" } });
+    fireEvent.change(within(form).getByLabelText("見積手法"), { target: { value: "BOTTOM_UP" } });
+    fireEvent.change(within(form).getByLabelText("前提"), { target: { value: "画面 3 枚" } });
+    fireEvent.change(within(form).getByLabelText("参照資料"), { target: { value: "見積表 第 2 版" } });
+    fireEvent.click(within(form).getByRole("button", { name: "見積を保存する" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "活動 21（資料作成）の見積を 24 人時にした（プロジェクトの総見積 120 人時）",
+    );
+    const put = sent(calls, "PUT", `${BASE}/estimates/ACTIVITY/21`);
+    expect(put).toHaveLength(1);
+    expect(put[0]!.body).toEqual({
+      input_value: 3,
+      input_unit: "DAY",
+      method: "BOTTOM_UP",
+      assumptions: "画面 3 枚",
+      references: "見積表 第 2 版",
+    });
+    // 一覧を読み直し、見積（人時）の列が変わる。書く部品は閉じる
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(2));
+    await waitFor(() =>
+      expect(within(within(table).getAllByRole("row")[1]!).getAllByRole("cell")[9]).toHaveTextContent(/^24$/),
+    );
+    expect(screen.queryByRole("region", { name: "活動 21 の見積" })).toBeNull();
+  });
+
+  it("見積を書けなければサーバの文言を出し、一覧を読み直さない", async () => {
+    const { calls } = mockApi(
+      routes(ESTIMATOR, {
+        [`PUT ${BASE}/estimates/ACTIVITY/22`]: () => errorResponse(404, "NOT_FOUND", "見積の対象が見つかりません"),
+      }),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole("button", { name: "22 の見積" }));
+    const form = screen.getByRole("form", { name: "見積を書く（活動 22 関係者調整）" });
+    fireEvent.change(within(form).getByLabelText("見積"), { target: { value: "16" } });
+    fireEvent.click(within(form).getByRole("button", { name: "見積を保存する" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent("見積の対象が見つかりません");
+    expect(sent(calls, "PUT", `${BASE}/estimates/ACTIVITY/22`)[0]!.body).toEqual({
+      input_value: 16,
+      input_unit: "HOUR",
+      method: null,
+      assumptions: null,
+      references: null,
+    });
+    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("estimate.edit が無ければ見積の部品を出さない（見るだけの人・schedule.edit だけの人）", async () => {
+    mockApi(routes(VIEWER));
+    const viewer = renderAt();
+    await screen.findByRole("table", { name: "活動の一覧" });
+    expect(screen.queryByRole("button", { name: "21 の見積" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "操作" })).toBeNull();
+    viewer.unmount();
+
+    mockApi(routes(EDITOR));
+    renderAt();
+    await editable();
+    expect(screen.getByRole("button", { name: "21 を消す" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "21 の見積" })).toBeNull();
+    expect(screen.queryByRole("form", { name: /見積を書く/ })).toBeNull();
   });
 
   it("プロジェクトの ID が正しくなければ見つからないことを示す", () => {

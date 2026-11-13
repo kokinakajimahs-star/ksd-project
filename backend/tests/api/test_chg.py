@@ -22,7 +22,7 @@ from app.infra.security import generate_token, hash_token
 from app.models.chg import AuditLog, ChangeRequest
 from app.models.cmn import AuthSession, User
 from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
-from app.models.wbs import ApprovalRequest, ScopeBaseline, ScopeBaselineElement
+from app.models.wbs import ApprovalRequest, ScopeBaseline, ScopeBaselineElement, WbsElement, WbsNumberingRule
 from app.services.change import ChangeRequestStateMachine
 from app.services.clock import get_now
 
@@ -388,6 +388,55 @@ def test_approval_decision_moves_change_request_and_forbids_self_approval(world:
     assert closed.status_code == 409
 
 
+def test_withdraw_returns_to_draft_and_removes_pending_approval(world: World) -> None:
+    """API-CHG-011 提出した変更要求を取り下げる（SUBMITTED → DRAFT。承認申請を取り下げる。設計書 1.1・CR-004）。
+
+    保留中の承認申請の行を消し（変更履歴に DELETE が残る）、影響分析は残す。DRAFT に戻ると編集・提出し直しができる。
+    """
+    created = world.create()
+    url = world.url(f"/change-requests/{created['id']}/withdraw")
+    draft = world.client.post(url, headers=world.h["planner"])
+    assert draft.status_code == 409 and error_code(draft) == "INVALID_STATE"  # DRAFT は取り下げられない
+    submitted = world.submit(created["id"])
+    approval_id = submitted["approval_request_id"]
+    assert world.client.post(url, headers=world.h["executor"]).status_code == 403  # change.create が無い
+    assert world.client.post(url, headers=world.h["outsider"]).status_code == 403  # メンバーでない
+    missing = world.client.post(world.url(f"/change-requests/{MISSING}/withdraw"), headers=world.h["planner"])
+    assert missing.status_code == 404
+    withdrawn = world.client.post(url, headers=world.h["planner"])
+    assert withdrawn.status_code == 200, withdrawn.text
+    body = withdrawn.json()
+    assert (body["status"], body["submitted_at"], body["approval_request_id"]) == ("DRAFT", None, None)
+    assert body["impact"] == submitted["impact"]  # 影響分析は残す
+    world.session.expire_all()
+    assert world.session.get(ApprovalRequest, approval_id) is None
+    logs = world.client.get(world.url("/audit-logs"), params={"entity_type": "approval_requests",
+                                                               "entity_id": approval_id},
+                            headers=world.h["pm"]).json()["items"]
+    deleted = [r for r in logs if r["action"] == "DELETE"]
+    assert len(deleted) == 1
+    assert deleted[0]["user_id"] == world.uid("planner")
+    assert deleted[0]["before"]["status"] == "PENDING" and deleted[0]["after"] is None
+    # 消した承認申請には判断できない
+    world.decide(approval_id, "APPROVE", expect=404)
+    again = world.client.post(url, headers=world.h["planner"])
+    assert again.status_code == 409 and error_code(again) == "INVALID_STATE"
+    # DRAFT に戻ったので編集でき、提出し直すと新しい承認申請ができる
+    patched = world.client.patch(world.url(f"/change-requests/{created['id']}"), json={"title": "直した"},
+                                 headers=world.h["planner"])
+    assert patched.status_code == 200, patched.text
+    resubmitted = world.submit(created["id"])
+    assert resubmitted["status"] == "SUBMITTED"
+    world.session.expire_all()
+    rows = world.session.scalars(select(ApprovalRequest).where(ApprovalRequest.target_type == "CHANGE_REQUEST",
+                                                               ApprovalRequest.target_id == created["id"])).all()
+    # 取り下げた申請は消えており、提出し直した申請だけがある（SQLite は消した最大の ID を使い直すことがある）
+    assert [(r.id, r.status) for r in rows] == [(resubmitted["approval_request_id"], "PENDING")]
+    world.decide(resubmitted["approval_request_id"], "APPROVE")
+    approved = world.client.post(url, headers=world.h["planner"])
+    assert approved.status_code == 409 and error_code(approved) == "INVALID_STATE"  # 承認済みは取り下げられない
+
+
 # ---------------------------------------------------------------------------
 # API-CHG-006 反映と再基準化
 # ---------------------------------------------------------------------------
@@ -441,6 +490,24 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert again["error"]["code"] == "INVALID_STATE"
 
 
+def test_apply_adds_first_level_element_without_reusing_numbers(world: World) -> None:
+    """API-CHG-006：第 1 階層への追加は数え（top_last_child_seq）+ 1 で採番し、数えを進める（設計書 1.1 の 5.2。CR-003）。"""
+    extra, _ = world.element("消す成果物", None, "DELIVERABLE")
+    deleted = world.client.delete(world.url(f"/wbs/elements/{extra}"), headers=world.h["planner"])
+    assert deleted.status_code == 204, deleted.text
+    world.baseline_wbs()
+    draft = world.approved(operations=[{"op": "add_element", "parent_code": "", "kind": "DELIVERABLE", "name": "追加の成果物",
+                                        "ref": "d2"}])
+    world.apply(draft["id"])
+
+    world.session.expire_all()
+    added = world.session.scalar(select(WbsElement).where(WbsElement.project_id == world.pid,
+                                                          WbsElement.name == "追加の成果物"))
+    assert added is not None and (added.wbs_code, added.sibling_seq, added.parent_id) == ("3.0", 3, None)
+    rule = world.session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == world.pid))
+    assert rule is not None and rule.top_last_child_seq == 3
+
+
 def test_apply_requires_baselined_wbs(world: World) -> None:
     """API-CHG-006：WBS が BASELINED（承認済みの版がある）でなければ 409 INVALID_STATE、何も書かない。
 
@@ -466,20 +533,30 @@ def test_apply_requires_baselined_wbs(world: World) -> None:
     assert world.count(ScopeBaseline) == 1
 
 
-def test_apply_refuses_removing_baselined_element_and_writes_nothing(world: World) -> None:
-    """API-CHG-006 承認済みの変更を反映して再基準化する：版に入った要素の削除は 422 ELEMENT_IN_BASELINE（CR-002）、何も書かない。"""
+def test_apply_removes_baselined_element_and_keeps_old_versions(world: World) -> None:
+    """API-CHG-006 承認済みの変更を反映して再基準化する：版に入った要素も消せ、旧版の写しは変わらない（設計書 1.1 の 4.2。CR-002）。
+
+    新しい版には消した要素が無い。旧版の写しは消した要素の内部キーをそのまま持つ（WBS-22・BR-12）。
+    """
     world.baseline_wbs()
     first = world.approved()
-    world.apply(first["id"])  # 全ての要素がスコープの版に入る
+    applied_first = world.apply(first["id"])  # 全ての要素がスコープの版に入る
     removing = world.approved(target_codes=[world.wp2_code],
                               operations=[{"op": "remove_element", "code": world.wp2_code}])
-    elements_before = world.count(ScopeBaselineElement)
-    refused = world.apply(removing["id"], expect=422)
-    assert refused["error"]["code"] == "ELEMENT_IN_BASELINE"
+    applied = world.apply(removing["id"])
+    assert applied["change_request"]["status"] == "APPLIED"
+
     world.session.expire_all()
-    row = world.session.get(ChangeRequest, removing["id"])
-    assert row is not None and row.status == "APPROVED"
-    assert world.count(ScopeBaselineElement) == elements_before
+    assert world.session.get(WbsElement, world.wp2) is None
+    old_copy = world.session.scalars(select(ScopeBaselineElement.element_id).where(
+        ScopeBaselineElement.scope_baseline_id == applied_first["scope_baseline"]["id"]))
+    assert world.wp2 in set(old_copy)
+    new_copy = world.session.scalars(select(ScopeBaselineElement.element_id).where(
+        ScopeBaselineElement.scope_baseline_id == applied["scope_baseline"]["id"]))
+    assert world.wp2 not in set(new_copy)
+    old_items = world.session.scalars(select(ScheduleBaselineItem.element_id).where(
+        ScheduleBaselineItem.schedule_baseline_id == applied_first["schedule_baseline"]["id"]))
+    assert world.wp2 in set(old_items)
 
 
 def test_apply_removes_activity_and_updates_values(world: World) -> None:
@@ -506,7 +583,7 @@ def test_apply_removes_activity_and_updates_values(world: World) -> None:
 def test_direct_delete_refuses_rows_referenced_by_corrective_actions(world: World) -> None:
     """API-SCH-005・API-WBS-005 の直接の削除も、是正措置が指す活動・要素は 422（変更要求の反映と同じ。500 にしない）。
 
-    スケジュールベースラインの写しだけが指す要素は、写しの紐付けを空にして消せる（活動を消すときと同じ。A-19）。
+    スケジュールベースラインの写しが指す要素も消せ、写しは変わらない（設計書 1.1 の 4.2。CR-002）。
     """
     world.action(activity_id=world.b)
     refused = world.client.delete(world.url(f"/activities/{world.b}"), headers=world.h["planner"])
@@ -528,7 +605,7 @@ def test_direct_delete_refuses_rows_referenced_by_corrective_actions(world: Worl
     assert removed.status_code == 204, removed.text
     world.session.expire_all()
     kept = world.session.get(ScheduleBaselineItem, item.id)
-    assert kept is not None and kept.element_id is None
+    assert kept is not None and kept.element_id == wp3
 
 
 def test_create_corrective_action(world: World) -> None:

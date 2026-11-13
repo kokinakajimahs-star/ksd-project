@@ -1,7 +1,10 @@
 // UI-SCH-002 ガントチャート・イナズマ線（設計書 7.1 のルート /projects/:projectId/gantt。7.3 の描画）。
-// SCH-06・10・11・12・13、PRG-08・12・13・18。ガント（API-SCH-010）に、選んだ報告日のイナズマ線（API-PRG-006）と
+// SCH-06・10・11・12・13、PRG-01・08・12・13・18。ガント（API-SCH-010）に、選んだ報告日のイナズマ線（API-PRG-006）と
 // 確定済みの過去の線（API-PRG-008）を重ねる。比べる基準は版の一覧（API-SCH-012）から選ぶ（既定は最新の版）。
-// 日程の再計算（API-SCH-008）のボタンは schedule.edit を持つ人にだけ出す（7.2。サーバでも必ず判定する）
+// 非稼働日はサーバから受け取る：描く範囲（バーの範囲を報告日線・頂点・過去の線で広げたもの）が受け取った範囲に収まらなければ、
+// 描く範囲を range_start・range_end に渡して読み直す（7.3）。
+// 日程の再計算（API-SCH-008）のボタンは schedule.edit、報告日を作る部品（API-PRG-001。報告日が無くても出す）は
+// status_report.manage を持つ人にだけ出す（7.2。サーバでも必ず判定する）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -26,7 +29,16 @@ import {
 } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
 import GanttChart from "../../components/gantt/GanttChart";
-import { judgementColor, JUDGEMENT_LABELS, UNIT_LABELS, type GanttUnit } from "../../components/gantt/scale";
+import {
+  chartExtraDates,
+  judgementColor,
+  JUDGEMENT_LABELS,
+  rangeToRefetch,
+  UNIT_LABELS,
+  type DateRange,
+  type GanttUnit,
+} from "../../components/gantt/scale";
+import CreateReportForm from "../prg/CreateReportForm";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
 import { LIST_LIMIT_MAX } from "./limits";
 
@@ -44,6 +56,13 @@ export function latestReport(reports: StatusReport[]): StatusReport | null {
   return latest;
 }
 
+/** 報告日の一覧の順（サーバと同じ報告日の古い順）に、作った報告日を入れる */
+export function withReport(reports: StatusReport[], created: StatusReport): StatusReport[] {
+  return [...reports.filter((r) => r.id !== created.id), created].sort((a, b) =>
+    a.report_date < b.report_date ? -1 : a.report_date > b.report_date ? 1 : 0,
+  );
+}
+
 function deviationText(value: number): string {
   const rounded = Math.round(value * 100) / 100;
   return rounded > 0 ? `+${rounded}` : String(rounded);
@@ -54,6 +73,8 @@ export default function GanttPage() {
   const projectId = parseProjectId(params.projectId);
   const [me, setMe] = useState<Me | null>(null);
   const [gantt, setGantt] = useState<Gantt | null>(null);
+  /** 非稼働日を受け取る表示範囲として最後に要求した範囲。null は渡していない（バーの範囲） */
+  const [requestedRange, setRequestedRange] = useState<DateRange | null>(null);
   const [baselines, setBaselines] = useState<ScheduleBaseline[]>([]);
   const [reports, setReports] = useState<StatusReport[]>([]);
   /** 比べる基準の版。null はサーバの既定（最新の版） */
@@ -68,6 +89,7 @@ export default function GanttPage() {
   const [error, setError] = useState<ErrorView | null>(null);
   const [calculating, setCalculating] = useState(false);
   const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
+  const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
 
   // 自分の権限・基準の版・報告日（画面を開いたときに 1 回）
   useEffect(() => {
@@ -99,13 +121,13 @@ export default function GanttPage() {
     };
   }, [projectId]);
 
-  // ガントの描画データ（基準の版を選び直す・日程を計算し直すと読み直す）
+  // ガントの描画データ（基準の版を選び直す・日程を計算し直す・表示範囲が広がると読み直す）
   useEffect(() => {
     if (projectId === null) {
       return;
     }
     let cancelled = false;
-    getGantt(projectId, baselineId ?? undefined).then(
+    getGantt(projectId, baselineId ?? undefined, requestedRange ?? undefined).then(
       (result) => {
         if (!cancelled) {
           setGantt(result);
@@ -120,7 +142,7 @@ export default function GanttPage() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, baselineId, reloadKey]);
+  }, [projectId, baselineId, reloadKey, requestedRange]);
 
   // 選んだ報告日のイナズマ線（日程を計算し直すと OPEN の線も変わるので読み直す）
   useEffect(() => {
@@ -172,6 +194,24 @@ export default function GanttPage() {
     };
   }, [projectId, pastReportIds, reloadKey]);
 
+  // 描く範囲を広げる日付（GanttChart と同じ関数。7.3）
+  const extraDates = useMemo(
+    () => (gantt === null ? [] : chartExtraDates(gantt.rows, { lightning, pastLines })),
+    [gantt, lightning, pastLines],
+  );
+
+  // 描く範囲が受け取った非稼働日の範囲に収まらなければ、描く範囲で読み直す。収まれば何もしない（読み直した後は
+  // 要求した範囲＝描く範囲なので止まる）。基準の版・報告日・過去の線を選び直したときも同じ判定をする
+  useEffect(() => {
+    if (gantt === null) {
+      return;
+    }
+    const next = rangeToRefetch(gantt, extraDates, requestedRange);
+    if (next !== null) {
+      setRequestedRange(next);
+    }
+  }, [gantt, extraDates, requestedRange]);
+
   const finalized = useMemo(() => reports.filter((r) => r.status === "FINALIZED"), [reports]);
   const listedRows = useMemo(() => {
     if (lightning === null) {
@@ -193,6 +233,7 @@ export default function GanttPage() {
   }
 
   const canEditSchedule = me !== null && hasProjectPermission(me, projectId, "schedule.edit");
+  const canManageReports = me !== null && hasProjectPermission(me, projectId, "status_report.manage");
 
   async function handleCalculate() {
     if (projectId === null) {
@@ -208,6 +249,13 @@ export default function GanttPage() {
     } finally {
       setCalculating(false);
     }
+  }
+
+  // 作った報告日を一覧に足して選ぶ（行き先に進捗入力が出る。7.2）
+  function handleReportCreated(created: StatusReport) {
+    setReports((current) => withReport(current, created));
+    setReportId(created.id);
+    setCreatedReport(created);
   }
 
   function togglePast(id: number, checked: boolean) {
@@ -270,6 +318,11 @@ export default function GanttPage() {
           </button>
         )}
       </div>
+
+      {canManageReports && <CreateReportForm projectId={projectId} onCreated={handleReportCreated} />}
+      {createdReport !== null && (
+        <p role="status">報告日 {createdReport.report_date} を作った。進捗入力で進捗を入れる</p>
+      )}
 
       {finalized.length > 0 && (
         <fieldset className="past-lines">

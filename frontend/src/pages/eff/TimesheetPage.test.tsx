@@ -10,8 +10,6 @@ import { errorResponse, jsonResponse, mockApi, type RouteHandler } from "../../t
 import { mondayOf, parseHoursCents, resolveWeek, weekDays } from "./labels";
 import TimesheetPage, { buildRows } from "./TimesheetPage";
 
-const FUTURE = { v7_startTransition: true, v7_relativeSplatPath: true };
-
 // 実行担当者（利用者 7）。P-001（3）と P-002（5）で effort.enter_own を持ち、P-009（9）では読むだけ
 const ME = makeMe({
   user: makeUser({ id: 7, login_id: "doer", display_name: "実行 花子", is_system_admin: false }),
@@ -50,7 +48,7 @@ function routes(overrides: Record<string, RouteHandler> = {}): Record<string, Ro
 
 function renderAt(path = "/timesheet?week=2026-11-09") {
   return render(
-    <MemoryRouter initialEntries={[path]} future={FUTURE}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/timesheet" element={<TimesheetPage />} />
       </Routes>

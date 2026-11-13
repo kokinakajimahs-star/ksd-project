@@ -32,6 +32,8 @@ from app.schemas.wbs import (
     PendingApprovalOut,
     ResponsibilityMatrixOut,
     ReviewCreate,
+    ReviewList,
+    ReviewSummary,
     TraceElementOut,
     WbsTraceOut,
     WithoutResponsibleOut,
@@ -253,7 +255,7 @@ def delete_element(
 ) -> Response:
     """API-WBS-005 要素を配下ごと消す。
 
-    権限は wbs.edit。他の要素の ID は変えない。基準の版に入った要素は 422 ``ELEMENT_IN_BASELINE``（CR-002）。
+    権限は wbs.edit。他の要素の ID は変えない。基準の版の写しは変えない（設計書 1.1 の 4.2。CR-002）。
     """
     wbs_service.remove_element(session, access, user, activities, project_id, element_id)
     return Response(status_code=204)
@@ -396,6 +398,23 @@ def get_validation(
     )
 
 
+@router.get("/projects/{project_id}/wbs/elements/{element_id}/scope-links", response_model=ScopeLinksOut)
+def get_scope_links(
+    project_id: int,
+    element_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+    activities: ActivitiesReader = Depends(get_wbs_activities),
+) -> ScopeLinksOut:
+    """API-WBS-026 要素とスコープ項目の紐付けを読む。
+
+    権限は project.view。項目の ID の順。無い要素・委託先に見えない要素は 404（設計書 1.1・CR-004）。
+    """
+    ids = wbs_service.get_scope_links(session, access, user, activities, project_id, element_id)
+    return ScopeLinksOut(element_id=element_id, scope_item_ids=ids)
+
+
 @router.put("/projects/{project_id}/wbs/elements/{element_id}/scope-links", response_model=ScopeLinksOut)
 def put_scope_links(
     project_id: int,
@@ -442,6 +461,47 @@ def post_review(
     """
     review = wbs_service.start_review(session, access, user, project_id, body.reviewer_ids, now=now)
     return _review_out(review, [])
+
+
+@router.get("/projects/{project_id}/wbs/reviews", response_model=ReviewList)
+def list_reviews(
+    project_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+) -> ReviewList:
+    """API-WBS-025 レビューの一覧。
+
+    権限は project.view。新しい順（ID の降順）。指摘は API-WBS-015 で読む。``limit``・``offset``（6.1。設計書 1.1・CR-004）。
+    """
+    reviews, total = wbs_service.list_reviews(session, access, user, project_id, limit=limit, offset=offset)
+    return ReviewList(project_id=project_id, items=[ReviewSummary.model_validate(r) for r in reviews],
+                      total=total, limit=limit, offset=offset)
+
+
+@router.post("/projects/{project_id}/wbs/reviews/{review_id}/close", response_model=ReviewOut)
+def close_review(
+    project_id: int,
+    review_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+    activities: ActivitiesReader = Depends(get_wbs_activities),
+    now: datetime = Depends(get_now),
+) -> ReviewOut:
+    """API-WBS-024 レビューを閉じる（IN_REVIEW → DRAFT）。
+
+    権限は wbs.edit。OPEN のレビューを CLOSED にし（``closed_at``）、WBS を DRAFT に戻す。指摘はそのまま残る（5.10）。
+    閉じたレビュー・WBS が IN_REVIEW でなければ 409 ``INVALID_STATE``、無いレビューは 404（設計書 1.1・CR-004）。
+    応答はレビューと指摘（API-WBS-015 と同じ形で project.view が要る）。PM がロールの表を変えて wbs.edit だけを持つロールが
+    できても、閉じてから 403 を返さないよう、読めることを閉じる前に確かめる。
+    """
+    wbs_service.get_review(session, access, user, activities, project_id, review_id)
+    wbs_service.close_review(session, access, user, project_id, review_id, now=now)
+    review, comments = wbs_service.get_review(session, access, user, activities, project_id, review_id)
+    return _review_out(review, comments)
 
 
 @router.get("/projects/{project_id}/wbs/reviews/{review_id}", response_model=ReviewOut)
@@ -492,7 +552,8 @@ def patch_comment(
 ) -> CommentOut:
     """API-WBS-017 指摘の状態・対応を更新する。
 
-    権限は wbs.edit。状態は OPEN・RESOLVED・REJECTED。閉じたレビューは 409、無い指摘は 404。
+    権限は wbs.edit。状態は OPEN・RESOLVED・REJECTED。閉じたレビューの指摘も更新できる（5.10：指摘は残り、申請の前提に数える）。
+    無い指摘は 404。
     """
     comment = wbs_service.update_comment(
         session, access, user, project_id, review_id, comment_id, body.model_dump(exclude_unset=True)

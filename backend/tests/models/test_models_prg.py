@@ -639,7 +639,10 @@ def test_progress_snapshot_items_keep_values_when_activity_and_entry_change(db_s
 
 
 def test_progress_snapshot_items_survive_deleted_activity(db_session: Session) -> None:
-    """DB-PRG-005 progress_snapshot_items：写した活動は、紐付けを空にしないと DB が消させない。空にすれば活動を消せて写しは残る（BR-13。A-22）。"""
+    """DB-PRG-005 progress_snapshot_items：写しの活動の列は外部キーを張らない写しの値（設計書 1.1 の 4.2。CR-002）。
+
+    写した活動を消しても写しは変わらず（BR-13）、消した活動の内部キーは再利用しない（AUTOINCREMENT）。
+    """
     project = _project(db_session)
     activity = _activity(db_session, project)
     snapshot = _snapshot(db_session, _report(db_session, project, _user(db_session)))
@@ -649,19 +652,15 @@ def test_progress_snapshot_items_survive_deleted_activity(db_session: Session) -
     activity_id, item_id = activity.id, item.id
 
     db_session.delete(activity)
-    _flush_fails(db_session)
-
-    loaded = db_session.get(ProgressSnapshotItem, item_id)
-    assert loaded is not None
-    loaded.activity_id = None
-    db_session.flush()
-    db_session.delete(db_session.get(Activity, activity_id))
     db_session.commit()
     db_session.expunge_all()
     assert db_session.get(Activity, activity_id) is None
     survived = db_session.get(ProgressSnapshotItem, item_id)
     assert survived is not None
-    assert (survived.activity_id, survived.name, survived.point, survived.judgement) == (None, "資料作成", Decimal("5.25"), "BEHIND")
+    assert (survived.activity_id, survived.name, survived.point, survived.judgement) == (
+        activity_id, "資料作成", Decimal("5.25"), "BEHIND",
+    )
+    assert _activity(db_session, project).id > activity_id
 
 
 def test_progress_snapshot_items_row_order_unique_within_snapshot(db_session: Session) -> None:
@@ -713,16 +712,18 @@ def test_judgements_cover_design_5_6() -> None:
         {"wbs_code": None},
         {"name": None},
         {"snapshot_id": 9999},
-        {"activity_id": 9999},
     ],
     ids=[
         "judgement", "no-judgement", "percent-above-100", "percent-below-0", "negative-duration", "finish-before-start",
         "negative-actual-hours", "negative-etc", "no-point", "no-deviation", "no-row-order", "no-code", "no-name",
-        "no-snapshot", "no-activity",
+        "no-snapshot",
     ],
 )
 def test_progress_snapshot_items_rejections(db_session: Session, override: dict[str, Any]) -> None:
-    """DB-PRG-005 progress_snapshot_items：6 つに無い判定、0〜100 の外の進捗率、負の期間・工数、前後の逆の実績日付、ポイント・ずれ・行の順・WBS ID・名称の無い写し、無いスナップショット・活動は DB が拒む。"""
+    """DB-PRG-005 progress_snapshot_items：6 つに無い判定、0〜100 の外の進捗率、負の期間・工数、前後の逆の実績日付、ポイント・ずれ・行の順・WBS ID・名称の無い写し、無いスナップショットは DB が拒む。
+
+    写した活動の ID は今は無い活動を指してよい（外部キーを張らない。設計書 1.1 の 4.2）。
+    """
     project = _project(db_session)
     snapshot = _snapshot(db_session, _report(db_session, project, _user(db_session)))
     db_session.add(ProgressSnapshotItem(**_snapshot_item_values(snapshot, _activity(db_session, project), **override)))

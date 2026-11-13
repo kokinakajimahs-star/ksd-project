@@ -442,8 +442,9 @@ def test_delete_activity_removes_dependencies_and_keeps_baseline_copy(
     assert a not in fake.rows
     db_session.expire_all()
     assert db_session.scalars(select(ActivityDependency).where(ActivityDependency.predecessor_id == a)).all() == []
+    # 写しは変えない（活動の ID も写しの値のまま。設計書 1.1 の 4.2。CR-002）
     copies = db_session.scalars(select(ScheduleBaselineItem).where(ScheduleBaselineItem.name == "A")).all()
-    assert [(i.activity_id, i.start_date) for i in copies] == [(None, date(2026, 12, 1))]
+    assert [(i.activity_id, i.start_date) for i in copies] == [(a, date(2026, 12, 1))]
     assert client.delete(world.url(f"/activities/{a}"), headers=world.h["planner"]).status_code == 404
 
 
@@ -562,6 +563,34 @@ def test_gantt_rows_bars_links_and_progress(app: FastAPI, world: World, client: 
     assert client.get(world.url("/gantt"), params={"baseline_id": MISSING}, headers=world.h["viewer"]).status_code == 404
 
 
+def test_gantt_non_working_days_follow_display_range(world: World, client: TestClient) -> None:
+    """API-SCH-010：``range_start``・``range_end`` を渡すと、その表示範囲の非稼働日を返す（設計書 1.1・CR-008）。
+
+    応答の ``range_start``・``range_end`` はバーの範囲のまま。省いた端はバーの範囲の端。始まりが終わりより後・長すぎる範囲・
+    日付でない値は 400。
+    """
+    chain(world)
+    url = world.url("/gantt")
+    wide = client.get(url, params={"range_start": "2026-11-28", "range_end": "2026-12-14"}, headers=world.h["viewer"])
+    assert wide.status_code == 200, wide.text
+    g = wide.json()
+    assert (g["range_start"], g["range_end"]) == ("2026-12-01", "2026-12-07")
+    assert g["non_working_days"] == ["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06", "2026-12-12",
+                                     "2026-12-13"]
+    end_only = client.get(url, params={"range_end": "2026-12-13"}, headers=world.h["viewer"]).json()
+    assert end_only["non_working_days"] == ["2026-12-05", "2026-12-06", "2026-12-12", "2026-12-13"]
+    reversed_range = client.get(url, params={"range_start": "2026-12-10", "range_end": "2026-12-09"},
+                                headers=world.h["viewer"])
+    assert reversed_range.status_code == 400 and reversed_range.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert [e["loc"] for e in reversed_range.json()["error"]["details"]] == [["query", "range_start"], ["query", "range_end"]]
+    too_long = client.get(url, params={"range_start": "2000-01-01", "range_end": "2026-12-09"}, headers=world.h["viewer"])
+    assert too_long.status_code == 400 and too_long.json()["error"]["code"] == "VALIDATION_ERROR"
+    end_before_bars = client.get(url, params={"range_end": "2026-11-30"}, headers=world.h["viewer"])  # バーは 12/01 から
+    assert end_before_bars.status_code == 400
+    assert [e["loc"] for e in end_before_bars.json()["error"]["details"]] == [["query", "range_end"]]
+    assert client.get(url, params={"range_start": "12/01"}, headers=world.h["viewer"]).status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # API-SCH-011〜013 スケジュールベースライン（SCH-16・17・18）
 # ---------------------------------------------------------------------------
@@ -630,7 +659,7 @@ def test_variance_against_baseline(world: World, client: TestClient, db_session:
         ("MATCHED", b, "B", 2, 2, None),
         ("MATCHED", m, "M", 2, 2, None),
         ("ADDED", d, "D", None, None, None),
-        ("DELETED", None, "C", None, None, None),
+        ("DELETED", c, "C", None, None, None),  # 写しは消した活動の ID を写しの値のまま持つ（設計書 1.1 の 4.2）
     ]
     assert client.get(world.url(f"/schedule-baselines/{MISSING}/variance"), headers=world.h["viewer"]).status_code == 404
     other = World(client, world.session, code="PRJ-T")

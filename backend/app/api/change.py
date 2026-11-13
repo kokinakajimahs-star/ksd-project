@@ -158,6 +158,23 @@ def submit_change_request(
     return _change_request_out(view)
 
 
+@router.post("/projects/{project_id}/change-requests/{change_request_id}/withdraw", response_model=ChangeRequestOut)
+def withdraw_change_request(
+    project_id: int,
+    change_request_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    access: ProjectAccess = Depends(get_project_access),
+) -> ChangeRequestOut:
+    """API-CHG-011 提出した変更要求を取り下げる（SUBMITTED → DRAFT。承認申請を取り下げる）。
+
+    権限は change.create。SUBMITTED でなければ 409（RULE-CHG-003）。保留中の承認申請の行を消す（変更履歴に残る）。
+    保存した影響分析は残す。応答の ``approval_request_id`` は残っている最新の承認申請（無ければ null）。
+    """
+    view = change_service.withdraw_change_request(session, access, user, project_id, change_request_id)
+    return _change_request_out(view)
+
+
 @router.post("/projects/{project_id}/change-requests/{change_request_id}/apply", response_model=AppliedOut)
 def apply_change_request(
     project_id: int,

@@ -1,6 +1,7 @@
 // UI-WBS-002 WBS辞書・横断照会（設計書 7.1 のルート /projects/:projectId/wbs/:elementId。WBS-11・13・07、EST-08、PRJ-02）。
 // 辞書（API-WBS-009：WBS-11 の 8 項目。WBS ID・名称・責任者・見積は WBS 本体の値）を出し、4 項目を書く（API-WBS-010）。
-// 見積の根拠と履歴（API-EST-002）と見積の記入（API-EST-001）、スコープ項目との紐付け（API-WBS-013）、横断照会（API-WBS-023）を並べる。
+// 見積の根拠と履歴（API-EST-002）と見積の記入（API-EST-001）、スコープ項目との紐付け（今の紐付けを読み（API-WBS-026）、
+// 選んだ項目で置き換える（API-WBS-013））、横断照会（API-WBS-023）を並べる。
 // 書く部品は wbs.edit（辞書・紐付け）・estimate.edit（見積）を持つ人にだけ出す（7.2）
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -9,7 +10,7 @@ import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import { getEstimateHistory, type EstimateHistory, type EstimateWritten } from "../../api/est";
 import { listScopeItems, type ScopeItem } from "../../api/prj";
-import { getDictionary, replaceDictionary, replaceScopeLinks, type Dictionary } from "../../api/wbs";
+import { getDictionary, getScopeLinks, replaceDictionary, replaceScopeLinks, type Dictionary } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
 import { optionalText } from "../../lib/form";
@@ -71,6 +72,8 @@ function WbsElementView() {
   const [reloadKey, setReloadKey] = useState(0);
   const [scopeItems, setScopeItems] = useState<ScopeItem[]>([]);
   const [linked, setLinked] = useState<Set<number>>(new Set());
+  /** 今の紐付けを読めたか（読めるまでは紐付けの編集を出さない。空から始めて保存すると今の紐付けが消える） */
+  const [linksLoaded, setLinksLoaded] = useState(false);
   const [savedLinks, setSavedLinks] = useState<number[] | null>(null);
   const [form, setForm] = useState({ deliverable: "", work_scope: "", completion_criteria: "", assumptions: "" });
   const [busy, setBusy] = useState(false);
@@ -78,6 +81,7 @@ function WbsElementView() {
   const [error, setError] = useState<ErrorView | null>(null);
   const [dictError, setDictError] = useState<ErrorView | null>(null);
   const [linkError, setLinkError] = useState<ErrorView | null>(null);
+  const [linksLoadError, setLinksLoadError] = useState<ErrorView | null>(null);
   const { names } = useProjectMembers(projectId);
 
   const valid = projectId !== null && elementId !== null;
@@ -180,6 +184,30 @@ function WbsElementView() {
     };
   }, [projectId, canEdit]);
 
+  // 紐付けの編集は今の紐付け（API-WBS-026）から始める
+  useEffect(() => {
+    if (projectId === null || elementId === null || !canEdit) {
+      return;
+    }
+    let cancelled = false;
+    getScopeLinks(projectId, elementId).then(
+      (result) => {
+        if (!cancelled) {
+          setLinked(new Set(result.scope_item_ids));
+          setLinksLoaded(true);
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setLinksLoadError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, elementId, canEdit]);
+
   if (projectId === null || elementId === null) {
     return (
       <section data-screen-id="UI-WBS-002" className="wbs-element-page">
@@ -225,8 +253,10 @@ function WbsElementView() {
     setNotice(null);
     setBusy(true);
     try {
-      const ids = scopeItems.filter((s) => linked.has(s.id)).map((s) => s.id);
+      // 選択肢に読めなかった項目（一覧の上限の外）の紐付けも落とさない
+      const ids = Array.from(linked).sort((a, b) => a - b);
       const saved = await replaceScopeLinks(projectId, elementId, ids);
+      setLinked(new Set(saved.scope_item_ids));
       setSavedLinks(saved.scope_item_ids);
       setNotice(`スコープ項目の紐付けを ${saved.scope_item_ids.length} 件に置き換えた`);
     } catch (e) {
@@ -362,7 +392,8 @@ function WbsElementView() {
         {canEstimate && dictionary !== null && (
           <EstimateForm
             projectId={projectId}
-            elementId={elementId}
+            targetType="ELEMENT"
+            targetId={elementId}
             label={`${dictionary.wbs_code} ${dictionary.name}`}
             onSaved={handleEstimateSaved}
           />
@@ -373,11 +404,12 @@ function WbsElementView() {
         <section aria-labelledby="scope-links-heading">
           <h3 id="scope-links-heading">スコープ項目との紐付け</h3>
           <p>
-            100% ルールの検査（対象外の混入・対象内の漏れ）に使う。保存すると、選んだ項目で紐付けを丸ごと置き換える
-            （今の紐付けを読む口が無いため、選んだ項目だけが残る）。
+            100% ルールの検査（対象外の混入・対象内の漏れ）に使う。今の紐付けを選んだ状態から始め、保存すると選んだ項目で紐付けを置き換える
+            （選びを外した項目の紐付けは消える）。
           </p>
+          <ErrorAlert error={linksLoadError} />
           {scopeItems.length === 0 && <p>スコープ項目はまだありません（プロジェクト設定で登録する）</p>}
-          {scopeItems.length > 0 && (
+          {scopeItems.length > 0 && linksLoaded && (
             <form aria-label="スコープ項目を紐付ける" onSubmit={(e) => void handleLinks(e)}>
               {scopeItems.map((s) => (
                 <label key={s.id}>

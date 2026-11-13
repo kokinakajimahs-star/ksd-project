@@ -510,7 +510,10 @@ def test_schedule_baseline_items_keep_snapshot_when_activity_changes(db_session:
 
 
 def test_schedule_baseline_items_survive_deleted_activity(db_session: Session) -> None:
-    """DB-SCH-004 schedule_baseline_items：写した活動は、紐付けを空にしないと DB が消させない。空にすれば活動を消せて写しは残る（SCH-18 の削除。A-19）。"""
+    """DB-SCH-004 schedule_baseline_items：写しの活動・WP の列は外部キーを張らない写しの値（設計書 1.1 の 4.2。CR-002）。
+
+    写した活動・WP を消しても写しは変わらず、消した活動の内部キーは再利用しない（AUTOINCREMENT。SCH-18 の削除）。
+    """
     project = _project(db_session)
     wp = _wp(db_session, project)
     activity = _activity(db_session, project, wp)
@@ -524,21 +527,18 @@ def test_schedule_baseline_items_survive_deleted_activity(db_session: Session) -
     wp_id, activity_id, item_id = wp.id, activity.id, item.id
 
     db_session.delete(activity)
-    _flush_fails(db_session)
-
-    loaded = db_session.get(ScheduleBaselineItem, item_id)
-    assert loaded is not None
-    loaded.activity_id = None
     db_session.flush()
-    db_session.delete(db_session.get(Activity, activity_id))
+    db_session.delete(wp)
     db_session.commit()
     db_session.expunge_all()
     assert db_session.get(Activity, activity_id) is None
     survived = db_session.get(ScheduleBaselineItem, item_id)
     assert survived is not None
     assert (survived.item_type, survived.activity_id, survived.element_id, survived.name, survived.duration_days) == (
-        "ACTIVITY", None, wp_id, "画面の設計", 5,
+        "ACTIVITY", activity_id, wp_id, "画面の設計", 5,
     )
+    again = _activity(db_session, project, _wp(db_session, project))
+    assert again.id > activity_id
 
 
 @pytest.mark.parametrize(
@@ -549,19 +549,20 @@ def test_schedule_baseline_items_survive_deleted_activity(db_session: Session) -
         {"duration_days": -1},
         {"estimate_hours": Decimal("-1")},
         {"schedule_baseline_id": 9999},
-        {"activity_id": 9999},
-        {"element_id": 9999},
         {"wbs_code": None},
         {"name": None},
         {"item_type": None},
     ],
     ids=[
-        "item-type", "work-package-with-activity", "negative-duration", "negative-hours", "no-baseline", "no-activity",
-        "no-element", "no-code", "no-name", "no-item-type",
+        "item-type", "work-package-with-activity", "negative-duration", "negative-hours", "no-baseline",
+        "no-code", "no-name", "no-item-type",
     ],
 )
 def test_schedule_baseline_items_rejections(db_session: Session, override: dict[str, Any]) -> None:
-    """DB-SCH-004 schedule_baseline_items：4.1 に無い種類、活動を指す WP の項目、負の期間・見積、無い版・活動・要素、WBS ID・名称・種類の無い写しは DB が拒む。"""
+    """DB-SCH-004 schedule_baseline_items：4.1 に無い種類、活動を指す WP の項目、負の期間・見積、無い版、WBS ID・名称・種類の無い写しは DB が拒む。
+
+    写した活動・WP の ID は今は無い行を指してよい（外部キーを張らない。設計書 1.1 の 4.2）。
+    """
     project = _project(db_session)
     wp = _wp(db_session, project)
     activity = _activity(db_session, project, wp)

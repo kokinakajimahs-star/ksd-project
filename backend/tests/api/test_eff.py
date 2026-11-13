@@ -300,18 +300,19 @@ def test_put_time_entries_rejects_invalid_values_and_day_total_over_24(world: Wo
     assert response.status_code == 422
 
 
-def test_put_time_entries_rejects_days_before_finalized_report(world: World, client: TestClient) -> None:
+def test_put_time_entries_rejects_days_through_finalized_report(world: World, client: TestClient) -> None:
     world.assign(world.a, [{"user_id": world.uid("executor")}])
     world.enter("executor", [cell(world.a, "2026-12-01", 8)])
     report = world.report("2026-12-03")
     finalized = client.post(world.url(f"/status-reports/{report}/finalize"), headers=world.h["pm"])
     assert finalized.status_code == 200, finalized.text
-    for entries in ([cell(world.a, "2026-12-02", 6)], [cell(world.a, "2026-12-01", 8, "後から")]):
+    for entries in ([cell(world.a, "2026-12-02", 6)], [cell(world.a, "2026-12-01", 8, "後から")],
+                    [cell(world.a, "2026-12-03", 2)]):
         locked = client.put("/api/v1/time-entries", json={"entries": entries}, headers=world.h["executor"])
         assert locked.status_code == 409 and error_code(locked) == "INVALID_STATE", locked.text
         assert locked.json()["error"]["details"][0]["code"] == "LOCKED_DATE"
-    # 変えないマスと、報告日その日以降は書ける
-    assert world.enter("executor", [cell(world.a, "2026-12-01", 8), cell(world.a, "2026-12-03", 2)])["changed"] == 1
+    # 変えないマスと、報告日の翌日以降は書ける（報告日の当日は締める。設計書 1.1・CR-005）
+    assert world.enter("executor", [cell(world.a, "2026-12-01", 8), cell(world.a, "2026-12-04", 2)])["changed"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +465,39 @@ def test_summary_without_baseline_keeps_baseline_empty(world: World, client: Tes
     body = client.get(world.url("/effort/summary"), headers=world.h["pm"]).json()
     assert body["baseline"] is None and body["report"] is None
     assert body["total"] == {"planned": 10.0, "baseline": None, "actual": 0.0, "etc": 10.0, "eac": 10.0}
+
+
+def test_summary_puts_removed_baseline_in_its_own_bucket(world: World, client: TestClient) -> None:
+    """API-EFF-005：版にあって今は無い活動・WP の基準は、どの軸でも最後の桶 BASELINE_REMOVED に置き、どの軸でも基準の合計は
+    版の合計になる（5.8・EFF-09。設計書 1.1・CR-007）。"""
+    world.estimate(world.a, "40")
+    world.estimate(world.b, "10")
+    world.own_estimate(world.wp2, "8")
+    world.baseline()
+    # 版の後に活動 B と WP2 を消す（CR-002：版の写しは残る）
+    assert client.delete(world.url(f"/activities/{world.b}"), headers=world.h["planner"]).status_code == 204
+    assert client.delete(world.url(f"/wbs/elements/{world.wp2}"), headers=world.h["planner"]).status_code == 204
+
+    def summary(axis: str) -> Any:
+        response = client.get(world.url("/effort/summary"), params={"axis": axis}, headers=world.h["pm"])
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    wbs = summary("wbs")
+    assert wbs["total"] == {"planned": 40.0, "baseline": 58.0, "actual": 0.0, "etc": 40.0, "eac": 40.0}
+    rows = wbs["rows"]
+    # WP1 は版の WORK_PACKAGE の項目 50（消した B の 10 を含む）。消した WP2 の項目 8 はプロジェクトの直下の桶
+    assert [(r["bucket_kind"], r["element_id"], r["parent_id"], r["values"]["baseline"]) for r in rows] == [
+        ("ELEMENT", world.d, None, 50.0), ("ELEMENT", world.wp1, world.d, 50.0), ("BASELINE_REMOVED", None, None, 8.0)]
+    assert rows[-1]["values"] == {"planned": 0.0, "baseline": 8.0, "actual": 0.0, "etc": 0.0, "eac": 0.0}
+    assert values_sum([rows[0], rows[-1]], "baseline") == wbs["total"]["baseline"]
+    for axis in ("member", "organization", "week", "month"):
+        body = summary(axis)
+        assert body["total"] == wbs["total"]
+        # 担当者・組織・期間の軸の桶：消した B の項目 10 と、版に活動の項目を持たない消した WP2 の項目 8
+        assert (body["rows"][-1]["bucket_kind"], body["rows"][-1]["values"]["baseline"]) == ("BASELINE_REMOVED", 18.0)
+        assert values_sum(body["rows"], "baseline") == 58.0
+        assert values_sum(body["rows"], "planned") == body["total"]["planned"]
 
 
 # ---------------------------------------------------------------------------

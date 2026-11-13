@@ -197,7 +197,7 @@ class ProgressSnapshotItem(Base):
     進捗ポイント・判定。
 
     - ``row_order`` はガントの行の順（RULE-PRG-005 の折れ線の点の順）。スナップショットの中で一意
-    - ``activity_id`` は写した活動。写した活動を後から消すときにサービス層が空にする（写しの値は残す。A-22）
+    - ``activity_id`` は写した活動。写しの値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2。後から活動を消しても変えない。CR-002）
     - ``wbs_code`` 以降は写した時点の値。後から活動・進捗を変えても変わらない（BR-13）
     - ``point`` は進捗ポイント、``deviation`` はずれ（``point − report_line``。5.6）。``judgement`` は 5.6 の判定（``JUDGEMENTS``）
     """
@@ -215,7 +215,7 @@ class ProgressSnapshotItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     snapshot_id: Mapped[int] = mapped_column(ForeignKey("progress_snapshots.id"), index=True)
-    activity_id: Mapped[int | None] = mapped_column(ForeignKey("activities.id"), index=True)
+    activity_id: Mapped[int | None] = mapped_column(Integer, index=True)
     row_order: Mapped[int] = mapped_column(Integer)
     wbs_code: Mapped[str] = mapped_column(String(100))
     name: Mapped[str] = mapped_column(String(200))

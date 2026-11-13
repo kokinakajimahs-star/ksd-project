@@ -52,7 +52,7 @@ from app.domain.workflow import (
 from app.errors import AppError
 from app.models.chg import AuditLog, ChangeRequest, CorrectiveAction
 from app.models.eff import Assignment, TimeEntry, VarianceNote
-from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshotItem, StatusReport
+from app.models.prg import ProgressEntry, ProgressItem, StatusReport
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
 from app.models.wbs import (
@@ -69,7 +69,7 @@ from app.models.wbs import (
 from app.services.auth import User, authorize_project, principal_of
 from app.services.project_access import ProjectAccess
 from app.services.schedule import calculate_and_store, load_plan, work_calendar
-from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST
+from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, _rule_row
 
 # 4.1 の schedule_baselines.name の列の長さ（A-19）
 _BASELINE_NAME_LIMIT = 200
@@ -216,8 +216,10 @@ def _plan_model(session: Session, project_id: int) -> PlanModel:
         ),
         dependencies=tuple((d.predecessor_id, d.successor_id) for d in dependencies),
         numbering_rule=rule,
-        # 第 1 階層で使った最大の順番：4.1 に置き場が無いので、WBS のサービスと同じく今ある第 1 階層の最大を使う（CR-003 の暫定）
-        top_last_child_seq=max((e.sibling_seq for e in elements if e.parent_id is None), default=0),
+        # 第 1 階層で今まで使った最大の順番（設計書 1.1 の 4.1・5.2。CR-003）。行が無ければ今ある第 1 階層の最大から
+        top_last_child_seq=max((e.sibling_seq for e in elements if e.parent_id is None), default=0)
+        if rule_row is None
+        else rule_row.top_last_child_seq,
         code_history=tuple(_code_history(session, project_id)),
     )
 
@@ -427,6 +429,37 @@ def submit_change_request(
     return ChangeRequestView(change_request=change_request, approval_request_id=approval.id)
 
 
+def withdraw_change_request(
+    session: Session, access: ProjectAccess, actor: User, project_id: int, change_request_id: int
+) -> ChangeRequestView:
+    """提出を取り下げる（change.create。RULE-CHG-003 の WITHDRAW：SUBMITTED → DRAFT。5.10・CR-004）。
+
+    保留中（PENDING）の承認申請（``target_type = CHANGE_REQUEST``）の行を消す（承認申請の状態に値を足さない。
+    消したことは変更履歴に残る）。保存した影響分析は残し、提出し直すときに流し直す。提出日時は空に戻す（A-48）。
+    SUBMITTED でなければ 409。
+    """
+    authorize_project(session, access, actor, project_id, "change.create")
+    change_request = _change_request_of(session, project_id, change_request_id)
+    try:
+        transition = transition_change_request(change_request.status, ChangeRequestAction.WITHDRAW)
+    except WorkflowError as exc:
+        raise _workflow_error(exc, [{"change_request_id": change_request.id, "status": change_request.status}]) from exc
+    pending = session.scalars(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.project_id == project_id,
+               ApprovalRequest.target_type == TARGET_CHANGE_REQUEST,
+               ApprovalRequest.target_id == change_request.id,
+               ApprovalRequest.status == ApprovalStatus.PENDING.value)
+        .order_by(ApprovalRequest.id)
+    ).all()
+    for approval in pending:
+        session.delete(approval)
+    change_request.status = transition.to_status.value
+    change_request.submitted_at = None
+    session.commit()
+    return _view(session, change_request)
+
+
 class ChangeRequestStateMachine:
     """変更要求の承認申請への判断（API-WBS-019）を、RULE-CHG-003 で変更要求の状態へ通す ``ChangeRequestApprovals``
     （``app.services.wbs``。api:CHG で ``ChangeRequestTransitionNotWired`` から差し替えた。A-37）。
@@ -464,17 +497,10 @@ class AppliedView:
 
 
 def _refuse_removing_elements(session: Session, removed: Sequence[int]) -> None:
-    """基準の写し・是正措置・差異の理由が指す要素は消せない（外部キー。CR-002 の暫定。A-37）。"""
-    baselined = sorted(
-        set(session.scalars(select(ScopeBaselineElement.element_id).where(ScopeBaselineElement.element_id.in_(removed))))
-        | set(session.scalars(select(ScopeBaselineElement.parent_element_id)
-                              .where(ScopeBaselineElement.parent_element_id.in_(removed))))
-        | set(session.scalars(select(ScheduleBaselineItem.element_id).where(ScheduleBaselineItem.element_id.in_(removed))))
-    )
-    baselined = [i for i in baselined if i is not None]
-    if baselined:
-        raise AppError(422, "ELEMENT_IN_BASELINE", "ベースラインの版に入った要素は消せません（CR-002）",
-                       details=[{"element_ids": baselined}])
+    """是正措置・差異の理由が指す要素は消せない（外部キー。A-37）。
+
+    基準の写しは外部キーを張らない写しの値なので、版に入った要素も消せる（設計書 1.1 の 4.2。CR-002）。
+    """
     referenced = sorted(
         set(session.scalars(select(CorrectiveAction.element_id).where(CorrectiveAction.element_id.in_(removed))))
         | set(session.scalars(select(VarianceNote.element_id).where(VarianceNote.element_id.in_(removed))))
@@ -538,6 +564,10 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
         row.own_estimate_hours = element.own_estimate_hours
         row.responsible_user_id = element.responsible_user_id
         row.needs_renumber = element.needs_renumber
+    # 第 1 階層の数え（設計書 1.1 の 4.1・5.2。第 1 階層へ足したら進む。減らさない）
+    if applied.plan.top_last_child_seq is not None:
+        rule_row = _rule_row(session, project_id)
+        rule_row.top_last_child_seq = max(rule_row.top_last_child_seq, applied.plan.top_last_child_seq)
 
     # 活動：足す・変える（日程の計算結果の列は後で計算し直す）
     activity_rows = {a.id: a for a in session.scalars(select(Activity).where(Activity.project_id == project_id))}
@@ -573,16 +603,12 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
                                        successor_id=real(successor)))
     session.flush()
 
-    # 活動の削除（API-SCH-005 と同じ後始末：割当・進捗を消し、写しは紐付けだけを空にして残す。A-19・A-26）
+    # 活動の削除（API-SCH-005 と同じ後始末：割当・進捗を消す。基準・スナップショットの写しは変えない。4.2・A-26）
     if removed_activities:
         session.execute(delete(ActivityDependency).where(or_(ActivityDependency.predecessor_id.in_(removed_activities),
                                                              ActivityDependency.successor_id.in_(removed_activities))))
-        session.execute(update(ScheduleBaselineItem).where(ScheduleBaselineItem.activity_id.in_(removed_activities))
-                        .values(activity_id=None))
         session.execute(delete(ProgressItem).where(ProgressItem.activity_id.in_(removed_activities)))
         session.execute(delete(ProgressEntry).where(ProgressEntry.activity_id.in_(removed_activities)))
-        session.execute(update(ProgressSnapshotItem).where(ProgressSnapshotItem.activity_id.in_(removed_activities))
-                        .values(activity_id=None))
         session.execute(delete(Assignment).where(Assignment.activity_id.in_(removed_activities)))
         for activity_id in removed_activities:
             session.delete(activity_rows[activity_id])
@@ -678,7 +704,7 @@ def apply_change_request(
     3. RULE-CHG-004 でスコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る。旧版は残す（BR-12）
     4. 計画は新しい版と一致するので、計画を書いて ``DRAFT`` に戻った WBS の状態を ``BASELINED`` に保つ
 
-    基準の写しが指す要素は消せない（422 ``ELEMENT_IN_BASELINE``。CR-002 の暫定）。どこかで止まれば何も書かない。
+    基準の写しは変えない（版に入った要素・活動も消せる。設計書 1.1 の 4.2。CR-002）。どこかで止まれば何も書かない。
     """
     authorize_project(session, access, actor, project_id, "change.apply")
     change_request = _change_request_of(session, project_id, change_request_id)

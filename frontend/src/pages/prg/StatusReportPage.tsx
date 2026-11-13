@@ -2,13 +2,12 @@
 // PRG-01・02・03・05・17、EFF-06。報告日の一覧と作成（API-PRG-001・002）、報告日の活動の進捗の一覧（API-PRG-006 の行）と
 // 入力（API-PRG-003）・算定方式（API-PRG-005）・算定項目（API-PRG-004）、報告日の確定（API-PRG-007）を 1 つの画面に並べる。
 // 権限の無い操作の部品は出さない（7.2。GET /api/v1/me の権限で決める。サーバでも必ず判定する）
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import {
-  createStatusReport,
   finalizeStatusReport,
   getLightningLine,
   listStatusReports,
@@ -20,6 +19,7 @@ import ErrorAlert from "../../components/ErrorAlert";
 import { JUDGEMENT_LABELS, judgementColor } from "../../components/gantt/scale";
 import { formatDateTime } from "../../lib/format";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
+import CreateReportForm from "./CreateReportForm";
 import EntryEditor from "./EntryEditor";
 import { newestFirst, progressMethodLabel, reportStatusLabel, signedDays } from "./labels";
 import { LIST_LIMIT_MAX } from "./limits";
@@ -46,8 +46,6 @@ export default function StatusReportPage() {
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [newDate, setNewDate] = useState("");
-  const [creating, setCreating] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
 
@@ -169,24 +167,11 @@ export default function StatusReportPage() {
     setReloadKey((k) => k + 1);
   }
 
-  async function handleCreate(e: FormEvent) {
-    e.preventDefault();
-    if (projectId === null || newDate === "") {
-      return;
-    }
-    setCreating(true);
+  function handleCreated(created: StatusReport) {
     setError(null);
-    try {
-      const created = await createStatusReport(projectId, newDate);
-      setNewDate("");
-      setNotice(`報告日 ${created.report_date} を作った`);
-      setReloadKey((k) => k + 1);
-      navigate(`/projects/${projectId}/status-reports/${created.id}`);
-    } catch (err) {
-      setError(toErrorView(err));
-    } finally {
-      setCreating(false);
-    }
+    setNotice(`報告日 ${created.report_date} を作った`);
+    setReloadKey((k) => k + 1);
+    navigate(`/projects/${projectId}/status-reports/${created.id}`);
   }
 
   async function handleFinalize() {
@@ -246,17 +231,7 @@ export default function StatusReportPage() {
             {current !== null && `／許容幅 ${current.tolerance_days} 日`}
           </p>
         )}
-        {canManage && (
-          <form aria-label="報告日を作る" onSubmit={(e) => void handleCreate(e)}>
-            <label>
-              新しい報告日
-              <input type="date" required value={newDate} onChange={(e) => setNewDate(e.target.value)} />
-            </label>
-            <button type="submit" disabled={creating || newDate === ""}>
-              報告日を作る
-            </button>
-          </form>
-        )}
+        {canManage && <CreateReportForm projectId={projectId} onCreated={handleCreated} />}
         {canManage && isOpen && !confirming && (
           <button type="button" onClick={() => setConfirming(true)}>
             報告日を確定する

@@ -1,12 +1,14 @@
-// UI-SCH-001 タスクリスト（設計書 7.1 のルート /projects/:projectId/activities。SCH-01・02・03・04・09、EFF-01）。
+// UI-SCH-001 タスクリスト（設計書 7.1 のルート /projects/:projectId/activities。SCH-01・02・03・04・09、EFF-01、EST-01）。
 // 活動の一覧（API-SCH-001）を表で出し、日付・期間・先行・担当をまとめて編集して 1 回で保存する（API-SCH-004：全件か無しか）。
 // 活動を足す（API-SCH-002）・消す（API-SCH-005）・依存（API-SCH-006・007）・担当と割当工数（API-EFF-001）も同じ画面に置く。
-// 変える部品は schedule.edit を持つ人にだけ出す（7.2。`GET /api/v1/me` で決め、サーバでも必ず判定する）
+// 活動の見積（人時・人日、手法・前提・参照資料）は API-EST-001 の ACTIVITY で書く（7.2）。
+// 変える部品は schedule.edit、見積は estimate.edit を持つ人にだけ出す（7.2。`GET /api/v1/me` で決め、サーバでも必ず判定する）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import type { EstimateWritten } from "../../api/est";
 import { listMembers, type Member } from "../../api/prj";
 import {
   bulkUpdateActivities,
@@ -19,6 +21,7 @@ import { getWbsTree, type WbsElement } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
+import EstimateForm from "../wbs/EstimateForm";
 import AddActivityForm from "./activities/AddActivityForm";
 import AssignmentEditor from "./activities/AssignmentEditor";
 import { collectChanges, draftOf, type ActivityDraft } from "./activities/bulkEdit";
@@ -27,6 +30,10 @@ import { ACTIVITIES_PAGE_SIZE, ACTIVITY_NAME_MAX, LIST_LIMIT_MAX } from "./limit
 
 function text(value: string | number | null): string {
   return value === null ? "—" : String(value);
+}
+
+function hoursText(value: number | null): string {
+  return value === null ? "未見積" : `${value} 人時`;
 }
 
 /** 先行の表示。先行の無い活動は並行して進められる（SCH-04） */
@@ -45,6 +52,7 @@ export default function ActivityListPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [drafts, setDrafts] = useState<Record<number, ActivityDraft>>({});
   const [assigning, setAssigning] = useState<Activity | null>(null);
+  const [estimating, setEstimating] = useState<Activity | null>(null);
   const [removing, setRemoving] = useState<Activity | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -98,6 +106,8 @@ export default function ActivityListPage() {
   }, [projectId, offset, reloadKey]);
 
   const canEdit = projectId !== null && me !== null && hasProjectPermission(me, projectId, "schedule.edit");
+  const canEstimate = projectId !== null && me !== null && hasProjectPermission(me, projectId, "estimate.edit");
+  const showActions = canEdit || canEstimate;
 
   // 変える人だけが要る：置き場の WP（API-WBS-001）と担当の候補（API-PRJ-009）
   useEffect(() => {
@@ -185,12 +195,23 @@ export default function ActivityListPage() {
       if (assigning?.id === activity.id) {
         setAssigning(null);
       }
+      if (estimating?.id === activity.id) {
+        setEstimating(null);
+      }
       reload(`活動 ${activity.id}（${activity.name}）を消した`);
     } catch (e) {
       setSaveError(toErrorView(e));
     } finally {
       setSubmitting(false);
     }
+  }
+
+  // 見積を書いたら一覧を読み直す（活動の estimate_hours が変わる）
+  function handleEstimateSaved(activity: Activity, result: EstimateWritten) {
+    setEstimating(null);
+    reload(
+      `活動 ${activity.id}（${activity.name}）の見積を ${hoursText(result.current_hours)}にした（プロジェクトの総見積 ${hoursText(result.project_estimate_hours)}）`,
+    );
   }
 
   const activities = list?.items ?? [];
@@ -232,7 +253,7 @@ export default function ActivityListPage() {
                 <th scope="col">担当</th>
                 <th scope="col">見積（人時）</th>
                 <th scope="col">余裕（日）</th>
-                {canEdit && <th scope="col">操作</th>}
+                {showActions && <th scope="col">操作</th>}
               </tr>
             </thead>
             <tbody>
@@ -322,19 +343,28 @@ export default function ActivityListPage() {
                       {text(a.total_float)}
                       {a.is_critical && <span className="critical">（クリティカル）</span>}
                     </td>
-                    {canEdit && (
+                    {showActions && (
                       <td>
-                        <button type="button" aria-label={`${a.id} の担当と割当工数`} onClick={() => setAssigning(a)}>
-                          担当と工数
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`${a.id} を消す`}
-                          onClick={() => setRemoving(a)}
-                          disabled={submitting}
-                        >
-                          消す
-                        </button>
+                        {canEstimate && (
+                          <button type="button" aria-label={`${a.id} の見積`} onClick={() => setEstimating(a)}>
+                            見積
+                          </button>
+                        )}
+                        {canEdit && (
+                          <>
+                            <button type="button" aria-label={`${a.id} の担当と割当工数`} onClick={() => setAssigning(a)}>
+                              担当と工数
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`${a.id} を消す`}
+                              onClick={() => setRemoving(a)}
+                              disabled={submitting}
+                            >
+                              消す
+                            </button>
+                          </>
+                        )}
                       </td>
                     )}
                   </tr>
@@ -372,6 +402,26 @@ export default function ActivityListPage() {
           </div>
         )}
       </section>
+
+      {canEstimate && estimating !== null && (
+        <section aria-label={`活動 ${estimating.id} の見積`} className="activity-estimate">
+          <h3>
+            活動の見積：{estimating.id} {estimating.name}
+          </h3>
+          <p>今の見積：{hoursText(estimating.estimate_hours)}</p>
+          <EstimateForm
+            key={estimating.id}
+            projectId={projectId}
+            targetType="ACTIVITY"
+            targetId={estimating.id}
+            label={`活動 ${estimating.id} ${estimating.name}`}
+            onSaved={(result) => handleEstimateSaved(estimating, result)}
+          />
+          <button type="button" onClick={() => setEstimating(null)}>
+            閉じる
+          </button>
+        </section>
+      )}
 
       {canEdit && assigning !== null && (
         <AssignmentEditor

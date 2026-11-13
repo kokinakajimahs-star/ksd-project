@@ -1,5 +1,5 @@
 // UI-WBS-003 WBSの検証・レビュー・承認（設計書 7.1 のルート /projects/:projectId/wbs-review。WBS-13・16・20・21・22）。
-// 検査（API-WBS-012：100% ルールの 3 つの判定と、成果物・完了条件の欠けた WP）、レビュー（ReviewPanel）、
+// 検査（API-WBS-012：100% ルールの 3 つの判定と、成果物・完了条件の欠けた WP）、レビュー（ReviewPanel：一覧・開始・閉じる・指摘）、
 // 承認の申請（API-WBS-018。前提を満たさなければ 422 WBS_NOT_READY の前提ごとの件数を出す）、
 // このプロジェクトの WBS の承認待ちへの判断（API-WBS-020 の一覧から。API-WBS-019）、スコープベースライン（ScopeBaselinesPanel）を並べる。
 // 申請は wbs.edit、判断は wbs.approve を持つ人にだけ出す（7.2）。本人の申請の判断はサーバが 403 で拒む
@@ -314,6 +314,7 @@ export default function WbsReviewPage() {
         names={names}
         canEdit={canEdit}
         canReview={canReview}
+        reloadKey={reloadKey}
         onChanged={reload}
       />
 
