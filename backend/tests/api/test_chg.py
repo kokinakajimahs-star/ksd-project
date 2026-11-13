@@ -470,8 +470,9 @@ def test_withdraw_returns_to_draft_and_removes_pending_approval(world: World) ->
     world.session.expire_all()
     rows = world.session.scalars(select(ApprovalRequest).where(ApprovalRequest.target_type == "CHANGE_REQUEST",
                                                                ApprovalRequest.target_id == created["id"])).all()
-    # 取り下げた申請は消えており、提出し直した申請だけがある（SQLite は消した最大の ID を使い直すことがある）
+    # 取り下げた申請は消えており、提出し直した申請だけがある。消した申請の ID は使い直さない（4.2・CR-012。SQLite も AUTOINCREMENT）
     assert [(r.id, r.status) for r in rows] == [(resubmitted["approval_request_id"], "PENDING")]
+    assert resubmitted["approval_request_id"] > approval_id
     world.decide(resubmitted["approval_request_id"], "APPROVE")
     approved = world.client.post(url, headers=world.h["planner"])
     assert approved.status_code == 409 and error_code(approved) == "INVALID_STATE"  # 承認済みは取り下げられない
