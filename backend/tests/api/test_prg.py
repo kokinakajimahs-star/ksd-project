@@ -244,6 +244,37 @@ def test_put_progress_validates_and_derives_percent(world: World, client: TestCl
     assert world.progress(report, a, actual_start="2026-12-01")["percent_complete"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error_type"),
+    [
+        ("percent_complete", 33.333, "decimal_max_places"),
+        ("percent_complete", 0.001, "decimal_max_places"),
+        ("remaining_hours", 1.005, "decimal_max_places"),
+        ("remaining_hours", 0.1 + 0.2, "decimal_max_places"),
+    ],
+)
+def test_put_progress_refuses_more_decimal_places_than_the_columns(
+    world: World, db_session: Session, field: str, value: float, error_type: str
+) -> None:
+    """A-49 の 4（OQ-42 (8)）：進捗率（Numeric(5,2)）・残工数（Numeric(10,2)）の小数の桁を超える値は、丸めずに 400。何も保存しない。"""
+    a = world.add("A", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    error = world.progress(report, a, expect=400, **{field: value})["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert [(d["loc"], d["type"]) for d in error["details"]] == [(["body", field], error_type)]
+    assert db_session.scalars(select(ProgressEntry).where(ProgressEntry.activity_id == a)).all() == []
+
+
+def test_put_progress_keeps_two_decimal_places_as_entered(world: World, db_session: Session) -> None:
+    """A-49 の 4：小数 2 桁までの進捗率・残工数はそのまま保存する（列の小数の桁に収まる）。"""
+    a = world.add("A", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    body = world.progress(report, a, percent_complete=33.33, remaining_hours=12345.67)
+    assert (body["percent_complete"], body["remaining_hours"]) == (33.33, 12345.67)
+    stored = db_session.scalars(select(ProgressEntry).where(ProgressEntry.activity_id == a)).one()
+    assert (stored.percent_complete, stored.remaining_hours) == (Decimal("33.33"), Decimal("12345.67"))
+
+
 def test_put_progress_permissions_follow_own_assignment(app: FastAPI, world: World, client: TestClient) -> None:
     a = world.add("A", duration_days=5)
     b = world.add("B", duration_days=5)
@@ -325,6 +356,18 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
     assert twice.status_code == 400
     assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": [
         {"item_type": "CHECK", "title": "x", "weight": 0}]}, headers=world.h["pm"]).status_code == 400
+    # 重みは 0.01 以上・小数 2 桁まで（progress_items.weight は Numeric(10,2)。丸めない。A-49 の 4）
+    for weight, error_type in ((0.001, "greater_than_equal"), (0.005, "greater_than_equal"), (1.255, "decimal_max_places")):
+        refused = client.put(world.url(f"/activities/{a}/progress-items"), json={"items": [
+            {"item_type": "CHECK", "title": "x", "weight": weight}]}, headers=world.h["pm"])
+        assert refused.status_code == 400 and error_code(refused) == "VALIDATION_ERROR"
+        assert [(d["loc"], d["type"]) for d in refused.json()["error"]["details"]] == [
+            (["body", "items", 0, "weight"], error_type)]
+    assert len(client.get(world.url(f"/activities/{a}/progress-items"), headers=world.h["pm"]).json()["items"]) == 2
+    smallest = client.put(world.url(f"/activities/{b}/progress-items"), json={"items": [
+        {"item_type": "WORK", "title": "x", "weight": 0.01}]}, headers=world.h["pm"])
+    assert smallest.status_code == 200, smallest.text
+    assert [i["weight"] for i in smallest.json()["items"]] == [0.01]
     assert client.put(world.url(f"/activities/{a}/progress-items"), json={"items": []},
                       headers=world.h["viewer"]).status_code == 403
 

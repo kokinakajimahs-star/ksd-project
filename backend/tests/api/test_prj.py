@@ -454,6 +454,10 @@ def test_update_project_requires_project_manage(client: TestClient, world: World
         {"settings": {"variance_rate": None}},
         {"settings": {"variance_rate": -0.1}},
         {"settings": {"delay_extract_days": -1}},
+        # 許容幅はスナップショットの Numeric(6,2) に写すので、小数 2 桁・9999.99 まで（丸めない。A-49 の 4）
+        {"settings": {"delay_tolerance_days": 0.555}},
+        {"settings": {"delay_extract_days": 10000}},
+        {"settings": {"delay_tolerance_days": 1e-7}},
         {"settings": {"progress_method_default": "EARNED"}},
         {"settings": {"unknown": 1}},
         {"wbs_status": "BASELINED"},  # WBS の状態は 5.10 の遷移で変わる
@@ -470,6 +474,31 @@ def test_update_project_input_errors_are_400(client: TestClient, world: World, p
     assert response.status_code == 400, response.text
     assert error_code(response) == "VALIDATION_ERROR"
     assert client.get(f"/api/v1/projects/{world.pid}", headers=world.pm_h).json() == before
+
+
+@pytest.mark.parametrize(
+    ("values", "error_type"),
+    [
+        ({"delay_tolerance_days": 0.555}, "decimal_max_places"),
+        ({"delay_extract_days": 10000}, "decimal_whole_digits"),
+        ({"delay_extract_days": 12345.5}, "decimal_whole_digits"),
+    ],
+)
+def test_update_project_tolerance_settings_fit_the_snapshot_columns(
+    client: TestClient, world: World, values: dict[str, Any], error_type: str
+) -> None:
+    """A-49 の 4（OQ-42 (8)）：遅れの許容幅・抽出の閾値は、報告日の確定で写す ``progress_snapshots`` の ``Numeric(6,2)`` に収まる値
+    （9999.99 まで・小数 2 桁まで）だけを受ける。超えた値は丸めずに 400。"""
+    response = client.patch(f"/api/v1/projects/{world.pid}", json={"settings": values}, headers=world.pm_h)
+    assert response.status_code == 400, response.text
+    (name,) = values
+    assert [(d["loc"], d["type"]) for d in response.json()["error"]["details"]] == [(["body", "settings", name], error_type)]
+
+    upper = client.patch(f"/api/v1/projects/{world.pid}",
+                         json={"settings": {"delay_tolerance_days": 9999.99, "delay_extract_days": 0.01}}, headers=world.pm_h)
+    assert upper.status_code == 200, upper.text
+    stored = upper.json()["settings"]
+    assert (stored["delay_tolerance_days"], stored["delay_extract_days"]) == (9999.99, 0.01)
 
 
 def test_update_project_finish_before_new_start_is_400(client: TestClient, world: World) -> None:
