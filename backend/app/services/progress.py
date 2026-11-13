@@ -226,10 +226,15 @@ def _report_of(session: Session, project_id: int, report_id: int) -> StatusRepor
     return report
 
 
+def _activity_not_found(activity_id: int) -> AppError:
+    """無い活動・他のプロジェクトの活動・委託先に見えない活動に同じ 404 を返す（9.2 の注記：有無を明かさない）。"""
+    return AppError(404, "NOT_FOUND", "活動が見つかりません", details=[{"activity_id": activity_id}])
+
+
 def _activity_of(session: Session, project_id: int, activity_id: int) -> Activity:
     activity = session.get(Activity, activity_id)
     if activity is None or activity.project_id != project_id:
-        raise AppError(404, "NOT_FOUND", "活動が見つかりません", details=[{"activity_id": activity_id}])
+        raise _activity_not_found(activity_id)
     return activity
 
 
@@ -242,10 +247,11 @@ def _project_of(session: Session, project_id: int) -> Project:
 
 @dataclass(frozen=True)
 class _EntryPermission:
-    """進捗を書く権限の確認の途中の値（自分の割当の判定に使う）。"""
+    """進捗を書く権限の確認の途中の値（自分の割当の判定と、算定項目の承認済みを変えられるかの判定に使う）。"""
 
     table: Mapping[str, frozenset[str]]
     membership: Membership | None
+    granted: frozenset[str]
 
 
 def _check_entry_permission(session: Session, access: ProjectAccess, actor: User, project_id: int) -> _EntryPermission:
@@ -260,15 +266,25 @@ def _check_entry_permission(session: Session, access: ProjectAccess, actor: User
     granted = effective_permissions(principal_of(actor), role_permissions=table, membership=membership)
     if not {ENTER_OWN, ENTER_ALL} & granted:
         raise forbidden()
-    return _EntryPermission(table=table, membership=membership)
+    return _EntryPermission(table=table, membership=membership, granted=frozenset(granted))
 
 
 def _check_own_activity(actor: User, permission: _EntryPermission, activity_id: int) -> None:
-    """progress.enter_own の活動の判定（RULE-AUTH-001）。自分の割当でなく progress.enter_all も無ければ 403。"""
-    decision = authorize(principal_of(actor), ENTER_OWN, role_permissions=permission.table,
+    """progress.enter_own の活動の判定（RULE-AUTH-001）。自分の割当でなく progress.enter_all も無ければ 403。
+
+    委託先だけで読む利用者（view_level が OWN_ASSIGNMENTS）に自分の割当でない活動は見えないので、403 ではなく
+    無い活動と同じ 404 にする（9.2 の注記：有無を明かさない。自分の割当かの 403 より先に判定しない）。
+    """
+    principal = principal_of(actor)
+    decision = authorize(principal, ENTER_OWN, role_permissions=permission.table,
                          membership=permission.membership, activity_id=activity_id)
-    if not decision.allowed:
-        raise forbidden()
+    if decision.allowed:
+        return
+    level = project_view_level(principal, role_permissions=permission.table, membership=permission.membership)
+    assigned = permission.membership.assigned_activity_ids if permission.membership is not None else frozenset()
+    if level is ViewLevel.OWN_ASSIGNMENTS and activity_id not in assigned:
+        raise _activity_not_found(activity_id)
+    raise forbidden()
 
 
 def _visible_activity_ids(
@@ -435,18 +451,23 @@ class ReportView:
     snapshot_id: int | None
 
 
-def _report_views(session: Session, reports: Sequence[StatusReport]) -> list[ReportView]:
+def _report_views(
+    session: Session, reports: Sequence[StatusReport], visible: frozenset[int] | None = None
+) -> list[ReportView]:
+    """報告日の出力の元。``visible`` を渡したら、入力の行の数は読める活動の行だけで数える（9.2 の注記）。"""
     ids = [r.id for r in reports]
     counts: dict[int, int] = {}
     snapshots: dict[int, int] = {}
     if ids:
+        counted = (
+            select(ProgressEntry.status_report_id, func.count(ProgressEntry.id))
+            .where(ProgressEntry.status_report_id.in_(ids))
+        )
+        if visible is not None:
+            counted = counted.where(ProgressEntry.activity_id.in_(visible))
         counts = {
             report_id: count
-            for report_id, count in session.execute(
-                select(ProgressEntry.status_report_id, func.count(ProgressEntry.id))
-                .where(ProgressEntry.status_report_id.in_(ids))
-                .group_by(ProgressEntry.status_report_id)
-            ).tuples()
+            for report_id, count in session.execute(counted.group_by(ProgressEntry.status_report_id)).tuples()
         }
         snapshots = {
             report_id: snapshot_id
@@ -498,12 +519,14 @@ def create_status_report(
 def list_status_reports(
     session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
 ) -> tuple[list[ReportView], int]:
-    """報告日の一覧（project.view。報告日の古い順）。"""
-    authorize_project(session, access, actor, project_id, "project.view")
+    """報告日の一覧（project.view。報告日の古い順）。委託先には入力の行の数を自分の割当の活動の行だけで数える。"""
+    table = authorize_project(session, access, actor, project_id, "project.view")
     reports = list(
         session.scalars(select(StatusReport).where(StatusReport.project_id == project_id).order_by(StatusReport.report_date))
     )
-    return _report_views(session, reports[offset:offset + limit]), len(reports)
+    activities = session.scalars(select(Activity).where(Activity.project_id == project_id))
+    visible = _visible_activity_ids(session, access, actor, project_id, table, activities)
+    return _report_views(session, reports[offset:offset + limit], visible), len(reports)
 
 
 # ---------------------------------------------------------------------------
@@ -535,8 +558,9 @@ def put_progress(
 ) -> EntryView:
     """報告日の活動の進捗を書く（progress.enter_own か progress.enter_all。PRG-02・03、EFF-06）。全ての項目を置き換える。
 
-    確かめる順：プロジェクト 404 → 権限 403 → 報告日・活動 404 → 自分の割当 403 → 報告日が OPEN でなければ 409 ``INVALID_STATE``
-    （BR-13）→ 入力 400（直接入力以外の方式で進捗率を入れた・実績開始日より前の実績終了日）。
+    確かめる順：プロジェクト 404 → 権限 403 → 報告日・活動 404（委託先に見えない活動も同じ 404）→ 自分の割当 403
+    → 報告日が OPEN でなければ 409 ``INVALID_STATE``（BR-13）→ 入力 400（直接入力以外の方式で進捗率を入れた・
+    実績開始日より前の実績終了日）。
     保存する進捗率は RULE-PRG-001 の算定値（直接入力は入力値。実績終了日があれば 100）。
     """
     permission = _check_entry_permission(session, access, actor, project_id)
@@ -610,7 +634,7 @@ def get_progress_items(
     activity = _activity_of(session, project_id, activity_id)
     visible = _visible_activity_ids(session, access, actor, project_id, table, [activity])
     if visible is not None and activity.id not in visible:
-        raise AppError(404, "NOT_FOUND", "活動が見つかりません", details=[{"activity_id": activity_id}])
+        raise _activity_not_found(activity_id)
     return _items_view(session, _project_of(session, project_id), activity)
 
 
@@ -626,8 +650,12 @@ def replace_progress_items(
 ) -> ItemsView:
     """活動の算定項目を置き換える（progress.enter_own か progress.enter_all。PRG-05・BR-06）。
 
+    無い活動・委託先に見えない活動は同じ 404、自分の割当でなければ 403（API-PRG-003 と同じ）。
     ``id`` を載せた項目はその項目を変え、載せない項目は足し、載せなかった既存の項目は消す。``id`` がこの活動の項目でない・
     同じ ``id`` が 2 つは 400。完了の時刻は、完了になったときに「今」、完了のままなら保ち、完了でなければ空。
+    ``approved`` を変えるのは progress.enter_all を持つ人だけ（6.2 の API-PRG-004）。enter_own だけの人が変えると 403
+    ``FORBIDDEN``（何も書かない）。「変える」は、``id`` を載せた項目では保存済みの値と違うこと、足す項目では真にすること
+    （省いた ``approved`` は偽）。保存済みと同じ値を送るのは変えたことにしない。
     置き換えた後、OPEN の報告日の入力の進捗率を求め直す。
     """
     permission = _check_entry_permission(session, access, actor, project_id)
@@ -644,6 +672,17 @@ def replace_progress_items(
         if item_id in seen:
             raise _invalid(["body", "items", index, "id"], "同じ算定項目が 2 回あります")
         seen.add(item_id)
+    if ENTER_ALL not in permission.granted:
+        approving = [
+            index for index, item in enumerate(items)
+            if bool(item.get("approved", False))
+            != (existing[item["id"]].approved if item.get("id") is not None else False)
+        ]
+        if approving:
+            raise AppError(403, "FORBIDDEN", "算定項目の承認済みを変えられるのは progress.enter_all を持つ人だけです",
+                           details=[{"loc": ["body", "items", index, "approved"],
+                                     "message": "承認済みは progress.enter_all を持つ人だけが変えられます"}
+                                    for index in approving])
 
     for item in items:
         done = bool(item.get("done", False))
@@ -846,7 +885,7 @@ def lightning_line(session: Session, access: ProjectAccess, actor: User, project
                     actual_finish=entry.actual_finish if entry is not None else None, entry=entry,
                 )
             )
-    return LightningView(report=_report_views(session, [report])[0], source=source,
+    return LightningView(report=_report_views(session, [report], visible)[0], source=source,
                          project_start=plan.project.start_date, line=line, rows=rows, restricted=visible is not None)
 
 
@@ -1054,5 +1093,5 @@ def delays(session: Session, access: ProjectAccess, actor: User, project_id: int
         )
     except ScheduleCycleError as exc:  # 依存の追加が循環を拒むので起きないが、起きたら日程計算と同じエラーにする
         raise AppError(422, "SCHEDULE_CYCLE", "依存が循環しています", details=[{"activity_ids": list(exc.activity_ids)}]) from exc
-    return DelaysView(report=_report_views(session, [report])[0], source=source, analysis=analysis, plan=plan,
+    return DelaysView(report=_report_views(session, [report], visible)[0], source=source, analysis=analysis, plan=plan,
                       entries=entries, visible=visible)

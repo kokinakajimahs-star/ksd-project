@@ -257,11 +257,46 @@ def test_put_progress_permissions_follow_own_assignment(app: FastAPI, world: Wor
     assert world.progress(report, a, who="executor", percent_complete=10)["percent_complete"] == 10.0
     assert world.progress(report, b, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
     assert world.progress(report, b, who="contractor", percent_complete=20)["percent_complete"] == 20.0
-    assert world.progress(report, a, who="contractor", expect=403)["error"]["code"] == "FORBIDDEN"
+    # 委託先に見えない活動（自分の割当でない a）は、無い活動と同じ 404（9.2 の注記。CR-011。403 より先）
+    hidden = world.progress(report, a, who="contractor", expect=404)["error"]
+    missing = world.progress(report, MISSING, who="contractor", expect=404)["error"]
+    assert hidden == {**missing, "details": [{"activity_id": a}]} and missing["details"] == [{"activity_id": MISSING}]
     # progress.enter_all（PM・進捗管理担当者）は割当に関わらず書ける
     assert world.progress(report, b, who="pm", percent_complete=30)["percent_complete"] == 30.0
     # 権限の無い利用者には活動の有無を見せない（404 より先に 403）
     assert world.progress(report, MISSING, who="viewer", expect=403)["error"]["code"] == "FORBIDDEN"
+
+
+def test_contractor_gets_same_404_for_hidden_and_missing_activities(app: FastAPI, world: World,
+                                                                      client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先に見えない活動は、無い活動と同じ 404（``code``・``message``・``details`` が同じ形）。
+    自分の割当かの 403 より先に判定しない。API-PRG-003・004・010 で確かめる。全て読める利用者の 403 は変わらない。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["contractor"].id: {b}, world.users["executor"].id: {b}}))
+
+    def put_items(activity_id: int, who: str) -> Any:
+        return client.put(world.url(f"/activities/{activity_id}/progress-items"), json={"items": []}, headers=world.h[who])
+
+    def get_items(activity_id: int, who: str) -> Any:
+        return client.get(world.url(f"/activities/{activity_id}/progress-items"), headers=world.h[who])
+
+    for call in (lambda x: client.put(world.url(f"/status-reports/{report}/progress/{x}"), json={"percent_complete": 10},
+                                      headers=world.h["contractor"]),
+                 lambda x: put_items(x, "contractor"), lambda x: get_items(x, "contractor")):
+        hidden, missing = call(a), call(MISSING)
+        assert (hidden.status_code, missing.status_code) == (404, 404)
+        assert hidden.json()["error"] == {**missing.json()["error"], "details": [{"activity_id": a}]}
+        assert missing.json()["error"] == {"code": "NOT_FOUND", "message": "活動が見つかりません",
+                                           "details": [{"activity_id": MISSING}]}
+    assert put_items(b, "contractor").status_code == 200
+
+    # 全て読める利用者（実行担当者）の自分の割当でない活動は 403 のまま、無い活動は 404
+    assert world.progress(report, a, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
+    assert error_code(put_items(a, "executor")) == "FORBIDDEN"
+    assert put_items(MISSING, "executor").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +368,52 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
                        headers=world.h["pm"]).json()
     assert (reset["progress_method"], reset["effective_method"]) == (None, "DIRECT")
     assert world.line(report)["rows"][0]["percent_complete"] == 100.0
+
+
+def test_only_enter_all_changes_approved(app: FastAPI, world: World, client: TestClient) -> None:
+    """API-PRG-004（設計書 6.2）：``approved`` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人が変えると 403
+    （何も書かない）。足す項目を真にするのも変えるうち。保存済みと同じ値を送るのは変えたことにしない（項目は ``id`` で対応づける）。"""
+    a = world.add("A", duration_days=4)
+    world.report("2026-12-03")
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["executor"].id: {a}, world.users["contractor"].id: {a}}))
+    url = world.url(f"/activities/{a}/progress-items")
+
+    def put(who: str, *items: dict[str, Any]) -> Any:
+        return client.put(url, json={"items": list(items)}, headers=world.h[who])
+
+    def current() -> list[tuple[str, bool, bool]]:
+        return [(i["title"], i["done"], i["approved"]) for i in client.get(url, headers=world.h["viewer"]).json()["items"]]
+
+    # enter_own だけ（実行担当者・委託先）：承認済みで足すのは 403、偽（省いても偽）なら足せる
+    for who in ("executor", "contractor"):
+        refused = put(who, {"item_type": "WORK", "title": "下書き"}, {"item_type": "DELIVERABLE", "title": "設計書",
+                                                                     "approved": True})
+        assert refused.status_code == 403 and error_code(refused) == "FORBIDDEN", refused.text
+        assert [d["loc"] for d in refused.json()["error"]["details"]] == [["body", "items", 1, "approved"]]
+    assert current() == []
+    created = put("executor", {"item_type": "DELIVERABLE", "title": "設計書", "approved": False})
+    assert created.status_code == 200, created.text
+    item_id = created.json()["items"][0]["id"]
+    design = {"id": item_id, "item_type": "DELIVERABLE", "title": "設計書"}
+
+    # enter_own だけの人が保存済みの偽を真に変えるのは 403。enter_all（進捗管理担当者・PM）は変えられる
+    assert error_code(put("executor", {**design, "approved": True})) == "FORBIDDEN"
+    assert current() == [("設計書", False, False)]
+    approved = put("progress", {**design, "approved": True})
+    assert approved.status_code == 200, approved.text
+    assert current() == [("設計書", False, True)]
+
+    # 同じ値（真）を送って完了だけ変えるのは enter_own だけでも通る。省く（偽）のは真を偽へ変えることなので 403
+    kept = put("contractor", {**design, "done": True, "approved": True})
+    assert kept.status_code == 200, kept.text
+    assert current() == [("設計書", True, True)]
+    assert error_code(put("executor", {**design, "done": True})) == "FORBIDDEN"
+    assert error_code(put("executor", {**design, "done": True, "approved": False})) == "FORBIDDEN"
+    assert current() == [("設計書", True, True)]
+    both = put("pm", {**design, "done": True, "approved": False}, {"item_type": "CHECK", "title": "試験", "approved": True})
+    assert both.status_code == 200, both.text
+    assert current() == [("設計書", True, False), ("試験", False, True)]
 
 
 def test_project_default_method_change_refreshes_open_entries(world: World, client: TestClient,
@@ -469,6 +550,27 @@ def test_contractor_sees_only_assigned_rows(app: FastAPI, world: World) -> None:
     line = world.line(report, who="contractor")
     assert [(r["row_index"], r["activity_id"]) for r in line["rows"]] == [(0, b)] and line["restricted"] is True
     assert [r["activity_id"] for r in world.line(report, who="viewer")["rows"]] == [a, b]
+
+
+def test_contractor_entry_count_counts_only_assigned_rows(app: FastAPI, world: World, client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先には報告日の ``entry_count`` を自分の割当の活動の行だけで数える
+    （API-PRG-002 の一覧、API-PRG-006・009 の ``report``）。全て読める利用者は全ての行を数える。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, who="pm", percent_complete=10)
+    world.progress(report, b, who="pm", percent_complete=20)
+    delays = world.url(f"/status-reports/{report}/delays")
+    listed = client.get(world.url("/status-reports"), headers=world.h["viewer"]).json()
+    assert [r["entry_count"] for r in listed["items"]] == [2]
+    assert world.line(report)["report"]["entry_count"] == 2
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b}}))
+    restricted = client.get(world.url("/status-reports"), headers=world.h["contractor"]).json()
+    assert [r["entry_count"] for r in restricted["items"]] == [1] and restricted["total"] == 1
+    assert world.line(report, who="contractor")["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["contractor"]).json()["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["viewer"]).json()["report"]["entry_count"] == 2
 
 
 # ---------------------------------------------------------------------------

@@ -805,13 +805,15 @@ def test_scope_baselines_list_and_one_version(world: World, db_session: Session)
 
 
 class FakeActivities:
-    """活動の表（DB-SCH-001）の代わり。活動 → WP の要素。"""
+    """活動の表（DB-SCH-001）の代わり。活動 → WP の要素（``hours`` は活動の見積。省けば空）。"""
 
-    def __init__(self, placement: dict[int, int]) -> None:
+    def __init__(self, placement: dict[int, int], hours: dict[int, Decimal] | None = None) -> None:
         self.placement = placement
+        self.hours = hours or {}
 
     def activities(self, session: Session, project_id: int) -> list[ActivityEstimate]:
-        return [ActivityEstimate(id=a, work_package_id=wp) for a, wp in self.placement.items()]
+        return [ActivityEstimate(id=a, work_package_id=wp, estimate_hours=self.hours.get(a))
+                for a, wp in self.placement.items()]
 
 
 class FakeAssigned:
@@ -905,6 +907,85 @@ def test_responsibility_matrix_json_csv_and_restricted(world: World, app: FastAP
         (pm, True), (planner, True), (contractor, True), (viewer, False)]
     header = world.client.get(url, params={"format": "csv"}, headers=world.headers["pm"]).content.decode("utf-8-sig")
     assert header.split("\r\n")[0].endswith(",contractor,viewer（メンバー外）")
+
+
+def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activities(
+    world: World, app: FastAPI, db_session: Session
+) -> None:
+    """9.2 の注記（CR-011）：委託先に返す集計値・件数は見える要素・活動だけから求める。
+
+    API-WBS-001 の ``rollup_hours``・``project_estimate_hours``・検査の件数、API-WBS-012 の件数と子の集計、
+    API-WBS-011 の割当工数・担当・列、API-WBS-021 の要素の数。見えない活動（103・102・104）にも見積と割当がある。
+    全て読める利用者の値は変わらない。
+    """
+    pm, planner, viewer = world.users["pm"].id, world.users["planner"].id, world.users["viewer"].id
+    contractor, outsider = world.users["contractor"].id, world.users["outsider"].id
+    design = world.add("設計", own_estimate_hours="10")
+    a = world.add("基本設計", design["id"], kind="WORK_PACKAGE", own_estimate_hours="8")
+    b = world.add("詳細設計", design["id"], kind="WORK_PACKAGE", own_estimate_hours="20")
+    c = world.add("管理", kind="WORK_PACKAGE")
+    app.state.wbs_activities = FakeActivities(
+        {101: a["id"], 103: a["id"], 102: b["id"], 104: c["id"]},
+        {101: Decimal("8"), 103: Decimal("4"), 102: Decimal("16"), 104: Decimal("7")},
+    )
+    app.state.wbs_readers = CrossGroupReaders(assignments=lambda _s, _p: [
+        AssignmentRef(activity_id=101, user_id=contractor, planned_hours=Decimal("8")),
+        AssignmentRef(activity_id=103, user_id=planner, planned_hours=Decimal("4")),
+        AssignmentRef(activity_id=102, user_id=outsider, planned_hours=Decimal("5")),
+        AssignmentRef(activity_id=104, user_id=viewer, planned_hours=Decimal("3")),
+    ])
+    app.state.project_access = ProjectMembersTable(assignments=FakeAssigned({contractor: frozenset({101})}))
+
+    # 木（API-WBS-001）：全て読める利用者は全ての活動から、委託先は見える活動（101）だけから
+    full = world.tree("viewer")
+    assert full["restricted"] is False
+    assert [(e["wbs_code"], e["rollup_hours"]) for e in full["elements"]] == [
+        ("1.0", 28.0), ("1.1", 12.0), ("1.2", 16.0), ("2.0", 7.0)]
+    assert full["project_estimate_hours"] == 35.0
+    assert full["validation"] == {"errors": 0, "warnings": 3, "missing_completion": 3}
+    seen = world.tree("contractor")
+    assert seen["restricted"] is True
+    assert [(e["wbs_code"], e["rollup_hours"], e["rollup_source"]) for e in seen["elements"]] == [
+        ("1.0", 8.0, "CHILDREN"), ("1.1", 8.0, "ACTIVITIES")]
+    assert seen["project_estimate_hours"] == 8.0
+    assert seen["validation"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
+
+    # 検査（API-WBS-012）：子の集計も見える活動だけ（1.1 は 8 = 8 で差異なし、1.0 の子の集計は 8）
+    validation = world.client.get(world.url("/validation"), headers=world.headers["contractor"]).json()
+    assert validation["counts"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
+    assert [(f["code"], f["element_id"], f["own_estimate_hours"], f["lower_hours"]) for f in validation["findings"]] == [
+        ("SUM_MISMATCH", design["id"], 10.0, 8.0)]
+    full_validation = world.client.get(world.url("/validation"), headers=world.headers["viewer"]).json()
+    assert [(f["element_id"], f["lower_hours"]) for f in full_validation["findings"]] == [
+        (design["id"], 28.0), (a["id"], 12.0), (b["id"], 16.0)]
+
+    # 責任分担表（API-WBS-011）：割当工数・担当・列も見える活動の割当だけ（見えない活動だけにいるメンバー外の人は列に出ない）
+    url = f"/api/v1/projects/{world.pid}/wbs/responsibility-matrix"
+    matrix = world.client.get(url, headers=world.headers["viewer"]).json()
+    assert [(r["wbs_code"], r["planned_hours"]) for r in matrix["rows"]] == [("1.1", 12.0), ("1.2", 5.0), ("2.0", 3.0)]
+    assert [(u["user_id"], u["is_member"]) for u in matrix["users"]][-1] == (outsider, False)
+    restricted = world.client.get(url, headers=world.headers["contractor"]).json()
+    assert [(r["wbs_code"], r["planned_hours"]) for r in restricted["rows"]] == [("1.1", 8.0)]
+    assert [u["user_id"] for u in restricted["users"]] == [pm, planner, viewer, contractor]
+    cells = {cell["user_id"]: (cell["is_assigned"], cell["planned_hours"]) for cell in restricted["rows"][0]["cells"]}
+    assert cells[contractor] == (True, 8.0) and cells[planner] == (False, 0.0)
+
+    # 版の一覧（API-WBS-021）：要素の数は今見える要素の写しだけ（API-WBS-022 と同じ範囲）
+    baseline = ScopeBaseline(project_id=world.pid, version=1, reason="INITIAL_APPROVAL", created_by=world.admin.id,
+                             created_at=NOW)
+    db_session.add(baseline)
+    db_session.flush()
+    for element in (design, a, b, c):
+        db_session.add(ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"],
+                                            wbs_code=element["wbs_code"], kind=element["kind"], name=element["name"],
+                                            dictionary={}))
+    db_session.commit()
+    baselines = f"/api/v1/projects/{world.pid}/scope-baselines"
+    assert [b["element_count"] for b in world.client.get(baselines, headers=world.headers["viewer"]).json()["items"]] == [4]
+    listed = world.client.get(baselines, headers=world.headers["contractor"]).json()["items"]
+    assert [b["element_count"] for b in listed] == [2]
+    one = world.client.get(f"{baselines}/{baseline.id}", headers=world.headers["contractor"]).json()
+    assert len(one["elements"]) == listed[0]["element_count"]
 
 
 # ---------------------------------------------------------------------------

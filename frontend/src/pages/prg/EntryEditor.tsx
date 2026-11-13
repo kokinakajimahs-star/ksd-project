@@ -156,6 +156,8 @@ interface EntryEditorProps {
   row: LightningRow & { activity_id: number };
   canEnter: boolean;
   canEditMethod: boolean;
+  /** 算定項目の承認済みを変えられるか（progress.enter_all だけ。API-PRG-004） */
+  canApprove: boolean;
   /** 保存した後に呼ぶ（画面はイナズマ線を読み直す） */
   onSaved: (message: string) => void;
   onClose: () => void;
@@ -167,6 +169,7 @@ export default function EntryEditor({
   row,
   canEnter,
   canEditMethod,
+  canApprove,
   onSaved,
   onClose,
 }: EntryEditorProps) {
@@ -214,6 +217,7 @@ export default function EntryEditor({
           projectId={projectId}
           activityId={activityId}
           itemType={itemType}
+          canApprove={canApprove}
           onSaved={onSaved}
         />
       )}
@@ -378,11 +382,13 @@ function ProgressItemsEditor({
   projectId,
   activityId,
   itemType,
+  canApprove,
   onSaved,
 }: {
   projectId: number;
   activityId: number;
   itemType: ProgressItemType;
+  canApprove: boolean;
   onSaved: (message: string) => void;
 }) {
   const [drafts, setDrafts] = useState<ItemDraft[]>([]);
@@ -463,6 +469,9 @@ function ProgressItemsEditor({
       <p className="note">
         今の項目から始める。保存すると、ここに並べた項目で活動の算定項目を置き換える（並べなかった既存の項目は消える）
       </p>
+      {!canApprove && (
+        <p className="note">承認済みを変えられるのは、全ての活動の進捗を入力できる人だけ（今の値のまま保存する）</p>
+      )}
       <ErrorAlert error={error} />
       {drafts.length === 0 ? (
         <p>項目がありません（項目が 0 件の活動の進捗率は未算定になる）</p>
@@ -525,6 +534,7 @@ function ProgressItemsEditor({
                     aria-label={`${i + 1} 行目の承認済み`}
                     type="checkbox"
                     checked={d.approved}
+                    disabled={!canApprove}
                     onChange={(e) => update(d.key, { approved: e.target.checked })}
                   />
                 </td>

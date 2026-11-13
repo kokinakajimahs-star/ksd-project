@@ -159,7 +159,8 @@ def list_activities(
     """API-SCH-001 活動の一覧（日程・依存・担当付き）。
 
     権限は project.view（委託先は自分の割当の活動だけ。``restricted`` が真）。行の順は WBS の並び → WP の中の表示順。
-    ``dependencies`` は読める活動どうしの依存（API-SCH-007 で消すときの ID を持つ）。``limit``・``offset``（6.1）。
+    ``dependencies`` は読める活動どうしの依存（API-SCH-007 で消すときの ID を持つ）。``predecessor_ids``・``successor_ids`` も
+    読める活動だけ（9.2 の注記）。``limit``・``offset``（6.1）。
     """
     view = schedule_service.list_activities(session, access, user, links, project_id, limit=limit, offset=offset)
     return ActivityList(items=[_activity_out(v) for v in view.items], total=view.total, limit=limit, offset=offset,
@@ -388,7 +389,7 @@ def list_schedule_baselines(
 ) -> BaselineList:
     """API-SCH-012 スケジュールベースラインの版の一覧。
 
-    権限は project.view。版の順。``limit``・``offset``（6.1）。
+    権限は project.view。版の順。``limit``・``offset``（6.1）。委託先には項目の数を読める活動とその WP の分だけで数える。
     """
     views, total = schedule_service.list_baselines(session, access, user, project_id, limit=limit, offset=offset)
     return BaselineList(items=[_baseline_out(v) for v in views], total=total, limit=limit, offset=offset)

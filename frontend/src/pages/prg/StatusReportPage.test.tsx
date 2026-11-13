@@ -462,6 +462,76 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     ]);
   });
 
+  it("progress.enter_own だけの人は算定項目の承認済みを変えられず、今の値のまま送る（API-PRG-004。CR-011）", async () => {
+    const current = makeProgressItems({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: false, approved: true, done_at: null },
+        { id: 91, item_type: "DELIVERABLE", title: "試験仕様書", weight: 1, done: false, approved: false, done_at: null },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+        [`PUT ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const form = await screen.findByRole("form", { name: "算定項目" });
+    expect(within(form).getByText(/承認済みを変えられるのは、全ての活動の進捗を入力できる人だけ/)).toBeInTheDocument();
+    expect(within(form).getByLabelText("1 行目の承認済み")).toBeDisabled();
+    expect(within(form).getByLabelText("1 行目の承認済み")).toBeChecked();
+    expect(within(form).getByLabelText("2 行目の承認済み")).toBeDisabled();
+    expect(within(form).getByLabelText("2 行目の承認済み")).not.toBeChecked();
+    // 完了は変えられる。足した項目の承認済みも変えられない（偽で送る）
+    fireEvent.click(within(form).getByLabelText("1 行目の完了"));
+    fireEvent.click(within(form).getByRole("button", { name: "項目を足す" }));
+    expect(within(form).getByLabelText("3 行目の承認済み")).toBeDisabled();
+    fireEvent.change(within(form).getByLabelText("3 行目の名前"), { target: { value: "移行手順書" } });
+    fireEvent.click(within(form).getByRole("button", { name: "算定項目を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)[0]!.body).toEqual({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: true },
+        { id: 91, item_type: "DELIVERABLE", title: "試験仕様書", weight: 1, done: false, approved: false },
+        { item_type: "DELIVERABLE", title: "移行手順書", weight: 1, done: false, approved: false },
+      ],
+    });
+  });
+
+  it("progress.enter_all を持つ人は算定項目の承認済みを変えられる（API-PRG-004。CR-011）", async () => {
+    const current = makeProgressItems({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: false, done_at: null },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own", "progress.enter_all"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+        [`PUT ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const form = await screen.findByRole("form", { name: "算定項目" });
+    expect(within(form).queryByText(/承認済みを変えられるのは/)).toBeNull();
+    const approved = within(form).getByLabelText("1 行目の承認済み");
+    expect(approved).toBeEnabled();
+    fireEvent.click(approved);
+    expect(approved).toBeChecked();
+    fireEvent.click(within(form).getByRole("button", { name: "算定項目を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)[0]!.body).toEqual({
+      items: [{ id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: true, approved: true }],
+    });
+  });
+
   it("今の算定項目が読めなければ、算定項目の編集を出さずに理由を出す（空から置き換えない）", async () => {
     const { calls } = mockApi(
       routes(meWith(["project.view", "progress.enter_own"]), {
