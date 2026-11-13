@@ -41,13 +41,15 @@ class ChangeRequestPatch(BaseModel):
 
 
 class ChangeRequestOut(BaseModel):
+    """変更要求。委託先には ``operations``・``impact`` を null で返す（設計書 1.3 の 9.2・CR-016）。"""
+
     id: int
     project_id: int
     number: int
     title: str
     reason: str
     target_codes: list[str]
-    operations: list[dict[str, Any]]
+    operations: list[dict[str, Any]] | None
     status: ChangeRequestStatusCode
     impact: dict[str, Any] | None
     created_by: int

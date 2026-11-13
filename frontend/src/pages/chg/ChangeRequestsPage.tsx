@@ -332,7 +332,9 @@ export default function ChangeRequestsPage() {
           </dl>
 
           <h4>変更内容</h4>
-          {selected.operations.length === 0 ? (
+          {selected.operations === null ? (
+            <p>変更内容と影響分析は表示しない（委託先には返さない）</p>
+          ) : selected.operations.length === 0 ? (
             <p>変更内容はまだありません</p>
           ) : (
             <ol aria-label="変更内容">
@@ -352,9 +354,12 @@ export default function ChangeRequestsPage() {
           <div className="actions" role="group" aria-label="変更要求の操作">
             {selected.status === "DRAFT" && canCreate && (
               <>
-                <button type="button" disabled={busy} onClick={() => setForm({ mode: "edit", target: selected })}>
-                  直す
-                </button>
+                {/* 変更内容を受け取っていない（委託先）ときは、保存で変更内容を空にしてしまうので直させない（CR-016） */}
+                {selected.operations !== null && (
+                  <button type="button" disabled={busy} onClick={() => setForm({ mode: "edit", target: selected })}>
+                    直す
+                  </button>
+                )}
                 <button type="button" disabled={busy} onClick={() => void handleSubmit()}>
                   提出する
                 </button>
@@ -365,7 +370,8 @@ export default function ChangeRequestsPage() {
                 提出を取り下げる
               </button>
             )}
-            {canAnalyze(selected.status) && (
+            {/* 委託先（変更内容を受け取っていない）にはサーバが 403 を返すので出さない（CR-016） */}
+            {canAnalyze(selected.status) && selected.operations !== null && (
               <button type="button" disabled={busy} onClick={() => void handleAnalyze()}>
                 影響分析を流す
               </button>

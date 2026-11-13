@@ -45,12 +45,15 @@ def get_today(now: datetime = Depends(get_now)) -> date:
 
 
 def _change_request_out(view: ChangeRequestView) -> ChangeRequestOut:
+    """変更要求を返す全ての応答の形。委託先には影響（``impact``）と操作（``operations``）を null で返す（9.2・CR-016）。"""
     c = view.change_request
     return ChangeRequestOut(
         id=c.id, project_id=c.project_id, number=c.number, title=c.title, reason=c.reason,
-        target_codes=list(c.target_codes or []), operations=list(c.operations or []), status=c.status,  # type: ignore[arg-type]
-        impact=c.impact, created_by=c.created_by, submitted_at=c.submitted_at, applied_by=c.applied_by,
-        applied_at=c.applied_at, approval_request_id=view.approval_request_id,
+        target_codes=list(c.target_codes or []),
+        operations=None if view.hide_details else list(c.operations or []),
+        status=c.status,  # type: ignore[arg-type]
+        impact=None if view.hide_details else c.impact, created_by=c.created_by, submitted_at=c.submitted_at,
+        applied_by=c.applied_by, applied_at=c.applied_at, approval_request_id=view.approval_request_id,
     )
 
 
@@ -96,7 +99,8 @@ def list_change_requests(
 ) -> ChangeRequestList:
     """API-CHG-002 変更要求の一覧（状態で絞れる）。
 
-    権限は project.view。番号の順。委託先は自分の割当の活動の WBS の経路に入る変更要求だけ。
+    権限は project.view。番号の順。委託先は自分の割当の活動の WBS の経路に入る変更要求だけで、影響（``impact``）と
+    操作（``operations``）は null（9.2・CR-016。変更要求を返す他の応答も同じ）。
     """
     views, total = change_service.list_change_requests(session, access, user, project_id, status=status, limit=limit,
                                                        offset=offset)
@@ -135,7 +139,7 @@ def analyze_change_request(
     """API-CHG-004 影響分析を流す（本計画は変えない）。
 
     権限は project.view。今の計画の写しに変更内容を当てて再計算し、5.9 の形で前後の差を返す（RULE-CHG-002）。
-    本計画にも変更要求にも書かない。反映済み・却下の変更要求は 409 ``INVALID_STATE``。
+    本計画にも変更要求にも書かない。反映済み・却下の変更要求は 409 ``INVALID_STATE``。委託先は 403（9.2・CR-016）。
     """
     impact = change_service.analyze_change_request(session, access, user, project_id, change_request_id)
     return ImpactOut(change_request_id=change_request_id, **impact)
@@ -193,7 +197,8 @@ def apply_change_request(
     view = change_service.apply_change_request(session, access, user, project_id, change_request_id, now=now)
     return AppliedOut(
         change_request=_change_request_out(ChangeRequestView(change_request=view.change_request,
-                                                             approval_request_id=view.approval_request_id)),
+                                                             approval_request_id=view.approval_request_id,
+                                                             hide_details=view.hide_details)),
         scope_baseline=BaselineVersionOut(id=view.scope_baseline.id, version=view.scope_baseline.version,
                                           reason=view.scope_baseline.reason),
         schedule_baseline=BaselineVersionOut(id=view.schedule_baseline.id, version=view.schedule_baseline.version,
