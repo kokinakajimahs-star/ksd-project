@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from zipfile import ZipFile
 
 import pytest
@@ -35,7 +35,11 @@ from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency
 from app.errors import AppError
 from app.models.wbs import WbsDictionaryEntry, WbsElement, WbsNumberingRule
+from app.services import io as io_service
 from app.services.clock import get_now
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
 CODE = "PRJ-INT"
@@ -638,24 +642,78 @@ def test_import_rows_over_max_rows_is_400_and_writes_nothing(world: World, app: 
     assert response.json()["written"] is True and "WP1（改）" in world.elements()
 
 
+def test_import_csv_stops_reading_rows_past_max_rows(world: World, app: FastAPI) -> None:
+    """API-INT-002：CSV は見出しと ``PMT_IMPORT_MAX_ROWS`` 行を 1 行超えたところで読むのを止める（CR-019）。
+    その先の行（引用符の閉じていない行）を読まないので、誤りは読めない行（FILE_UNREADABLE）でなく行の上限の 400。"""
+    grid = world.grid("wbs")
+    rows = len(grid) - 1
+    limit_import(app, import_max_rows=rows)
+    content = csv_of(grid) + b"x,,,,,,,,,\r\n" + b'"closed never,\r\n'
+    response = post_import(world, content, dry_run=True)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["details"][0]["loc"] == ["body"]
+    # 上限を超えない行の数なら最後まで読み、閉じていない引用符は今どおり読めない行の誤り
+    limit_import(app, import_max_rows=rows + 5)
+    unreadable = post_import(world, content, dry_run=True)
+    assert unreadable.status_code == 200, unreadable.text
+    assert [i["code"] for i in unreadable.json()["issues"]] == ["FILE_UNREADABLE"]
+
+
+def test_import_xlsx_keeps_rows_narrow_and_reports_cells_far_right(world: World) -> None:
+    """API-INT-002：xlsx は宣言された範囲（dimension）で行を右へ埋めず、``XLSX_MAX_COLUMNS`` 列より右は右端の値だけを持つ
+    （数 KB のファイルからメモリを膨らませない。CR-019）。見出しより右の値は今どおり ``TOO_MANY_COLUMNS``。"""
+    grid = world.grid("wbs")
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    for row in grid:
+        sheet.append(row)
+    sheet.cell(row=2, column=16384, value="右端")  # XFD2
+    sheet.cell(row=len(grid) + 3, column=16000)  # 値の無いセル：範囲（dimension）だけを広げる
+    buffer = BytesIO()
+    workbook.save(buffer)
+    content = buffer.getvalue()
+
+    read = io_service.read_grid(io_service.FileFormat.XLSX, content, max_rows=100)
+    assert max(len(row) for row in read) == io_service.XLSX_MAX_COLUMNS + 1
+    assert read[1][-1] == "右端"
+    # 範囲（XFD まで）で右へ埋めない：XFD に値を置いた行のほかは、見出しの列の数を超えない
+    assert all(len(row) <= len(WBS_COLUMNS) for index, row in enumerate(read) if index != 1)
+
+    body = world.load("wbs", content, fmt="xlsx", dry_run=True)
+    assert [(i["row"], i["code"]) for i in body["issues"]] == [(2, "TOO_MANY_COLUMNS")]
+
+
 def test_import_file_reader_stops_reading_at_max_bytes() -> None:
     """API-INT-002：本体は ``PMT_IMPORT_MAX_BYTES`` を超えた時点で読むのを止める（残りを受け取らない。CR-019）。
-    ``Content-Length`` が上限を超えていれば 1 度も受け取らない。上限ちょうどは全て読む。"""
+    ``Content-Length`` が上限を超えていれば 1 度も受け取らない。上限ちょうどは全て読む。
+    本体を受け取る前に、認証で読んだトランザクションを閉じる（DB の接続を持ったまま遅い送り手を待たない）。"""
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def commit(self) -> None:
+            self.events.append("commit")
 
     def run(chunks: list[bytes], max_bytes: int, headers: list[tuple[bytes, bytes]]) -> tuple[bytes | AppError, int]:
         received = 0
+        session = FakeSession()
 
         async def receive() -> Message:
             nonlocal received
+            assert session.events == ["commit"], "本体を受け取る前に接続を返していない"
             received += 1
             index = received - 1
             return {"type": "http.request", "body": chunks[index], "more_body": index + 1 < len(chunks)}
 
         request = Request({"type": "http", "method": "POST", "path": "/", "headers": headers}, receive)
         try:
-            result: bytes | AppError = asyncio.run(read_import_file(request, max_bytes=max_bytes))
+            result: bytes | AppError = asyncio.run(
+                read_import_file(request, max_bytes=max_bytes, _user=cast(User, None), session=cast(Any, session)))
         except AppError as exc:
             result = exc
+        assert session.events == ["commit"]
         return result, received
 
     chunks = [b"x" * 10] * 100
@@ -734,6 +792,24 @@ def test_import_activities_rejects_assignee_who_is_not_a_member(world: World) ->
     grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "", "5", "0", "", "", lid("outsider")]]
     body = world.load("activities", csv_of(grid), dry_run=True)
     assert [(i["row"], i["code"]) for i in body["issues"]] == [(2, "NOT_FOUND")]
+
+
+def test_import_activities_judges_start_after_locking_project(world: World, race: RaceProbe) -> None:
+    """API-INT-002（CR-018・A-49 の 3）：書く取込は、プロジェクトの行をロックしてから開始日を読む。ロックの直前に別の操作が
+    開始日を 12-03 にしてコミットしていれば、12-02 の希望開始日の行は ``BEFORE_PROJECT_START`` で何も書かない。"""
+    grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "2026-12-02", "5", "0", "", "", ""]]
+
+    def move_project_start(other: Session) -> None:
+        project = other.get(Project, world.pid)
+        assert project is not None
+        project.start_date = date(2026, 12, 3)
+
+    race.before_lock("projects", move_project_start)
+    race.locked.clear()
+    body = world.load("activities", csv_of(grid), expect=422)
+    assert [(d["row"], d["code"]) for d in body["error"]["details"]] == [(2, "BEFORE_PROJECT_START")]
+    assert race.locked[:1] == ["projects"]
+    assert world.grid("activities")[1][3] != "2026-12-02"
 
 
 def test_import_activities_rejects_requested_start_before_project_start(world: World, db_session: Session) -> None:

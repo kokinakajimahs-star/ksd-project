@@ -73,6 +73,20 @@ resource "google_sql_user" "app" {
   deletion_policy = "ABANDON"
 }
 
+# 検証の DB ユーザー（pgverify が試験ごとの DB を作って消す）。本番の表（pmt_app の持ち物）への権限を持たない。
+# 試験の DB が残っていても消せるよう、片付けでは管理から外すだけにする
+resource "random_password" "db_verify" {
+  length  = 32
+  special = false
+}
+
+resource "google_sql_user" "verify" {
+  name            = "pmt_verifier"
+  instance        = google_sql_database_instance.main.name
+  password        = random_password.db_verify.result
+  deletion_policy = "ABANDON"
+}
+
 # 最初のシステム管理者のパスワード（PMT_INITIAL_ADMIN_PASSWORD。NFR-04 の方針：12 文字以上・ログイン名と違う）
 resource "random_password" "initial_admin" {
   length  = 24
@@ -81,14 +95,15 @@ resource "random_password" "initial_admin" {
 
 locals {
   # psycopg 3 で Cloud Run の Cloud SQL の接続（/cloudsql/<接続名> の Unix ソケット）へつなぐ URL
-  db_socket_host = "/cloudsql/${google_sql_database_instance.main.connection_name}"
-  db_url_prefix  = "postgresql+psycopg://${google_sql_user.app.name}:${random_password.db_app.result}@"
+  db_socket_host       = "/cloudsql/${google_sql_database_instance.main.connection_name}"
+  db_url_prefix        = "postgresql+psycopg://${google_sql_user.app.name}:${random_password.db_app.result}@"
+  db_verify_url_prefix = "postgresql+psycopg://${google_sql_user.verify.name}:${random_password.db_verify.result}@"
 
   # 秘密の名前（for_each のキー。値が秘密なので、キーは値と別の固定の集合にする）と値
   secret_names = toset(["database-url", "verify-database-url", "initial-admin-password"])
   secrets = {
     database-url           = "${local.db_url_prefix}/${google_sql_database.pmt.name}?host=${local.db_socket_host}"
-    verify-database-url    = "${local.db_url_prefix}/${google_sql_database.pmt_verify.name}?host=${local.db_socket_host}"
+    verify-database-url    = "${local.db_verify_url_prefix}/${google_sql_database.pmt_verify.name}?host=${local.db_socket_host}"
     initial-admin-password = random_password.initial_admin.result
   }
 }
@@ -114,10 +129,25 @@ resource "google_secret_manager_secret_version" "app" {
   secret_data = local.secrets[each.key]
 }
 
-# 秘密を読めるのは Cloud Run の身元だけ（秘密ごとに与える）
+locals {
+  # 秘密ごとに読める身元：本番の 2 つは Cloud Run のサービス・移行のジョブ（ksdp-run）、検証の DB の URL は pgverify（ksdp-verify）だけ
+  secret_readers = {
+    database-url           = "run"
+    initial-admin-password = "run"
+    verify-database-url    = "verify"
+  }
+}
+
 resource "google_secret_manager_secret_iam_member" "run_accessor" {
-  for_each  = google_secret_manager_secret.app
-  secret_id = each.value.secret_id
+  for_each  = toset([for name, reader in local.secret_readers : name if reader == "run"])
+  secret_id = google_secret_manager_secret.app[each.key].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = google_service_account.run.member
+}
+
+resource "google_secret_manager_secret_iam_member" "verify_accessor" {
+  for_each  = toset([for name, reader in local.secret_readers : name if reader == "verify"])
+  secret_id = google_secret_manager_secret.app[each.key].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.verify.member
 }

@@ -159,7 +159,7 @@ resource "google_cloud_run_v2_job" "migrate" {
 }
 
 # PostgreSQL での検証（Dockerfile の test の段で pytest backend/tests）。検証用の DB（pmt_verify）だけを渡す。
-# 本番の DB の URL（PMT_DATABASE_URL）は渡さない（deploy.sh pgverify）
+# 身元は ksdp-verify（本番の秘密を読めない）、DB ユーザーは pmt_verifier（本番の表への権限が無い）。deploy.sh pgverify
 resource "google_cloud_run_v2_job" "pgverify" {
   count               = local.deploy_test ? 1 : 0
   name                = "${local.name}-pgverify"
@@ -170,7 +170,7 @@ resource "google_cloud_run_v2_job" "pgverify" {
     task_count = 1
 
     template {
-      service_account = google_service_account.run.email
+      service_account = google_service_account.verify.email
       max_retries     = 0
       timeout         = "3600s"
 
@@ -211,7 +211,7 @@ resource "google_cloud_run_v2_job" "pgverify" {
   }
 
   depends_on = [
-    google_project_iam_member.run_cloudsql_client,
-    google_secret_manager_secret_iam_member.run_accessor,
+    google_project_iam_member.verify_cloudsql_client,
+    google_secret_manager_secret_iam_member.verify_accessor,
   ]
 }

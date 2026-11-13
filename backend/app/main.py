@@ -163,7 +163,9 @@ class _ScreenRoute(APIRoute):
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
         match, child_scope = super().matches(scope)
-        if match is not Match.NONE and child_scope["path_params"]["path"].split("/", 1)[0] in _NOT_SCREEN_SEGMENTS:
+        # 先頭の空のセグメントは飛ばす（``//api/…`` も API のパスとして扱う）
+        first = next((s for s in child_scope["path_params"]["path"].split("/") if s), "") if match is not Match.NONE else ""
+        if first in _NOT_SCREEN_SEGMENTS:
             return Match.NONE, {}
         return match, child_scope
 

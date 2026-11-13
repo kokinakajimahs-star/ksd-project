@@ -52,11 +52,19 @@ def export_file(
     )
 
 
-async def read_import_file(request: Request, max_bytes: int = Depends(get_import_max_bytes)) -> bytes:
+async def read_import_file(
+    request: Request,
+    max_bytes: int = Depends(get_import_max_bytes),
+    _user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> bytes:
     """取込のファイル（要求の本体）。``PMT_IMPORT_MAX_BYTES`` を超えたら、そこで読むのを止めて 400 ``VALIDATION_ERROR``。
 
     ``Content-Length`` が上限を超えていれば本体を読まずに拒む。無い・偽りでも、読んだ量が上限を超えた時点で止める（6.3・CR-019）。
+    認証（401）は本体より先に確かめ、本体を受け取る前に認証で読んだトランザクションを閉じて DB の接続をプールへ返す
+    （遅い送り手が接続を持ち続けないように。認証は読むだけなので失うものは無い）。
     """
+    session.commit()
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > max_bytes:
         raise io_service.file_too_large(max_bytes)

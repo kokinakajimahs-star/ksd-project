@@ -8,10 +8,10 @@
 | Cloud Run のサービス | `ksdp-pmt` | 画面と API（`https://ksdp-pmt-….run.app`） |
 | Cloud Run のジョブ | `ksdp-migrate` | DB の移行（`alembic upgrade head`）。サービスを入れ替える前に流す |
 | Cloud Run のジョブ | `ksdp-pgverify` | PostgreSQL での検証（`pytest backend/tests`。検証用の DB `pmt_verify` だけを使う） |
-| Cloud SQL | `ksdp-pg` | PostgreSQL 16。DB `pmt`（本番）・`pmt_verify`（検証）。ユーザー `pmt_app` |
-| Secret Manager | `ksdp-database-url`・`ksdp-verify-database-url`・`ksdp-initial-admin-password` | 秘密の値。読めるのは Cloud Run の身元 `ksdp-run` だけ |
+| Cloud SQL | `ksdp-pg` | PostgreSQL 16。DB `pmt`（本番）・`pmt_verify`（検証）。ユーザー `pmt_app`（本番の表の持ち主）・`pmt_verifier`（検証。試験ごとの DB を作って消す） |
+| Secret Manager | `ksdp-database-url`・`ksdp-verify-database-url`・`ksdp-initial-admin-password` | 秘密の値。本番の 2 つを読めるのは `ksdp-run`、検証の DB の URL を読めるのは `ksdp-verify` だけ |
 | Artifact Registry | `ksdp-images` | イメージ `pmt`（サーバ）・`pmt-test`（試験） |
-| サービスアカウント | `ksdp-run`・`ksdp-build` | Cloud Run の身元・Cloud Build の身元 |
+| サービスアカウント | `ksdp-run`・`ksdp-verify`・`ksdp-build` | Cloud Run のサービスと移行のジョブの身元・検証のジョブの身元・Cloud Build の身元 |
 | Cloud Storage | `ksdp-build-<project>`・`ksdp-tfstate-<project>` | Cloud Build へ上げるソース（7 日で消す）・Terraform の状態（版管理あり。`deploy.sh` が作る） |
 
 以下の例は、プロジェクト `kc-dbsb-poc-260109`・リージョン `asia-northeast1` とする（`deploy/terraform/poc.tfvars` と変数の既定値）。
@@ -241,6 +241,8 @@ bash deploy/deploy.sh apply                        # 出さない
 ## 9. PostgreSQL での検証
 
 試験のイメージ（Dockerfile の `test` の段）で `pytest backend/tests` を流す。DB は検証用の `pmt_verify` を `PMT_TEST_DATABASE_URL` で渡し、本番の DB の URL は渡さない。
+ジョブの身元 `ksdp-verify` は本番の秘密を読めず、DB ユーザー `pmt_verifier` は本番の表（`pmt_app` の持ち物）への権限を持たない。
+ただし Cloud SQL が API で作るユーザーはどちらも `cloudsqlsuperuser` の一員なので、DB の作成・削除の権限は分けていない（同じインスタンスに置く限りの限界）。
 
 ```bash
 bash deploy/deploy.sh pgverify

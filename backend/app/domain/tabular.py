@@ -26,7 +26,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -345,6 +345,14 @@ def decode_csv(data: bytes) -> list[list[str]]:
     UTF-8 として読めない・引用符が閉じていないときは ``TabularFileError``（行は誤りのあった行）。
     先頭の ``'`` の次の文字が ``=``・``+``・``-``・``@``・タブ・復帰・``'`` のセルは ``'`` を 1 つ外す（``encode_csv`` の逆。CR-019）。
     """
+    return list(iter_csv(data))
+
+
+def iter_csv(data: bytes) -> Iterator[list[str]]:
+    """``decode_csv`` と同じ表を 1 行ずつ返す（呼び手が行の数の上限で読むのを止められる。6.3・CR-019）。
+
+    UTF-8 として読めなければ最初の行を返す前に、引用符が閉じていなければその行に来たときに ``TabularFileError``。
+    """
     try:
         text = data.decode(CSV_ENCODING)
     except UnicodeDecodeError as exc:
@@ -353,16 +361,16 @@ def decode_csv(data: bytes) -> list[list[str]]:
             [ImportIssue(row, None, ImportIssueCode.FILE_UNREADABLE, f"{row} 行目が UTF-8 として読めない（CSV は UTF-8 で保存する）")]
         ) from exc
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=CSV_DELIMITER, strict=True)
-    grid: list[list[str]] = []
+    count = 0
     try:
         for record in reader:
-            grid.append([_unescape_formula(cell) for cell in record])
+            count += 1
+            yield [_unescape_formula(cell) for cell in record]
     except csv.Error as exc:
-        row = len(grid) + 1
+        row = count + 1
         raise TabularFileError(
             [ImportIssue(row, None, ImportIssueCode.FILE_UNREADABLE, f"{row} 行目を CSV として読めない: {exc}")]
         ) from exc
-    return grid
 
 
 def _target(target: TabularTarget | str) -> TabularTarget:

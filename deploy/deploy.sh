@@ -77,12 +77,17 @@ tf() {
   "$TERRAFORM" -chdir="$TF_DIR" "$@"
 }
 
-# 出力の値（状態が無い・出力が無ければ空）。
-# 出力が 1 つも無い状態では、terraform は警告の文を標準出力へ出して終了の状態 0 を返すため、
-# 失敗・複数の行・警告の文は値として使わない（出力はどれも 1 行の値）
+# 出力の値（出力が 1 つも無い初回の状態なら空）。
+# 出力が 1 つも無い状態では、terraform は警告の文を標準出力へ出して終了の状態 0 を返すため、複数の行・警告の文は値として使わない
+# （出力はどれも 1 行の値）。terraform が失敗したら（状態を読めないなど）止める：空のイメージで apply すると、
+# サービスとジョブを消す計画になるため（count = 0）
 tf_output() {
-  local value
-  value="$(tf output -no-color -raw "$1" 2>/dev/null)" || return 0
+  local value rc=0
+  value="$(tf output -no-color -raw "$1" 2>"$WORK_DIR/tf-output.err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "$WORK_DIR/tf-output.err" >&2
+    die "terraform output $1 が失敗した（終了の状態 $rc）"
+  fi
   case "$value" in
     *$'\n'* | *Warning:*) return 0 ;;
   esac
@@ -107,10 +112,12 @@ tf_init() {
   tf init -input=false -backend-config="bucket=$STATE_BUCKET"
 }
 
-# 今のイメージ（DEPLOY_IMAGE・DEPLOY_TEST_IMAGE があればそれ）
+# 今のイメージ（DEPLOY_IMAGE・DEPLOY_TEST_IMAGE があればそれ）。tf_output が止めたら、ここで止める
 current_images() {
-  IMAGE="${DEPLOY_IMAGE:-$(tf_output app_image)}"
-  TEST_IMAGE="${DEPLOY_TEST_IMAGE:-$(tf_output test_image)}"
+  IMAGE="${DEPLOY_IMAGE:-}"
+  [ -n "$IMAGE" ] || IMAGE="$(tf_output app_image)"
+  TEST_IMAGE="${DEPLOY_TEST_IMAGE:-}"
+  [ -n "$TEST_IMAGE" ] || TEST_IMAGE="$(tf_output test_image)"
   echo "サーバのイメージ：${IMAGE:-（なし）}"
   echo "試験のイメージ：${TEST_IMAGE:-（なし）}"
 }
@@ -190,6 +197,7 @@ cmd_url() {
 }
 
 cmd_deploy() {
+  local migrate_job
   decide_tag
   tf_init
 
@@ -205,7 +213,8 @@ cmd_deploy() {
     -target=google_cloud_run_v2_job.migrate -target=google_cloud_run_v2_job.pgverify
 
   step "5. DB の移行（alembic upgrade head）を流して待つ"
-  run_job "$(tf_output migrate_job)"
+  migrate_job="$(tf_output migrate_job)"
+  run_job "$migrate_job"
 
   step "6. 新しいイメージでサービスを入れ替える"
   tf_apply "$NEW_IMAGE" "$NEW_TEST_IMAGE"

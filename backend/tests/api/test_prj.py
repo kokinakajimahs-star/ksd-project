@@ -594,6 +594,30 @@ def test_start_date_after_remaining_requested_start_is_422(client: TestClient, d
     assert client.patch(url, json={"start_date": "2026-11-20"}, headers=world.pm_h).status_code == 200
 
 
+def test_start_date_is_judged_after_locking_project(
+    client: TestClient, db_session: Session, world: World, race: RaceProbe
+) -> None:
+    """API-PRJ-004（CR-018・A-49 の 3）：活動の書き込みと同時の開始日の変更。プロジェクトの行をロックしてから活動を読むので、
+    ロックの直前に別の操作が 12-03 の希望開始日の活動をコミットしていれば、開始日を 12-04 にする変更は 422 で何も書かない。"""
+    url = f"/api/v1/projects/{world.pid}"
+    wp = WbsElement(project_id=world.pid, kind="WORK_PACKAGE", name="WP", wbs_code="1.0", sibling_seq=1, sort_order=1)
+    db_session.add(wp)
+    db_session.commit()
+    wp_id = wp.id
+
+    def add_early_activity(other: Session) -> None:
+        other.add(Activity(project_id=world.pid, work_package_id=wp_id, name="同時に足した", sort_order=1, duration_days=1,
+                           requested_start=date(2026, 12, 3)))
+
+    race.before_lock("projects", add_early_activity)
+    race.locked.clear()
+    refused = client.patch(url, json={"start_date": "2026-12-04"}, headers=world.pm_h)
+    assert refused.status_code == 422, refused.text
+    assert error_code(refused) == "BEFORE_PROJECT_START"
+    assert race.locked[:1] == ["projects"]
+    assert client.get(url, headers=world.pm_h).json()["start_date"] == "2026-12-01"
+
+
 def test_failed_recalculation_rolls_back_start_date(app: FastAPI, client: TestClient, world: World) -> None:
     app.state.schedule_recalculator = Recorder(fail=True)
     with pytest.raises(RuntimeError):

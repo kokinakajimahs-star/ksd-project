@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -23,6 +23,7 @@ from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, User
 from app.models.eff import Assignment
+from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency, ScheduleBaselineItem
 from app.services.clock import get_now
 from app.services.project_access import ProjectMembersTable
@@ -34,6 +35,9 @@ from app.services.schedule import (
     ScheduleLinks,
     no_progress,
 )
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -378,6 +382,36 @@ def test_bulk_update_applies_all_or_nothing(world: World, client: TestClient) ->
                         headers=world.h["planner"]).status_code == 400
     assert client.patch(world.url("/activities"), json={"changes": [{"activity_id": a, "name": "x"}]},
                         headers=world.h["viewer"]).status_code == 403
+
+
+@pytest.mark.parametrize("case", ["add", "update", "bulk"])
+def test_requested_start_is_judged_after_locking_project(
+    world: World, client: TestClient, race: RaceProbe, case: str
+) -> None:
+    """API-SCH-002・003・004（CR-018・A-49 の 3）：開始日の変更（API-PRJ-004）と同時の書き込み。プロジェクトの行をロックしてから
+    開始日を読むので、ロックの直前に別の操作が開始日を 12-03 にしてコミットしていれば、12-02 の希望開始日は 422 で何も書かない。"""
+    a = world.add("A", duration_days=1, requested_start="2026-12-01")["id"]
+    method, path, body = {
+        "add": ("POST", "/activities",
+                {"work_package_id": world.wp, "name": "B", "duration_days": 1, "requested_start": "2026-12-02"}),
+        "update": ("PATCH", f"/activities/{a}", {"requested_start": "2026-12-02"}),
+        "bulk": ("PATCH", "/activities", {"changes": [{"activity_id": a, "requested_start": "2026-12-02"}]}),
+    }[case]
+
+    def move_project_start(other: Session) -> None:
+        project = other.get(Project, world.pid)
+        assert project is not None
+        project.start_date = date(2026, 12, 3)
+
+    race.before_lock("projects", move_project_start)
+    race.locked.clear()
+    response = client.request(method, world.url(path), json=body, headers=world.h["planner"])
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "BEFORE_PROJECT_START"
+    assert race.locked[:1] == ["projects"]
+    activities = world.activities()
+    assert list(activities) == [a]
+    assert activities[a]["requested_start"] == "2026-12-01"
 
 
 def test_requested_start_before_project_start_is_422_and_writes_nothing(

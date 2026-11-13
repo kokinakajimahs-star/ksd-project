@@ -175,6 +175,15 @@ def test_api_paths_keep_json_not_found(build_app: BuildApp, dist: Path, path: st
     assert response.json() == NOT_FOUND
 
 
+@pytest.mark.parametrize("path", ["//api/v1/no-such-resource", "///api", "//docs"])
+def test_api_paths_with_leading_empty_segments_keep_json_not_found(build_app: BuildApp, dist: Path, path: str) -> None:
+    """先頭の空のセグメント（``//api/…``）を飛ばして判定する：正規化しないクライアントにも画面でなく 2.4 の 404 を返す。"""
+    with TestClient(build_app(static_dir=dist)) as client:
+        response = client.get(f"http://testserver{path}", headers={"Accept": "text/html"})
+    assert response.status_code == 404
+    assert response.json() == NOT_FOUND
+
+
 def test_api_still_works_when_serving_screens(build_app: BuildApp, dist: Path) -> None:
     with TestClient(build_app(static_dir=dist)) as client:
         response = client.get("/api/v1/health")
