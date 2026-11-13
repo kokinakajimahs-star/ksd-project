@@ -10,8 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.domain.effort import EffortValues, OrganizationKey, PeriodKey
-from app.models.prg import StatusReport
-from app.models.sch import ScheduleBaseline
 from app.schemas.effort import (
     ActivityAssignmentsOut,
     AssignmentList,
@@ -37,7 +35,16 @@ from app.services import effort as effort_service
 from app.services import get_session
 from app.services.auth import User
 from app.services.clock import get_now
-from app.services.effort import AssignmentRow, EffortLinks, NoteView, SummaryView, TimeEntryCell, TimeEntryRow
+from app.services.effort import (
+    AssignmentRow,
+    EffortLinks,
+    NoteView,
+    ScheduleBaseline,
+    StatusReport,
+    SummaryView,
+    TimeEntryCell,
+    TimeEntryRow,
+)
 from app.services.project_access import ProjectAccess
 
 router = APIRouter(tags=["effort"])
@@ -145,7 +152,9 @@ def put_time_entries(
 ) -> TimeEntriesWrittenOut:
     """API-EFF-003 自分の実績工数をまとめて書く（日×活動）。
 
-    権限は effort.enter_own（自分の割当の活動）。マスごとにその日・その活動の値で置き換える（0 は行を消す）。RULE-EFF-005 で全ての
+    権限は effort.enter_own（自分の割当の活動）。委託先に見えない活動（9.2 の注記）と、読めないプロジェクト（メンバーでなく、
+    システム管理者でもない）の活動は、無い活動と同じ 404（6.1・CR-019）。
+    マスごとにその日・その活動の値で置き換える（0 は行を消す）。RULE-EFF-005 で全ての
     マスを検査し、1 件でも問題があれば何も書かない：値の誤り・重複 400、自分の割当でない 403、確定した報告日以前の日 409
     ``INVALID_STATE``、1 日の合計 24 時間超 422 ``DAY_TOTAL_EXCEEDED``（EFF-02）。
     """

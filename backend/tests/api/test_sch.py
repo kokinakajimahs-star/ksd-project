@@ -263,6 +263,30 @@ def test_contractor_sees_only_assigned_activities(app: FastAPI, world: World) ->
     assert [r["activity_id"] for r in gantt["rows"]] == [b] and gantt["links"] == [] and gantt["restricted"] is True
 
 
+def test_contractor_dependency_ids_and_baseline_counts_use_only_visible_activities(
+    app: FastAPI, world: World, client: TestClient
+) -> None:
+    """9.2 の注記（CR-011）：委託先には先行・後続の相手を読める活動だけ返し（API-SCH-001）、
+    スケジュールベースラインの項目の数も読める活動とその WP の分だけで数える（API-SCH-012）。全て読める利用者は変わらない。"""
+    a, b, m, c = chain(world)
+    full = world.activities()
+    assert (full[b]["predecessor_ids"], full[b]["successor_ids"]) == ([a], [m])
+    saved = client.post(world.url("/schedule-baselines"), json={"name": "当初"}, headers=world.h["pm"])
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["item_count"] == 6  # 活動 A・B・M・C と WP1・WP2
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b, m}}))
+    seen = world.activities("contractor")
+    assert sorted(seen) == sorted([b, m])
+    assert (seen[b]["predecessor_ids"], seen[b]["successor_ids"]) == ([], [m])
+    assert (seen[m]["predecessor_ids"], seen[m]["successor_ids"]) == ([b], [])
+    listed = client.get(world.url("/schedule-baselines"), headers=world.h["contractor"]).json()
+    assert [x["item_count"] for x in listed["items"]] == [3]  # 活動 B・M と、その WP1
+    assert [x["item_count"] for x in client.get(world.url("/schedule-baselines"),
+                                               headers=world.h["viewer"]).json()["items"]] == [6]
+    assert world.activities()[b]["predecessor_ids"] == [a]
+
+
 # ---------------------------------------------------------------------------
 # API-SCH-003 活動を変える
 # ---------------------------------------------------------------------------
@@ -354,6 +378,60 @@ def test_bulk_update_applies_all_or_nothing(world: World, client: TestClient) ->
                         headers=world.h["planner"]).status_code == 400
     assert client.patch(world.url("/activities"), json={"changes": [{"activity_id": a, "name": "x"}]},
                         headers=world.h["viewer"]).status_code == 403
+
+
+def test_requested_start_before_project_start_is_422_and_writes_nothing(
+    world: World, client: TestClient, db_session: Session
+) -> None:
+    """API-SCH-002・003・004：書いた後の希望開始日がプロジェクトの開始日（2026-12-01）より前なら 422 ``BEFORE_PROJECT_START``
+    で何も書かない（5.5・CR-018）。開始日ちょうどは通す。終了日から求めた開始日も同じに判定する。
+    今の値のまま（この版より前に保存された、開始日より前の希望開始日）なら、他の項目を変えても拒まない（5.5 の負の位置）。
+    """
+    def refused(response: Any) -> list[dict[str, Any]]:
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "BEFORE_PROJECT_START"
+        details: list[dict[str, Any]] = response.json()["error"]["details"]
+        return details
+
+    add = {"work_package_id": world.wp, "name": "早い", "duration_days": 1}
+    details = refused(client.post(world.url("/activities"), json={**add, "requested_start": "2026-11-30"},
+                                  headers=world.h["planner"]))
+    assert details == [{"loc": ["body", "requested_start"], "requested_start": "2026-11-30", "project_start": "2026-12-01",
+                        "message": "希望開始日 2026-11-30 がプロジェクトの開始日 2026-12-01 より前です"}]
+    # 終了日 12-02 と期間 3 から求めた開始日は 11-30（月）
+    refused(client.post(world.url("/activities"), json={**add, "duration_days": 3, "requested_finish": "2026-12-02"},
+                        headers=world.h["planner"]))
+    assert world.activities() == {}
+    a = world.add("A", duration_days=1, requested_start="2026-12-01")["id"]  # 開始日ちょうどは通す
+
+    url = world.url(f"/activities/{a}")
+    assert refused(client.patch(url, json={"requested_start": "2026-11-27"},
+                                headers=world.h["planner"]))[0]["loc"] == ["body", "requested_start"]
+    by_finish = refused(client.patch(url, json={"requested_finish": "2026-11-30"}, headers=world.h["planner"]))
+    assert (by_finish[0]["loc"], by_finish[0]["requested_start"]) == (["body", "requested_finish"], "2026-11-30")
+    assert world.activities()[a]["requested_start"] == "2026-12-01"
+
+    b = world.add("B", duration_days=2)["id"]
+    details = refused(client.patch(world.url("/activities"), json={"changes": [
+        {"activity_id": a, "name": "保存されない"},
+        {"activity_id": b, "requested_start": "2026-11-30"},
+    ]}, headers=world.h["planner"]))
+    assert [(d["index"], d["activity_id"], d["field"], d["requested_start"]) for d in details] == [
+        (1, b, "requested_start", "2026-11-30")]
+    rows = world.activities()
+    assert (rows[a]["name"], rows[b]["requested_start"]) == ("A", None)
+
+    # この版より前に保存された開始日より前の希望開始日（11-27）は、変えなければ他の項目を変えられる
+    db_session.execute(update(Activity).where(Activity.id == a).values(requested_start=date(2026, 11, 27)))
+    db_session.commit()
+    kept = client.patch(url, json={"name": "A 改", "duration_days": 2}, headers=world.h["planner"])
+    assert kept.status_code == 200, kept.text
+    assert (kept.json()["requested_start"], kept.json()["duration_days"]) == ("2026-11-27", 2)
+    bulk = client.patch(world.url("/activities"), json={"changes": [
+        {"activity_id": a, "name": "A 改 2", "requested_start": "2026-11-27"}]}, headers=world.h["planner"])
+    assert bulk.status_code == 200, bulk.text
+    refused(client.patch(url, json={"requested_start": "2026-11-30"}, headers=world.h["planner"]))  # 別の早い値へは変えられない
+    assert world.activities()[a]["requested_start"] == "2026-11-27"
 
 
 def test_bulk_update_assignees(app: FastAPI, world: World, client: TestClient) -> None:

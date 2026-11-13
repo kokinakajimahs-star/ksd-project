@@ -2,7 +2,7 @@
 // 変えられるのは project.manage を持つ人だけ（9.1）。持たなければ値を見せるだけで、保存の部品を出さない（7.2）
 import { useEffect, useState, type FormEvent } from "react";
 
-import type { User } from "../../../api/cmn";
+import type { UserListItem } from "../../../api/cmn";
 import { toErrorView, type ErrorView } from "../../../api/errors";
 import {
   updateProject,
@@ -129,7 +129,7 @@ export default function BasicInfoSection({
   onSaved: (project: Project) => void;
 }) {
   const [form, setForm] = useState<ProjectForm>(() => formOf(project));
-  const [ownerCandidates, setOwnerCandidates] = useState<User[] | null>(null);
+  const [ownerCandidates, setOwnerCandidates] = useState<UserListItem[] | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

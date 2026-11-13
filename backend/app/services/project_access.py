@@ -43,6 +43,10 @@ class ProjectAccess(Protocol):
         """その利用者がメンバーである全てのプロジェクトの立場（プロジェクトの ID → 立場）。"""
         ...
 
+    def project_ids(self, session: Session) -> list[int]:
+        """全てのプロジェクトの ID（昇順。システム管理者の API-CMN-008 に使う。9.2 の注記）。"""
+        ...
+
 
 class ProjectTablesAbsent:
     """プロジェクトの表（``projects``・``project_members``）がまだ無い間の ``ProjectAccess``。プロジェクトは 1 つも無い。"""
@@ -55,6 +59,9 @@ class ProjectTablesAbsent:
 
     def memberships(self, session: Session, user_id: int) -> dict[int, Membership]:
         return {}
+
+    def project_ids(self, session: Session) -> list[int]:
+        return []
 
 
 class AssignedActivities(Protocol):
@@ -122,6 +129,9 @@ class ProjectMembersTable:
             select(ProjectMember).where(ProjectMember.user_id == user_id).order_by(ProjectMember.project_id)
         ).all()
         return {member.project_id: self._membership_of(session, member) for member in members}
+
+    def project_ids(self, session: Session) -> list[int]:
+        return list(session.scalars(select(Project.id).order_by(Project.id)))
 
     def _membership_of(self, session: Session, member: ProjectMember) -> Membership:
         return Membership(

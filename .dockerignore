@@ -1,0 +1,17 @@
+# コンテナのビルドに送るもの（Dockerfile。CR-020）。既定で全てを除き、要るものだけを戻す
+# （根の .git・.venv・.env*・docs・deploy などは最初の * で除かれる）
+*
+!backend/
+!frontend/
+
+# 戻した中からも除く：開発環境・依存の実体・生成物・DB のファイル・秘密の値
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/*.db
+**/*.db-journal
+**/.env*
+**/.git
+frontend/dist

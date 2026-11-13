@@ -1,4 +1,4 @@
-"""API の共通の依存（設計書 6.1）：Bearer の認証・「今」・プロジェクトを読む口・別の群の表に書く口・設定。
+"""API の共通の依存（設計書 6.1）：Bearer の認証・「今」と業務の「今日」・プロジェクトを読む口・別の群の表に書く口・設定。
 
 認証（``get_current_user``）が通らなければ 401（``WWW-Authenticate: Bearer`` を付ける）。
 権限の判定は各ルートが呼ぶサービスが行う（RULE-AUTH-001）。
@@ -6,15 +6,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, tzinfo
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.services import get_session
-from app.services.auth import User, authenticate, bind_actor
-from app.services.clock import get_now
+from app.services.auth import LoginLockPolicy, User, authenticate, bind_actor
+from app.services.clock import business_date, get_now
 from app.services.project_access import ProjectAccess
 from app.services.projects import NumberingRulesStore, ScheduleRecalculator
 
@@ -46,6 +46,17 @@ def get_current_user(
     return user
 
 
+def get_business_zone(request: Request) -> tzinfo:
+    """業務の時間帯（設定の ``PMT_BUSINESS_TIMEZONE``。既定 ``Asia/Tokyo``。設計書 1.3・CR-019）。"""
+    zone: tzinfo = request.app.state.settings.business_zone
+    return zone
+
+
+def get_today(now: datetime = Depends(get_now), zone: tzinfo = Depends(get_business_zone)) -> date:
+    """業務の「今日」：``get_now``（UTC）の時刻の、業務の時間帯での暦の日付（設計書 1.3・CR-019）。"""
+    return business_date(now, zone)
+
+
 def get_project_access(request: Request) -> ProjectAccess:
     """アプリに載せたプロジェクトを読む口（``app.services.project_access``）。"""
     access: ProjectAccess = request.app.state.project_access
@@ -67,3 +78,31 @@ def get_schedule_recalculator(request: Request) -> ScheduleRecalculator:
 def get_token_ttl_hours(request: Request) -> int:
     """認証トークンの有効期間（時間。設定の ``PMT_TOKEN_TTL_HOURS``）。"""
     return int(request.app.state.settings.token_ttl_hours)
+
+
+def get_login_lock_policy(request: Request) -> LoginLockPolicy:
+    """ログインの試行の制限（設定の ``PMT_LOGIN_MAX_FAILURES``・``PMT_LOGIN_LOCK_MINUTES``。NFR-04）。"""
+    settings = request.app.state.settings
+    return LoginLockPolicy(
+        max_failures=int(settings.login_max_failures), lock_minutes=int(settings.login_lock_minutes)
+    )
+
+
+def get_import_max_bytes(request: Request) -> int:
+    """取込のファイルの大きさの上限（バイト。設定の ``PMT_IMPORT_MAX_BYTES``。6.3・CR-019）。"""
+    return int(request.app.state.settings.import_max_bytes)
+
+
+def get_import_max_rows(request: Request) -> int:
+    """取込のファイルの行の上限（見出しを除く。設定の ``PMT_IMPORT_MAX_ROWS``。6.3・CR-019）。"""
+    return int(request.app.state.settings.import_max_rows)
+
+
+def get_password_min_length(request: Request) -> int:
+    """パスワードの最小の長さ（設定の ``PMT_PASSWORD_MIN_LENGTH``。NFR-04）。"""
+    return int(request.app.state.settings.password_min_length)
+
+
+def get_share_link_max_days(request: Request) -> int:
+    """共有リンクの有効期限の上限（今からの日数。設定の ``PMT_SHARE_LINK_MAX_DAYS``。API-RPT-002・CR-019）。"""
+    return int(request.app.state.settings.share_link_max_days)

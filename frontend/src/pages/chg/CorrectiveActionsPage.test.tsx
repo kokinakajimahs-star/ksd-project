@@ -8,7 +8,14 @@ import type { Me } from "../../api/cmn";
 import type { WbsElement } from "../../api/wbs";
 import { makeCorrectiveAction, memberPage } from "../../test/chgFixtures";
 import { makeMe, makeMember, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import { activityList, makeActivity, makeStatusReport } from "../../test/schFixtures";
 import CorrectiveActionsPage from "./CorrectiveActionsPage";
 
@@ -193,6 +200,47 @@ describe("UI-CHG-002 是正措置", () => {
       action: "確認会を増やす",
       owner_user_id: 2,
       due_date: "2026-11-20",
+    });
+  });
+
+  it("紐付けの活動・報告日の選択肢は、1000 件を超えても total まで頁を読み足して全件を出す（OQ-38 (3)・A-49 の 2）", async () => {
+    const activities = Array.from({ length: 1001 }, (_, i) =>
+      makeActivity({ id: 3000 + i, wbs_code: "1.1", name: `活動${i}` }),
+    );
+    const reports = Array.from({ length: 1001 }, (_, i) => makeStatusReport({ id: 5000 + i, report_date: `R${i}` }));
+    const { calls } = mockApi(
+      routes(meWith(MANAGER), {
+        [`GET ${BASE}/activities`]: (call) => pagedResponse(activities, call, { dependencies: [], restricted: false }),
+        [`GET ${BASE}/status-reports`]: (call) => pagedResponse(reports, call),
+        [`POST ${BASE}/corrective-actions`]: () => jsonResponse(201, makeCorrectiveAction({ id: 84 })),
+      }),
+    );
+    renderAt();
+
+    const form = await screen.findByRole("form", { name: "是正措置を登録する" });
+    const activitySelect = within(form).getByLabelText("活動");
+    await waitFor(() => expect(activitySelect.querySelectorAll("option")).toHaveLength(1002));
+    expect(within(form).getByLabelText("報告日").querySelectorAll("option")).toHaveLength(1002);
+    expect(sent(calls, "GET", `${BASE}/activities`).map((c) => c.url)).toEqual([
+      `${BASE}/activities?limit=1000&offset=0`,
+      `${BASE}/activities?limit=1000&offset=1000`,
+    ]);
+    expect(sent(calls, "GET", `${BASE}/status-reports`).map((c) => c.url)).toEqual([
+      `${BASE}/status-reports?limit=1000&offset=0`,
+      `${BASE}/status-reports?limit=1000&offset=1000`,
+    ]);
+
+    // 1001 件目（2 頁目）の活動・報告日に紐付けて登録できる
+    fireEvent.change(activitySelect, { target: { value: "4000" } });
+    fireEvent.change(within(form).getByLabelText("報告日"), { target: { value: "6000" } });
+    fireEvent.change(within(form).getByLabelText("原因"), { target: { value: "遅れ" } });
+    fireEvent.change(within(form).getByLabelText("対策"), { target: { value: "人を足す" } });
+    fireEvent.click(within(form).getByRole("button", { name: "登録する" }));
+
+    await screen.findByRole("status");
+    expect(sent(calls, "POST", `${BASE}/corrective-actions`)[0]!.body).toMatchObject({
+      activity_id: 4000,
+      status_report_id: 6000,
     });
   });
 

@@ -1,6 +1,7 @@
 """共通（CMN）の群のテーブル（設計書 4.1・4.2・9 章）：ユーザー・ロールの権限・共有リンク・認証セッション。
 
-- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）
+- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）。
+  内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
 - トークン（共有リンク・認証セッション）は SHA-256 のハッシュ（16 進 64 文字）だけを保存する（4.2・NFR-04）
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, false, true
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, false, text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infra.db import Base
@@ -27,9 +28,15 @@ TOKEN_HASH_LENGTH = 64
 
 # DB-CMN-001
 class User(Base):
-    """ユーザー。ログイン名は一意。無効にした利用者は ``is_active`` を偽にする（行は消さない）。"""
+    """ユーザー。ログイン名は一意。無効にした利用者は ``is_active`` を偽にする（行は消さない）。
+
+    - ``can_create_project``：システム管理者が許したプロジェクトの作成（9.1 の project.create。設計書 1.2・CR-010）
+    - ``failed_login_count``・``locked_until``：続けて誤ったログインの回数と、ロックの終わり（NFR-04。``locked_until`` が
+      今より後ならロック中。ロックした時に数えは 0 に戻す）
+    """
 
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("failed_login_count >= 0", name="failed_login_count"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     login_id: Mapped[str] = mapped_column(String(100), unique=True)
@@ -38,8 +45,11 @@ class User(Base):
     # hashlib.scrypt のハッシュ（塩と係数を含む文字列。形式は app.infra.security が決める）
     password_hash: Mapped[str] = mapped_column(String(255))
     is_system_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    can_create_project: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     organization: Mapped[str | None] = mapped_column(String(200))
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    locked_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 # DB-CMN-002
@@ -51,7 +61,7 @@ class RolePermission(Base):
     """
 
     __tablename__ = "role_permissions"
-    __table_args__ = (UniqueConstraint("project_id", "role", "permission"),)
+    __table_args__ = (UniqueConstraint("project_id", "role", "permission"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -66,6 +76,7 @@ class ShareLink(Base):
     __tablename__ = "share_links"
     __table_args__ = (
         CheckConstraint("scope IN (" + ", ".join(f"'{scope}'" for scope in SHARE_LINK_SCOPES) + ")", name="scope"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -83,6 +94,7 @@ class AuthSession(Base):
     """ログインで発行した認証トークンの記録（有効期間は設定の ``token_ttl_hours``）。ログアウトで ``revoked_at`` が入る。"""
 
     __tablename__ = "auth_sessions"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)

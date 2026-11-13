@@ -93,6 +93,7 @@ def create_project(
     """API-PRJ-001 プロジェクトを作成する（カレンダー・採番規則・既定の権限も作る）。
 
     権限は project.create。稼働カレンダーは既定（土日休み・8 時間）、ロール×権限の表は 9.2 の既定を写す。
+    システム管理者でない人が作ると、作った人をメンバー（ロール PM）にする（CR-014）。
     コードが既にあれば 409 ``DUPLICATE_PROJECT_CODE``。終了予定日が開始日より前・責任者が無い／無効は 400。
     """
     view = projects_service.create_project(
@@ -153,7 +154,8 @@ def update_project(
     """API-PRJ-004 基本情報・設定を更新する。
 
     権限は project.manage。載せた項目だけを変える（``settings`` は載せた項目だけを重ねる）。開始日を変えたら日程を再計算する。
-    コードの重複は 409 ``DUPLICATE_PROJECT_CODE``。
+    コードの重複は 409 ``DUPLICATE_PROJECT_CODE``。新しい開始日より前の希望開始日の活動が残る開始日の変更は
+    422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     # 載せた項目だけ（入れ子の settings も載せた項目だけになる）
     changes = body.model_dump(exclude_unset=True)
@@ -295,7 +297,8 @@ def upsert_member(
     """API-PRJ-010 メンバーを足す・ロールと所属を変える。
 
     権限は member.manage。ロール・所属・チームは載せた値で置き換える。3 章に無いロールは 400、利用者が無ければ 404、
-    無効な利用者を新しく足すのは 422 ``USER_INACTIVE``。
+    無効な利用者を新しく足すのは 422 ``USER_INACTIVE``。最後の PM から PM のロールを外すのは 409 ``LAST_PM``
+    （システム管理者も同じ。先に別の PM を足す。CR-019）。
     """
     view = projects_service.upsert_member(
         session,
@@ -320,7 +323,8 @@ def remove_member(
 ) -> Response:
     """API-PRJ-011 メンバーを外す。
 
-    権限は member.manage。メンバーでなければ 404。
+    権限は member.manage。メンバーでなければ 404。最後の PM を外すのは 409 ``LAST_PM``（システム管理者も同じ。
+    先に別の PM を足す。CR-019）。
     """
     projects_service.remove_member(session, access, user, project_id, user_id)
     return Response(status_code=204)

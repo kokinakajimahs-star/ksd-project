@@ -6,7 +6,8 @@
   持つプロジェクトの分」、集計・差異を読むは effort.view、差異の理由を書くは variance.note
 - 実績工数の書き込み（API-EFF-003）は日×活動のマスの置き換え。RULE-EFF-005 で全てのマスを検査し、1 件でも問題があれば全体を拒む
   （値の誤り・重複は 400、自分の割当でない活動は 403、確定した報告日以前の日は 409 ``INVALID_STATE``、1 日の合計 24 時間超は
-  422 ``DAY_TOTAL_EXCEEDED``。問題は全て ``details`` に載せる）。0 時間のマスは行を持たない（行を消す）
+  422 ``DAY_TOTAL_EXCEEDED``。問題は全て ``details`` に載せる）。0 時間のマスは行を持たない（行を消す）。
+  読めないプロジェクト（メンバーでなく、システム管理者でもない）の活動は、無い活動と同じ 404（6.1・CR-019）
 - 集計（API-EFF-005）と差異（API-EFF-006）は 5.8 のとおり：実績＝``time_entries`` の合計（報告日を指定したときは報告日以前の分）、
   進捗率・入力した ETC＝対象の報告日（指定しなければ 4.2 の「最新」）の ``progress_entries``、計画＝今の見積、
   基準＝選んだスケジュールベースライン（指定しなければ最新の版）の見積。ETC・EAC は RULE-EFF-001・002、軸は RULE-EFF-003、
@@ -57,9 +58,13 @@ from app.errors import AppError
 from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry, VarianceNote
-from app.models.prg import StatusReport
+from app.models.prg import StatusReport as StatusReport  # API 層は報告日の型をここから取る（1.3：API はモデルを直接 import しない）
 from app.models.prj import Project, ProjectMember
-from app.models.sch import Activity, ScheduleBaseline, ScheduleBaselineItem
+from app.models.sch import (  # API 層はスケジュールベースラインの型をここから取る（1.3：API はモデルを直接 import しない）
+    Activity,
+    ScheduleBaseline as ScheduleBaseline,
+    ScheduleBaselineItem,
+)
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of, project_not_found
 from app.services.progress import entries_of_report, percents_at_report, project_settings, report_percents
@@ -331,7 +336,7 @@ class TimeEntriesWritten:
     day_totals: Mapping[date, Decimal]
 
 
-# RULE-EFF-005 の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
+# 実績工数の入力検査（RULE-EFF-005）の問題の種類 → HTTP の状態（強い順に並べた。1 件でもあれば全体を拒み、最も前の状態で返す）
 _PROBLEM_STATUS: tuple[tuple[frozenset[TimeEntryProblemCode], int, str, str], ...] = (
     (frozenset({TimeEntryProblemCode.INVALID_HOURS, TimeEntryProblemCode.NEGATIVE_HOURS, TimeEntryProblemCode.DUPLICATE}),
      400, "VALIDATION_ERROR", "入力に誤りがあるため、全件を保存しませんでした"),
@@ -374,17 +379,32 @@ def put_time_entries(
     """自分の実績工数をまとめて書く（effort.enter_own。EFF-02）。日×活動のマスを置き換える。プロジェクトをまたいでよい。
 
     確かめる順：活動が無い 404 → 活動のプロジェクトで effort.enter_own を持たない 403 → RULE-EFF-005 の検査（全てのマス）。
+    読めないプロジェクト（メンバーでなく、システム管理者でもない）の活動は無い活動と同じ 404 にする（6.1・CR-019：他のプロジェクトの
+    活動の有無を明かさない。``details`` にプロジェクトの ID を載せない）。委託先だけで読むプロジェクト（view_level が
+    OWN_ASSIGNMENTS）の自分の割当でない活動も見えないので、無い活動と同じ 404 にする（9.2 の注記。RULE-EFF-005 の
+    「自分の割当でない」403 より先）。
     RULE-EFF-005 の「自分の割当の活動だけ」「確定した報告日以前の日は変えない」はマスのプロジェクトごとに（割当と確定した報告日は
     プロジェクトのもの）、「1 日の合計 24 時間以下」はプロジェクトをまたいだ全ての行で見る。メモだけを変えたマスも「変える」とみなす。
     1 件でも問題があれば何も書かない。
     """
     activity_ids = sorted({c.activity_id for c in cells})
     activities = {a.id: a for a in session.scalars(select(Activity).where(Activity.id.in_(activity_ids)))}
-    missing = [a for a in activity_ids if a not in activities]
+    principal = principal_of(actor)
+    hidden: set[int] = set()
+    for project_id in sorted({a.project_id for a in activities.values()}):
+        membership = access.membership(session, project_id, actor.id)
+        if membership is None and not principal.is_system_admin:
+            hidden |= {a.id for a in activities.values() if a.project_id == project_id}
+            continue
+        level = project_view_level(principal, role_permissions=load_role_permission_table(session, project_id),
+                                   membership=membership)
+        if level is ViewLevel.OWN_ASSIGNMENTS:
+            own = membership.assigned_activity_ids if membership is not None else frozenset()
+            hidden |= {a.id for a in activities.values() if a.project_id == project_id and a.id not in own}
+    missing = [a for a in activity_ids if a not in activities or a in hidden]
     if missing:
         raise AppError(404, "NOT_FOUND", "活動が見つかりません", details=[{"activity_ids": missing}])
 
-    principal = principal_of(actor)
     project_ids = sorted({a.project_id for a in activities.values()})
     assigned: set[int] = set()
     finalized: dict[int, list[date]] = {}

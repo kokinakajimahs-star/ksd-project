@@ -10,12 +10,12 @@ import importlib.util
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.estimate import ActivityEstimate
@@ -31,6 +31,7 @@ from app.domain.workflow import ApprovalStatus
 from app.infra.db import Base
 from app.infra.security import generate_token, hash_token
 from app.models.cmn import AuthSession, RolePermission, User
+from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity
 from app.models.wbs import (
@@ -40,6 +41,7 @@ from app.models.wbs import (
     WbsCodeHistory,
     WbsDictionaryEntry,
     WbsElement,
+    WbsNumberingRule,
     WbsReview,
     WbsReviewComment,
     WbsScopeLink,
@@ -53,6 +55,9 @@ from app.services.wbs import (
     CrossGroupReaders,
     eac_not_available,
 )
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -275,6 +280,56 @@ def test_patch_element_rejections(world: World) -> None:
     assert world.client.patch(world.url(f"/elements/{MISSING}"), json={"name": "x"},
                               headers=world.headers["planner"]).status_code == 404
     assert world.client.patch(url, json={"name": "x"}, headers=world.headers["viewer"]).status_code == 403
+
+
+def test_own_estimate_on_add_and_patch_leaves_estimate_records(world: World) -> None:
+    """API-WBS-002・003：自分の見積を置いた・変えたら、API-EST-001 と同じ形の見積の記録を 1 行残す（EST-08・CR-017）。
+
+    単位は人時（入力の値＝人時）、手法・前提・参照資料は空、入力した人と日時を残す。見積を置かない追加・同じ値・見積以外の変更・
+    空（null）にする変更は残さない（記録の ``hours`` は空にできない。4.1）。拒まれた書き込みも残さない。
+    """
+    def history(element_id: int) -> list[dict[str, Any]]:
+        response = world.client.get(f"/api/v1/projects/{world.pid}/estimates/ELEMENT/{element_id}/history",
+                                    headers=world.headers["viewer"])
+        assert response.status_code == 200, response.text
+        items: list[dict[str, Any]] = response.json()["items"]
+        return items
+
+    def patch(element_id: int, body: dict[str, Any], expect: int = 200) -> Any:
+        response = world.client.patch(world.url(f"/elements/{element_id}"), json=body, headers=world.headers["planner"])
+        assert response.status_code == expect, response.text
+        return response.json()
+
+    planner = world.users["planner"].id
+    entered_at = NOW.isoformat().replace("+00:00", "Z")
+    element = world.add("見積あり", own_estimate_hours="12.5")
+    assert [(r["target_type"], r["target_id"], r["hours"], r["input_value"], r["input_unit"], r["method"],
+             r["assumptions"], r["references"], r["entered_by"], r["entered_at"]) for r in history(element["id"])] == [
+        ("ELEMENT", element["id"], 12.5, 12.5, "HOUR", None, None, None, planner, entered_at)]
+    bare = world.add("見積なし")
+    assert history(bare["id"]) == []
+
+    patch(element["id"], {"own_estimate_hours": "12.50"})  # 同じ値
+    patch(element["id"], {"name": "見積あり（改名）"})  # 見積以外
+    assert len(history(element["id"])) == 1
+    assert patch(element["id"], {"own_estimate_hours": "20"})["own_estimate_hours"] == 20.0
+    assert [(r["hours"], r["input_unit"]) for r in history(element["id"])] == [(12.5, "HOUR"), (20.0, "HOUR")]
+    assert patch(element["id"], {"own_estimate_hours": None})["own_estimate_hours"] is None  # 空にする
+    assert len(history(element["id"])) == 2
+    patch(element["id"], {"own_estimate_hours": "8"})  # 空から置き直す
+    assert [r["hours"] for r in history(element["id"])] == [12.5, 20.0, 8.0]
+    patch(bare["id"], {"own_estimate_hours": "3", "name": "見積を後で置く"})
+    assert [(r["hours"], r["entered_by"]) for r in history(bare["id"])] == [(3.0, planner)]
+
+    # 承認待ちの間は 409 で、要素も記録も書かない（RULE-WBS-006）
+    world.set_status("PENDING_APPROVAL")
+    patch(element["id"], {"own_estimate_hours": "30"}, expect=409)
+    refused = world.client.post(world.url("/elements"), json={"kind": "DELIVERABLE", "name": "拒む", "own_estimate_hours": "1"},
+                                headers=world.headers["planner"])
+    assert refused.status_code == 409, refused.text
+    assert [r["hours"] for r in history(element["id"])] == [12.5, 20.0, 8.0]
+    world.session.expire_all()
+    assert world.session.scalar(select(func.count()).select_from(EstimateRecord)) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -805,13 +860,15 @@ def test_scope_baselines_list_and_one_version(world: World, db_session: Session)
 
 
 class FakeActivities:
-    """活動の表（DB-SCH-001）の代わり。活動 → WP の要素。"""
+    """活動の表（DB-SCH-001）の代わり。活動 → WP の要素（``hours`` は活動の見積。省けば空）。"""
 
-    def __init__(self, placement: dict[int, int]) -> None:
+    def __init__(self, placement: dict[int, int], hours: dict[int, Decimal] | None = None) -> None:
         self.placement = placement
+        self.hours = hours or {}
 
     def activities(self, session: Session, project_id: int) -> list[ActivityEstimate]:
-        return [ActivityEstimate(id=a, work_package_id=wp) for a, wp in self.placement.items()]
+        return [ActivityEstimate(id=a, work_package_id=wp, estimate_hours=self.hours.get(a))
+                for a, wp in self.placement.items()]
 
 
 class FakeAssigned:
@@ -905,6 +962,85 @@ def test_responsibility_matrix_json_csv_and_restricted(world: World, app: FastAP
         (pm, True), (planner, True), (contractor, True), (viewer, False)]
     header = world.client.get(url, params={"format": "csv"}, headers=world.headers["pm"]).content.decode("utf-8-sig")
     assert header.split("\r\n")[0].endswith(",contractor,viewer（メンバー外）")
+
+
+def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activities(
+    world: World, app: FastAPI, db_session: Session
+) -> None:
+    """9.2 の注記（CR-011）：委託先に返す集計値・件数は見える要素・活動だけから求める。
+
+    API-WBS-001 の ``rollup_hours``・``project_estimate_hours``・検査の件数、API-WBS-012 の件数と子の集計、
+    API-WBS-011 の割当工数・担当・列、API-WBS-021 の要素の数。見えない活動（103・102・104）にも見積と割当がある。
+    全て読める利用者の値は変わらない。
+    """
+    pm, planner, viewer = world.users["pm"].id, world.users["planner"].id, world.users["viewer"].id
+    contractor, outsider = world.users["contractor"].id, world.users["outsider"].id
+    design = world.add("設計", own_estimate_hours="10")
+    a = world.add("基本設計", design["id"], kind="WORK_PACKAGE", own_estimate_hours="8")
+    b = world.add("詳細設計", design["id"], kind="WORK_PACKAGE", own_estimate_hours="20")
+    c = world.add("管理", kind="WORK_PACKAGE")
+    app.state.wbs_activities = FakeActivities(
+        {101: a["id"], 103: a["id"], 102: b["id"], 104: c["id"]},
+        {101: Decimal("8"), 103: Decimal("4"), 102: Decimal("16"), 104: Decimal("7")},
+    )
+    app.state.wbs_readers = CrossGroupReaders(assignments=lambda _s, _p: [
+        AssignmentRef(activity_id=101, user_id=contractor, planned_hours=Decimal("8")),
+        AssignmentRef(activity_id=103, user_id=planner, planned_hours=Decimal("4")),
+        AssignmentRef(activity_id=102, user_id=outsider, planned_hours=Decimal("5")),
+        AssignmentRef(activity_id=104, user_id=viewer, planned_hours=Decimal("3")),
+    ])
+    app.state.project_access = ProjectMembersTable(assignments=FakeAssigned({contractor: frozenset({101})}))
+
+    # 木（API-WBS-001）：全て読める利用者は全ての活動から、委託先は見える活動（101）だけから
+    full = world.tree("viewer")
+    assert full["restricted"] is False
+    assert [(e["wbs_code"], e["rollup_hours"]) for e in full["elements"]] == [
+        ("1.0", 28.0), ("1.1", 12.0), ("1.2", 16.0), ("2.0", 7.0)]
+    assert full["project_estimate_hours"] == 35.0
+    assert full["validation"] == {"errors": 0, "warnings": 3, "missing_completion": 3}
+    seen = world.tree("contractor")
+    assert seen["restricted"] is True
+    assert [(e["wbs_code"], e["rollup_hours"], e["rollup_source"]) for e in seen["elements"]] == [
+        ("1.0", 8.0, "CHILDREN"), ("1.1", 8.0, "ACTIVITIES")]
+    assert seen["project_estimate_hours"] == 8.0
+    assert seen["validation"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
+
+    # 検査（API-WBS-012）：子の集計も見える活動だけ（1.1 は 8 = 8 で差異なし、1.0 の子の集計は 8）
+    validation = world.client.get(world.url("/validation"), headers=world.headers["contractor"]).json()
+    assert validation["counts"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
+    assert [(f["code"], f["element_id"], f["own_estimate_hours"], f["lower_hours"]) for f in validation["findings"]] == [
+        ("SUM_MISMATCH", design["id"], 10.0, 8.0)]
+    full_validation = world.client.get(world.url("/validation"), headers=world.headers["viewer"]).json()
+    assert [(f["element_id"], f["lower_hours"]) for f in full_validation["findings"]] == [
+        (design["id"], 28.0), (a["id"], 12.0), (b["id"], 16.0)]
+
+    # 責任分担表（API-WBS-011）：割当工数・担当・列も見える活動の割当だけ（見えない活動だけにいるメンバー外の人は列に出ない）
+    url = f"/api/v1/projects/{world.pid}/wbs/responsibility-matrix"
+    matrix = world.client.get(url, headers=world.headers["viewer"]).json()
+    assert [(r["wbs_code"], r["planned_hours"]) for r in matrix["rows"]] == [("1.1", 12.0), ("1.2", 5.0), ("2.0", 3.0)]
+    assert [(u["user_id"], u["is_member"]) for u in matrix["users"]][-1] == (outsider, False)
+    restricted = world.client.get(url, headers=world.headers["contractor"]).json()
+    assert [(r["wbs_code"], r["planned_hours"]) for r in restricted["rows"]] == [("1.1", 8.0)]
+    assert [u["user_id"] for u in restricted["users"]] == [pm, planner, viewer, contractor]
+    cells = {cell["user_id"]: (cell["is_assigned"], cell["planned_hours"]) for cell in restricted["rows"][0]["cells"]}
+    assert cells[contractor] == (True, 8.0) and cells[planner] == (False, 0.0)
+
+    # 版の一覧（API-WBS-021）：要素の数は今見える要素の写しだけ（API-WBS-022 と同じ範囲）
+    baseline = ScopeBaseline(project_id=world.pid, version=1, reason="INITIAL_APPROVAL", created_by=world.admin.id,
+                             created_at=NOW)
+    db_session.add(baseline)
+    db_session.flush()
+    for element in (design, a, b, c):
+        db_session.add(ScopeBaselineElement(scope_baseline_id=baseline.id, element_id=element["id"],
+                                            wbs_code=element["wbs_code"], kind=element["kind"], name=element["name"],
+                                            dictionary={}))
+    db_session.commit()
+    baselines = f"/api/v1/projects/{world.pid}/scope-baselines"
+    assert [b["element_count"] for b in world.client.get(baselines, headers=world.headers["viewer"]).json()["items"]] == [4]
+    listed = world.client.get(baselines, headers=world.headers["contractor"]).json()["items"]
+    assert [b["element_count"] for b in listed] == [2]
+    one = world.client.get(f"{baselines}/{baseline.id}", headers=world.headers["contractor"]).json()
+    assert len(one["elements"]) == listed[0]["element_count"]
 
 
 # ---------------------------------------------------------------------------
@@ -1205,3 +1341,187 @@ def test_change_request_approvals_apply_transition_once_change_api_exists(app: F
         ), "API-CHG-005 ができたので、app.main.create_app の app.state.change_request_approvals を RULE-CHG-003 を通す実装へ差し替える"
     else:
         assert isinstance(app.state.change_request_approvals, ChangeRequestTransitionNotWired)
+
+
+# ---------------------------------------------------------------------------
+# 同時実行と採番規則の行（A-49 の 3。OQ-42 (3)・(24)）
+# SQLite は FOR UPDATE を無視するので、ロックの直前に別のセッションで状態を変えてコミットし（先に終わった同時の操作）、
+# 判定がロックの後に読み直した値で行われること・一意制約の違反が 409 CONFLICT になることを見る（conftest の race）
+# ---------------------------------------------------------------------------
+
+
+def _row_counts(session: Session) -> dict[str, int]:
+    session.expire_all()
+    return {table.name: int(session.scalar(select(func.count()).select_from(table)) or 0)
+            for table in Base.metadata.sorted_tables}
+
+
+def _project_without_numbering_rule(world: World, db_session: Session) -> tuple[Project, WbsElement]:
+    """採番規則の行が無いプロジェクト（API-PRJ-001 を通らずに作られた）。第 1 階層に順番 1 と 3 の要素がある（2 は消した）。"""
+    raw = Project(code="RAW", name="行だけ", start_date=NOW.date(), owner_user_id=world.admin.id)
+    db_session.add(raw)
+    db_session.flush()
+    first = WbsElement(project_id=raw.id, kind="DELIVERABLE", name="一", wbs_code="1.0", sibling_seq=1, sort_order=1)
+    db_session.add_all([first, WbsElement(project_id=raw.id, kind="DELIVERABLE", name="三", wbs_code="3.0",
+                                          sibling_seq=3, sort_order=2)])
+    db_session.commit()
+    assert db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)) is None
+    return raw, first
+
+
+def test_reads_do_not_create_numbering_rule_row_and_first_write_does(world: World, db_session: Session) -> None:
+    """API-WBS-001・008・009・011・012・015・021・023・026（読むだけ）は採番規則の行が無くても行を作らない（DB のどの表の行も増えない）。
+    4.1 の既定の値と第 1 階層の順番の最大で読み、最初の書く操作（API-WBS-002）がその値で行を作る（A-49 の 3）。"""
+    raw, first = _project_without_numbering_rule(world, db_session)
+    review = WbsReview(project_id=raw.id, requested_by=world.admin.id, requested_at=NOW, reviewer_ids=[])
+    db_session.add(review)
+    db_session.commit()
+    before = _row_counts(db_session)
+
+    base = f"/api/v1/projects/{raw.id}"
+    for path in ("/wbs", "/wbs/code-history", f"/wbs/elements/{first.id}/dictionary", "/wbs/responsibility-matrix",
+                 "/wbs/validation", f"/wbs/reviews/{review.id}", "/scope-baselines", "/wbs-codes/1.0/trace",
+                 f"/wbs/elements/{first.id}/scope-links"):
+        response = world.client.get(base + path, headers=world.admin_h)
+        assert response.status_code == 200, (path, response.text)
+    tree = world.client.get(base + "/wbs", headers=world.admin_h).json()
+    assert tree["numbering_rule"] == {"separator": ".", "min_digits": 1, "prefix": "", "pad_first_level": True}
+    assert _row_counts(db_session) == before
+
+    added = world.client.post(base + "/wbs/elements", json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"},
+                              headers=world.admin_h)
+    assert added.status_code == 201, added.text
+    assert added.json()["wbs_code"] == "4.0"  # 消した 2 も、今ある 1・3 も使わない（top_last_child_seq は 3 から）
+    rule = db_session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id))
+    assert rule is not None
+    assert (rule.separator, rule.min_digits, rule.prefix, rule.pad_first_level, rule.top_last_child_seq) == (
+        ".", 1, "", True, 4)
+
+
+def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_session: Session,
+                                                            race: RaceProbe) -> None:
+    """API-WBS-002：採番規則の行が無いプロジェクトで、同時の操作が先に行を作った（一意制約の違反）。500 でなく 409 CONFLICT で、
+    何も書かない（A-49 の 3）。"""
+    raw, _ = _project_without_numbering_rule(world, db_session)
+    race.before_insert(WbsNumberingRule, lambda other: other.add(WbsNumberingRule(project_id=raw.id)))
+    elements_before = _row_counts(db_session)["wbs_elements"]
+    race.locked.clear()
+
+    response = world.client.post(f"/api/v1/projects/{raw.id}/wbs/elements",
+                                 json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"}, headers=world.admin_h)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "CONFLICT",
+        "message": "同時に行われた別の操作と重なったため保存できませんでした。読み直してからやり直してください",
+        "details": [],
+    }
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    assert _row_counts(db_session)["wbs_elements"] == elements_before
+    rules = db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all()
+    assert [r.top_last_child_seq for r in rules] == [0]  # 先に作った方の行だけが残る
+
+
+def _pending_by_other(world: World, requested_by: str = "pm") -> Any:
+    """先に終わった申請（別のセッション）：WBS を PENDING_APPROVAL にし、承認申請を 1 つ作る。"""
+    def submit(other: Session) -> None:
+        project = other.get(Project, world.pid)
+        assert project is not None
+        project.wbs_status = "PENDING_APPROVAL"
+        other.add(ApprovalRequest(project_id=world.pid, target_type="WBS", target_id=world.pid,
+                                  requested_by=world.users[requested_by].id, requested_at=NOW))
+    return submit
+
+
+def test_submit_judges_wbs_status_after_locking_project(world: World, db_session: Session, race: RaceProbe) -> None:
+    """API-WBS-018：同時の 2 つの申請。プロジェクトの行をロックして読み直した状態で判定するので、先の申請がコミットした後の申請は
+    409 INVALID_STATE になり、承認申請は 1 つだけ（WBS の承認申請の二重化。OQ-42 (3)・A-49 の 3）。"""
+    make_ready_wp(world)
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+
+    response = world.client.post(world.url("/approval-requests"), headers=world.headers["planner"])
+    assert (response.status_code, response.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    assert response.json()["error"]["details"] == [{"wbs_status": "PENDING_APPROVAL"}]
+    assert len(db_session.scalars(select(ApprovalRequest)).all()) == 1
+
+
+def test_edit_and_reviews_judge_wbs_status_after_locking_project(world: World, db_session: Session,
+                                                                 race: RaceProbe) -> None:
+    """API-WBS-003・014・016・024：要素の変更・レビューを始める・指摘を書く・レビューを閉じるは、プロジェクトの行をロックして
+    読み直した WBS・レビューの状態で判定する。先に申請・レビューを閉じる操作がコミットしていれば 409 INVALID_STATE（A-49 の 3）。"""
+    wp = make_ready_wp(world)
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    changed = world.client.patch(world.url(f"/elements/{wp['id']}"), json={"name": "変えた"},
+                                 headers=world.headers["planner"])
+    assert (changed.status_code, changed.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_numbering_rules"]
+    db_session.expire_all()
+    element = db_session.get(WbsElement, wp["id"])
+    assert element is not None and element.name == "WP"
+
+    world.set_status("DRAFT")
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    started = world.client.post(world.url("/reviews"), json={"reviewer_ids": [world.users["pm"].id]},
+                                headers=world.headers["planner"])
+    assert (started.status_code, started.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects"]
+    assert db_session.scalars(select(WbsReview)).all() == []
+
+    world.set_status("DRAFT")
+    review = world.client.post(world.url("/reviews"), json={"reviewer_ids": [world.users["pm"].id]},
+                               headers=world.headers["planner"]).json()
+
+    def close_by_other(other: Session) -> None:
+        row = other.get(WbsReview, review["id"])
+        project = other.get(Project, world.pid)
+        assert row is not None and project is not None
+        row.status, row.closed_at, project.wbs_status = "CLOSED", NOW, "DRAFT"
+
+    race.before_lock("projects", close_by_other)
+    race.locked.clear()
+    comment = world.client.post(world.url(f"/reviews/{review['id']}/comments"),
+                                json={"element_id": wp["id"], "category": "OTHER", "body": "b"}, headers=world.headers["pm"])
+    assert (comment.status_code, comment.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert race.locked == ["projects", "wbs_reviews"]
+    assert db_session.scalars(select(WbsReviewComment)).all() == []
+
+    db_session.expire_all()
+    reopened = db_session.get(WbsReview, review["id"])
+    assert reopened is not None
+    reopened.status, reopened.closed_at = "OPEN", None
+    db_session.commit()
+    world.set_status("IN_REVIEW")
+    race.before_lock("projects", close_by_other)
+    race.locked.clear()
+    closed = world.client.post(world.url(f"/reviews/{review['id']}/close"), headers=world.headers["planner"])
+    assert (closed.status_code, closed.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert closed.json()["error"]["details"] == [{"review_id": review["id"], "status": "CLOSED"}]
+    assert race.locked == ["projects", "wbs_reviews"]
+
+
+def test_decision_judges_after_locking_target_then_request(world: World, db_session: Session, race: RaceProbe) -> None:
+    """API-WBS-019：同時の 2 つの判断。申請の対象（projects）を先に、申請の行を後にロックし、読み直した申請の状態で判定する。
+    先の承認がコミットした後の判断は 409 INVALID_STATE で、版を作らない（同時の承認。OQ-42 (3)・A-49 の 3）。"""
+    add_member(world, "approver", "APPROVER")
+    make_ready_wp(world)
+    approval_id = world.client.post(world.url("/approval-requests"), headers=world.headers["pm"]).json()["id"]
+
+    def approve_by_other(other: Session) -> None:
+        approval = other.get(ApprovalRequest, approval_id)
+        project = other.get(Project, world.pid)
+        assert approval is not None and project is not None
+        approval.status, approval.decided_by, approval.decided_at = "APPROVED", world.admin.id, NOW
+        project.wbs_status = "BASELINED"
+
+    race.before_lock("projects", approve_by_other)
+    race.locked.clear()
+    response = world.client.post(f"/api/v1/approval-requests/{approval_id}/decision", json={"decision": "REJECT"},
+                                 headers=world.headers["approver"])
+    assert (response.status_code, response.json()["error"]["code"]) == (409, "INVALID_STATE")
+    assert response.json()["error"]["details"] == [{"approval_id": approval_id, "status": "APPROVED"}]
+    assert race.locked == ["projects", "wbs_numbering_rules", "approval_requests"]
+    assert db_session.scalars(select(ScopeBaseline)).all() == []
+    assert world.tree()["wbs_status"] == "BASELINED"

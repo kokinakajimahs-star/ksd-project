@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.domain.gantt import AxisPoint, GanttBar, GanttChart
-from app.models.sch import ActivityDependency, ScheduleBaseline
 from app.schemas.schedule import (
     ActivityBulkUpdate,
     ActivityCreate,
@@ -41,7 +40,14 @@ from app.services import schedule as schedule_service
 from app.services.auth import User
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
-from app.services.schedule import ActivityView, BaselineView, ScheduleLinks, ScheduleView
+from app.services.schedule import (
+    ActivityDependency,
+    ActivityView,
+    BaselineView,
+    ScheduleBaseline,
+    ScheduleLinks,
+    ScheduleView,
+)
 
 router = APIRouter(tags=["schedule"])
 
@@ -153,7 +159,8 @@ def list_activities(
     """API-SCH-001 活動の一覧（日程・依存・担当付き）。
 
     権限は project.view（委託先は自分の割当の活動だけ。``restricted`` が真）。行の順は WBS の並び → WP の中の表示順。
-    ``dependencies`` は読める活動どうしの依存（API-SCH-007 で消すときの ID を持つ）。``limit``・``offset``（6.1）。
+    ``dependencies`` は読める活動どうしの依存（API-SCH-007 で消すときの ID を持つ）。``predecessor_ids``・``successor_ids`` も
+    読める活動だけ（9.2 の注記）。``limit``・``offset``（6.1）。
     """
     view = schedule_service.list_activities(session, access, user, links, project_id, limit=limit, offset=offset)
     return ActivityList(items=[_activity_out(v) for v in view.items], total=view.total, limit=limit, offset=offset,
@@ -173,6 +180,7 @@ def create_activity(
 
     権限は schedule.edit。開始日・期間・終了日は 2 つから残りを求める（SCH-03。RULE-CAL-001）。期間 0 はマイルストーン。
     WP 以外の要素の下は 422 ``ACTIVITY_NOT_ON_WORK_PACKAGE``（RULE-WBS-003）。足した後に全ての活動の日程を計算し直す。
+    希望開始日（次の稼働日へ寄せた値）がプロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = schedule_service.add_activity(
         session, access, user, links, project_id,
@@ -195,6 +203,7 @@ def update_activity(
     """API-SCH-003 活動を変える（日程を再計算する）。
 
     権限は schedule.edit。載せた項目だけを変える。終了日だけなら期間を保って開始日を動かす（SCH-03）。
+    希望開始日が今と違う値でプロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = schedule_service.update_activity(
         session, access, user, links, project_id, activity_id, body.model_dump(exclude_unset=True)
@@ -214,6 +223,7 @@ def bulk_update_activities(
     """API-SCH-004 活動をまとめて変える（全件か無しか）。
 
     権限は schedule.edit。RULE-SCH-006 で全件を検査し、1 件でも不正なら何も保存せず 422（``details`` に全ての不正）。
+    希望開始日が今と違う値でプロジェクトの開始日より前になる活動があれば何も保存せず 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     changes = [c.model_dump(exclude_unset=True) | {"activity_id": c.activity_id} for c in body.changes]
     views = schedule_service.bulk_update_activities(session, access, user, links, project_id, changes)
@@ -382,7 +392,7 @@ def list_schedule_baselines(
 ) -> BaselineList:
     """API-SCH-012 スケジュールベースラインの版の一覧。
 
-    権限は project.view。版の順。``limit``・``offset``（6.1）。
+    権限は project.view。版の順。``limit``・``offset``（6.1）。委託先には項目の数を読める活動とその WP の分だけで数える。
     """
     views, total = schedule_service.list_baselines(session, access, user, project_id, limit=limit, offset=offset)
     return BaselineList(items=[_baseline_out(v) for v in views], total=total, limit=limit, offset=offset)

@@ -17,6 +17,7 @@ import {
   type PendingApproval,
 } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import { listScopeItems, type ScopeItem } from "../../api/prj";
 import { getValidation, getWbsTree, requestWbsApproval, type Validation, type WbsTree } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
@@ -168,10 +169,11 @@ export default function WbsReviewPage() {
       return;
     }
     let cancelled = false;
-    listPendingApprovals({ limit: LIST_LIMIT_MAX, offset: 0 }).then(
-      (page) => {
+    // 承認待ちは全てのプロジェクトの申請なので、全件を読んでからこのプロジェクトの WBS の申請に絞る（A-49 の 2）
+    fetchAllPages((page) => listPendingApprovals(page)).then(
+      (items) => {
         if (!cancelled) {
-          setPending(page.items.filter((a) => a.project_id === projectId && a.target_type === "WBS"));
+          setPending(items.filter((a) => a.project_id === projectId && a.target_type === "WBS"));
         }
       },
       (e: unknown) => {

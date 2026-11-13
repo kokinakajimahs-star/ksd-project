@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -35,6 +35,9 @@ from app.services.projects import (
     NumberingRulesTableAbsent,
     SchedulingNotWired,
 )
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -235,7 +238,7 @@ def test_admin_creates_project_with_calendar_permissions_and_defaults(
         select(RolePermission.role, RolePermission.permission).where(RolePermission.project_id == pid)
     ).all()
     assert sorted(rows) == sorted(default_role_permission_rows())
-    # 作った直後はメンバーがいない（4.1 に無いものは作らない）
+    # システム管理者が作るとメンバーは作らない（システム管理者は全ての権限を持つ。9.2・CR-014）
     assert db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == pid)).all() == []
 
     # 詳細・既定のカレンダー・権限の表が API から読める
@@ -274,12 +277,64 @@ def test_create_project_calls_numbering_rules_in_same_transaction(
 
 
 def test_create_project_requires_project_create(client: TestClient, world: World) -> None:
-    # プロジェクトの PM でも、システムの権限 project.create は持たない（9.1。個別の許可の保存先は OQ-09）
+    # プロジェクトの PM でも、システムの権限 project.create は持たない（9.1。個別の許可は users.can_create_project。CR-010）
     body = {"code": "PRJ-300", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.pm.id}
     for headers in (world.pm_h, world.outsider_h):
         response = client.post("/api/v1/projects", json=body, headers=headers)
         assert response.status_code == 403
         assert error_code(response) == "FORBIDDEN"
+
+
+def test_create_project_allowed_by_can_create_project(client: TestClient, world: World) -> None:
+    # 9.1：システム管理者が許したユーザー（API-CMN-005 の can_create_project）はプロジェクトを作れる（RULE-AUTH-001 の
+    # system_permissions）。許しを外すと 403 に戻る
+    body = {"code": "PRJ-301", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.outsider.id}
+    granted = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": True}, headers=world.admin_h)
+    assert granted.status_code == 200, granted.text
+    created = client.post("/api/v1/projects", json=body, headers=world.outsider_h)
+    assert created.status_code == 201, created.text
+
+    revoked = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": False}, headers=world.admin_h)
+    assert revoked.status_code == 200
+    response = client.post("/api/v1/projects", json={**body, "code": "PRJ-302"}, headers=world.outsider_h)
+    assert response.status_code == 403
+    assert error_code(response) == "FORBIDDEN"
+
+
+def test_creator_who_is_not_system_admin_becomes_pm_member(
+    client: TestClient, db_session: Session, world: World
+) -> None:
+    # API-PRJ-001（設計書 6.2・CR-014）：システム管理者でない人が作ると、同じトランザクションで作った人をメンバー（ロール PM・
+    # 所属は空）にする。作った直後から読め（API-PRJ-002・003・009）、API-CMN-008 の projects に載る
+    granted = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": True}, headers=world.admin_h)
+    assert granted.status_code == 200, granted.text
+    body = {"code": "PRJ-303", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.pm.id}
+    created = client.post("/api/v1/projects", json=body, headers=world.outsider_h)
+    assert created.status_code == 201, created.text
+    pid = created.json()["id"]
+
+    db_session.expire_all()
+    members = db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == pid)).all()
+    assert [(m.user_id, m.roles, m.organization, m.team) for m in members] == [(world.outsider.id, ["PM"], None, None)]
+
+    assert client.get(f"/api/v1/projects/{pid}", headers=world.outsider_h).json() == created.json()
+    listed = client.get("/api/v1/projects", headers=world.outsider_h).json()
+    assert [p["id"] for p in listed["items"]] == [pid]
+    member_list = client.get(f"/api/v1/projects/{pid}/members", headers=world.outsider_h).json()
+    assert [(m["user_id"], m["roles"], m["organization"], m["team"]) for m in member_list["items"]] == [
+        (world.outsider.id, ["PM"], None, None)]
+    me = client.get("/api/v1/me", headers=world.outsider_h).json()
+    mine = [p for p in me["projects"] if p["project_id"] == pid]
+    assert len(mine) == 1 and mine[0]["roles"] == ["PM"] and mine[0]["view_level"] == "ALL"
+    assert {"project.manage", "member.manage", "permission.manage"} <= set(mine[0]["permissions"])
+    # PM として基本情報を変えられる（9.2 の既定の表）。責任者（owner）はメンバーにしない
+    assert client.patch(f"/api/v1/projects/{pid}", json={"name": "Y"}, headers=world.outsider_h).status_code == 200
+    assert client.get(f"/api/v1/projects/{pid}", headers=world.pm_h).status_code == 403
+
+    # システム管理者が作ってもメンバーは増えない
+    by_admin = world.create_project(code="PRJ-304")
+    db_session.expire_all()
+    assert db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == by_admin["id"])).all() == []
 
 
 def test_create_project_duplicate_code_is_409(client: TestClient, world: World) -> None:
@@ -438,6 +493,10 @@ def test_update_project_requires_project_manage(client: TestClient, world: World
         {"settings": {"variance_rate": None}},
         {"settings": {"variance_rate": -0.1}},
         {"settings": {"delay_extract_days": -1}},
+        # 許容幅はスナップショットの Numeric(6,2) に写すので、小数 2 桁・9999.99 まで（丸めない。A-49 の 4）
+        {"settings": {"delay_tolerance_days": 0.555}},
+        {"settings": {"delay_extract_days": 10000}},
+        {"settings": {"delay_tolerance_days": 1e-7}},
         {"settings": {"progress_method_default": "EARNED"}},
         {"settings": {"unknown": 1}},
         {"wbs_status": "BASELINED"},  # WBS の状態は 5.10 の遷移で変わる
@@ -454,6 +513,31 @@ def test_update_project_input_errors_are_400(client: TestClient, world: World, p
     assert response.status_code == 400, response.text
     assert error_code(response) == "VALIDATION_ERROR"
     assert client.get(f"/api/v1/projects/{world.pid}", headers=world.pm_h).json() == before
+
+
+@pytest.mark.parametrize(
+    ("values", "error_type"),
+    [
+        ({"delay_tolerance_days": 0.555}, "decimal_max_places"),
+        ({"delay_extract_days": 10000}, "decimal_whole_digits"),
+        ({"delay_extract_days": 12345.5}, "decimal_whole_digits"),
+    ],
+)
+def test_update_project_tolerance_settings_fit_the_snapshot_columns(
+    client: TestClient, world: World, values: dict[str, Any], error_type: str
+) -> None:
+    """A-49 の 4（OQ-42 (8)）：遅れの許容幅・抽出の閾値は、報告日の確定で写す ``progress_snapshots`` の ``Numeric(6,2)`` に収まる値
+    （9999.99 まで・小数 2 桁まで）だけを受ける。超えた値は丸めずに 400。"""
+    response = client.patch(f"/api/v1/projects/{world.pid}", json={"settings": values}, headers=world.pm_h)
+    assert response.status_code == 400, response.text
+    (name,) = values
+    assert [(d["loc"], d["type"]) for d in response.json()["error"]["details"]] == [(["body", "settings", name], error_type)]
+
+    upper = client.patch(f"/api/v1/projects/{world.pid}",
+                         json={"settings": {"delay_tolerance_days": 9999.99, "delay_extract_days": 0.01}}, headers=world.pm_h)
+    assert upper.status_code == 200, upper.text
+    stored = upper.json()["settings"]
+    assert (stored["delay_tolerance_days"], stored["delay_extract_days"]) == (9999.99, 0.01)
 
 
 def test_update_project_finish_before_new_start_is_400(client: TestClient, world: World) -> None:
@@ -481,6 +565,33 @@ def test_changing_start_date_recalculates_schedule(app: FastAPI, client: TestCli
     assert recorder.calls == []
     client.patch(f"/api/v1/projects/{world.pid}", json={"start_date": "2026-12-02"}, headers=world.pm_h)
     assert recorder.calls == [world.pid]
+
+
+def test_start_date_after_remaining_requested_start_is_422(client: TestClient, db_session: Session, world: World) -> None:
+    """API-PRJ-004：新しい開始日より前の希望開始日の活動が残る開始日の変更は 422 ``BEFORE_PROJECT_START`` で、何も書かない
+    （5.5・CR-018）。希望開始日ちょうど・それより前への変更と、希望開始日の無い活動は拒まない。
+    """
+    url = f"/api/v1/projects/{world.pid}"
+    wp = WbsElement(project_id=world.pid, kind="WORK_PACKAGE", name="WP", wbs_code="1.0", sibling_seq=1, sort_order=1)
+    db_session.add(wp)
+    db_session.flush()
+    early = Activity(project_id=world.pid, work_package_id=wp.id, name="12/3 から", sort_order=1, duration_days=1,
+                     requested_start=date(2026, 12, 3))
+    db_session.add_all([early, Activity(project_id=world.pid, work_package_id=wp.id, name="希望なし", sort_order=2,
+                                        duration_days=1)])
+    db_session.commit()
+    name = client.get(url, headers=world.pm_h).json()["name"]
+
+    refused = client.patch(url, json={"start_date": "2026-12-04", "name": "変えない"}, headers=world.pm_h)
+    assert refused.status_code == 422, refused.text
+    assert error_code(refused) == "BEFORE_PROJECT_START"
+    assert refused.json()["error"]["details"] == [
+        {"loc": ["body", "start_date"], "activity_id": early.id, "requested_start": "2026-12-03",
+         "project_start": "2026-12-04", "message": "希望開始日 2026-12-03 がプロジェクトの開始日 2026-12-04 より前です"}]
+    current = client.get(url, headers=world.pm_h).json()
+    assert (current["start_date"], current["name"]) == ("2026-12-01", name)
+    assert client.patch(url, json={"start_date": "2026-12-03"}, headers=world.pm_h).status_code == 200
+    assert client.patch(url, json={"start_date": "2026-11-20"}, headers=world.pm_h).status_code == 200
 
 
 def test_failed_recalculation_rolls_back_start_date(app: FastAPI, client: TestClient, world: World) -> None:
@@ -859,6 +970,74 @@ def test_upsert_member_unknown_user_is_404_and_inactive_user_is_422(
     assert changed.status_code == 200, changed.text
     assert changed.json()["is_active"] is False and changed.json()["roles"] == ["EXECUTOR"]
     assert client.delete(f"/api/v1/projects/{world.pid}/members/{world.viewer.id}", headers=world.pm_h).status_code == 204
+
+
+def _pm_logins(client: TestClient, world: World) -> list[str]:
+    members = client.get(f"/api/v1/projects/{world.pid}/members", headers=world.admin_h).json()["items"]
+    return [m["login_id"] for m in members if "PM" in m["roles"]]
+
+
+def test_last_pm_cannot_be_removed_or_demoted_even_by_system_admin(client: TestClient, world: World) -> None:
+    """API-PRJ-010・011（CR-019）：最後の PM を外す・最後の PM から PM のロールを外すのは 409 ``LAST_PM``。システム管理者も同じで、
+    何も変えない。PM のロールを残す変更はできる。先に別の PM を足せば、もとの PM を外せる。"""
+    path = f"/api/v1/projects/{world.pid}/members/{world.pm.id}"
+    for headers in (world.pm_h, world.admin_h):
+        removed = client.delete(path, headers=headers)
+        assert removed.status_code == 409, removed.text
+        assert removed.json()["error"]["code"] == "LAST_PM"
+        assert removed.json()["error"]["details"] == [{"project_id": world.pid, "user_id": world.pm.id}]
+        demoted = client.put(path, json={"roles": ["PLANNER", "APPROVER"]}, headers=headers)
+        assert demoted.status_code == 409, demoted.text
+        assert error_code(demoted) == "LAST_PM"
+    assert _pm_logins(client, world) == ["pm"]
+
+    kept = client.put(path, json={"roles": ["PM", "APPROVER"], "organization": "開発部"}, headers=world.pm_h)
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["roles"] == ["PM", "APPROVER"]
+
+    world.put_member(world.pid, world.outsider.id, ["PM"])
+    demoted = client.put(path, json={"roles": ["VIEWER"]}, headers=world.pm_h)
+    assert demoted.status_code == 200, demoted.text
+    last = client.delete(f"/api/v1/projects/{world.pid}/members/{world.outsider.id}", headers=world.admin_h)
+    assert last.status_code == 409, last.text
+    assert error_code(last) == "LAST_PM"
+    assert client.delete(path, headers=world.admin_h).status_code == 204
+    assert _pm_logins(client, world) == ["outsider"]
+
+
+def test_members_of_project_without_pm_can_still_change(client: TestClient, world: World) -> None:
+    """PM のいないプロジェクト（システム管理者が作っただけ）でも、PM でないメンバーは足せて外せる（409 は PM を減らすときだけ）。"""
+    other = world.create_project(code="PRJ-002")
+    path = f"/api/v1/projects/{other['id']}/members/{world.outsider.id}"
+    world.put_member(other["id"], world.outsider.id, ["VIEWER"])
+    assert client.put(path, json={"roles": ["PLANNER"]}, headers=world.admin_h).status_code == 200
+    assert client.delete(path, headers=world.admin_h).status_code == 204
+
+
+@pytest.mark.parametrize(("method", "body"), [("DELETE", None), ("PUT", {"roles": ["PLANNER"]})])
+def test_last_pm_is_judged_after_locking_project(
+    client: TestClient, world: World, race: RaceProbe, method: str, body: dict[str, Any] | None
+) -> None:
+    """API-PRJ-010・011（CR-019・A-49 の 3）：2 人の PM を同時に外す。プロジェクトの行をロックしてから読み直したメンバーで
+    判定するので、先に別の PM を外した操作がロックの直前にコミットしていれば、こちらは 409 ``LAST_PM`` で PM が 1 人残る。"""
+    world.put_member(world.pid, world.outsider.id, ["PM"])
+
+    def remove_other_pm(other: Session) -> None:
+        member = other.scalar(
+            select(ProjectMember).where(ProjectMember.project_id == world.pid, ProjectMember.user_id == world.outsider.id)
+        )
+        assert member is not None
+        other.delete(member)
+
+    race.before_lock("projects", remove_other_pm)
+    race.locked.clear()
+    response = client.request(
+        method, f"/api/v1/projects/{world.pid}/members/{world.pm.id}", json=body, headers=world.pm_h
+    )
+    assert response.status_code == 409, response.text
+    assert error_code(response) == "LAST_PM"
+    assert race.locked == ["projects", "project_members"]
+    assert _pm_logins(client, world) == ["pm"]
 
 
 def test_member_roles_are_stored_in_role_order(db_session: Session, world: World) -> None:

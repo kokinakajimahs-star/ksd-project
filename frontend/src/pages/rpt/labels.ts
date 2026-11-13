@@ -1,8 +1,8 @@
 // レポート・共有の画面（UI-RPT-001・002）の呼び名と小さな書式
-import type { ReportSource, ShareLink, ShareLinkFailure, ShareScope } from "../../api/rpt";
+import type { ReportSource, ShareLink, ShareScope } from "../../api/rpt";
 import { serverTime } from "../../lib/format";
 
-/** 値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値 */
+/** 進捗の値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値。計画の値は常に最新計画（CR-013） */
 export function sourceLabel(source: ReportSource): string {
   return source === "SNAPSHOT" ? "確定時の写し" : "計算値（確定前）";
 }
@@ -15,12 +15,11 @@ export const SHARE_SCOPE_LABELS: Record<ShareScope, string> = {
 
 export const SHARE_SCOPES: ShareScope[] = ["REPORT", "GANTT"];
 
-/** 共有リンクを閲覧できない理由（API-RPT-004 の 404 の details の reason） */
-export const SHARE_FAILURE_LABELS: Record<ShareLinkFailure, string> = {
-  NOT_FOUND: "リンクが正しくありません。共有した人に確かめてください",
-  REVOKED: "このリンクは失効しています",
-  EXPIRED: "このリンクは有効期限が切れています",
-};
+/**
+ * 共有リンクで閲覧できないときの案内（API-RPT-004 の 404）。サーバは無い・失効・期限切れを同じ応答で返し、
+ * どれに当たったかを返さないので、画面も 1 つの案内だけを出す
+ */
+export const SHARE_UNAVAILABLE_HINT = "リンクが正しいか、まだ有効かを、共有した人に確かめてください";
 
 /** 共有リンクの今の状態（一覧の表示用。閲覧の可否の正はサーバの RULE-AUTH-002） */
 export type ShareLinkState = "ACTIVE" | "REVOKED" | "EXPIRED";
@@ -61,6 +60,21 @@ export function hoursText(value: number): string {
 export function signedHoursText(value: number): string {
   const rounded = round2(value);
   return `${rounded > 0 ? "+" : ""}${rounded} 人時`;
+}
+
+/** 共有リンクの有効期限の入力の既定値：今から何日後か（サーバの上限 PMT_SHARE_LINK_MAX_DAYS（既定 90 日）の内。CR-019） */
+export const SHARE_LINK_DEFAULT_DAYS = 14;
+
+/**
+ * now の days 日後の端末の時刻を、画面の datetime-local の値（`YYYY-MM-DDTHH:mm`。秒は切り捨てる）にする。
+ * 日は端末の暦で足す（夏時間の切り替えをまたいでも同じ時刻）
+ */
+export function localDateTimeAfterDays(now: Date, days: number): string {
+  const later = new Date(now.getTime());
+  later.setDate(later.getDate() + days);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const day = `${later.getFullYear()}-${pad(later.getMonth() + 1)}-${pad(later.getDate())}`;
+  return `${day}T${pad(later.getHours())}:${pad(later.getMinutes())}`;
 }
 
 /**

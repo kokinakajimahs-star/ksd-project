@@ -7,7 +7,15 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import { makeChangeRequest, makeImpact, makeImpactBody, memberPage } from "../../test/chgFixtures";
 import { makeMe, makeMember, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
+import { makeActivity } from "../../test/schFixtures";
 import ChangeRequestsPage, { canAnalyze } from "./ChangeRequestsPage";
 
 const BASE = "/api/v1/projects/3";
@@ -39,12 +47,16 @@ function page(items: ChangeRequest[]) {
   return { items, total: items.length, limit: 100, offset: 0 };
 }
 
+/** 依存の端に選べる今ある活動（API-SCH-001） */
+const ACTIVITIES = [makeActivity({ id: 21, wbs_code: "1.1", name: "資料作成" }), makeActivity({ id: 22, wbs_code: "1.2", name: "設計" })];
+
 function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
     "GET /api/v1/me": () => jsonResponse(200, me),
     [`GET ${BASE}/members`]: () =>
       jsonResponse(200, memberPage([makeMember({ user_id: 2, display_name: "計画 太郎" })])),
     [`GET ${BASE}/change-requests`]: () => jsonResponse(200, page([DRAFT, SUBMITTED, APPROVED])),
+    [`GET ${BASE}/activities`]: (call) => pagedResponse(ACTIVITIES, call, { dependencies: [], restricted: false }),
     ...overrides,
   };
 }
@@ -157,6 +169,74 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
       ],
     });
     expect(screen.queryByRole("form", { name: "変更要求を作る" })).toBeNull();
+  });
+
+  it("依存の端は、今ある活動（一覧から選ぶ → 整数の ID）か仮の名前（文字列。数字だけでも）かを選んで指す（OQ-38 (2)）", async () => {
+    // 今ある活動は 1000 件を超えても全件を選択肢に出す（2 頁目の活動 #4000 を選ぶ）
+    const many = [...ACTIVITIES, ...Array.from({ length: 999 }, (_, i) => makeActivity({ id: 3001 + i, name: `活動${i}` }))];
+    const all = [...many, makeActivity({ id: 4000, wbs_code: "2.1", name: "移行" })];
+    const created = makeChangeRequest({ id: 75, number: 5, title: "依存を足す" });
+    const { calls } = mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/activities`]: (call) => pagedResponse(all, call, { dependencies: [], restricted: false }),
+        [`POST ${BASE}/change-requests`]: () => jsonResponse(201, created),
+      }),
+    );
+    renderAt();
+
+    fireEvent.click(await screen.findByRole("button", { name: "変更要求を作る" }));
+    const form = screen.getByRole("form", { name: "変更要求を作る" });
+    fireEvent.change(within(form).getByLabelText("件名"), { target: { value: "依存を足す" } });
+    fireEvent.change(within(form).getByLabelText("理由"), { target: { value: "順序の見直し" } });
+    fireEvent.change(within(form).getByLabelText(/対象の WBS ID/), { target: { value: "1.1" } });
+    fireEvent.change(within(form).getByLabelText("操作"), { target: { value: "add_dependency" } });
+    expect(within(form).queryByText(/数字だけの入力は ID とみなす/)).toBeNull();
+
+    // 先行：今ある活動（既定の指し方）を一覧から選ぶ
+    expect(within(form).getByLabelText("先行の指し方")).toHaveValue("id");
+    const predecessor = within(form).getByLabelText("先行の活動");
+    await waitFor(() => expect(predecessor.querySelectorAll("option")).toHaveLength(1 + all.length));
+    fireEvent.change(predecessor, { target: { value: "4000" } });
+    // 後続：この変更要求で足す活動の仮の名前（数字だけ）
+    fireEvent.change(within(form).getByLabelText("後続の指し方"), { target: { value: "ref" } });
+    expect(within(form).queryByLabelText("後続の活動")).toBeNull();
+    fireEvent.change(within(form).getByLabelText("後続の仮の名前"), { target: { value: "21" } });
+    fireEvent.click(within(form).getByRole("button", { name: "操作を足す" }));
+
+    const ops = within(form).getByRole("list", { name: "変更内容の操作" });
+    expect(ops).toHaveTextContent("依存を足す：活動 #4000 → 「21」");
+    fireEvent.click(within(form).getByRole("button", { name: "下書きとして保存する" }));
+
+    await screen.findByRole("status");
+    expect((sent(calls, "POST", `${BASE}/change-requests`)[0]!.body as { operations: unknown[] }).operations).toEqual([
+      { op: "add_dependency", predecessor: 4000, successor: "21" },
+    ]);
+    expect(sent(calls, "GET", `${BASE}/activities`).map((c) => c.url)).toEqual([
+      `${BASE}/activities?limit=1000&offset=0`,
+      `${BASE}/activities?limit=1000&offset=1000`,
+    ]);
+  });
+
+  it("今ある活動の一覧を読めなければ理由を出し、仮の名前では指せる", async () => {
+    mockApi(
+      routes(meWith(PLANNER), {
+        [`GET ${BASE}/activities`]: () => errorResponse(403, "FORBIDDEN", "このプロジェクトを見る権限がありません"),
+      }),
+    );
+    renderAt();
+
+    fireEvent.click(await screen.findByRole("button", { name: "変更要求を作る" }));
+    const form = screen.getByRole("form", { name: "変更要求を作る" });
+    fireEvent.change(within(form).getByLabelText("操作"), { target: { value: "add_dependency" } });
+    expect(await within(form).findByRole("alert")).toHaveTextContent("このプロジェクトを見る権限がありません");
+    expect(within(form).getByLabelText("先行の活動")).toBeDisabled();
+
+    fireEvent.change(within(form).getByLabelText("先行の指し方"), { target: { value: "ref" } });
+    fireEvent.change(within(form).getByLabelText("先行の仮の名前"), { target: { value: "a1" } });
+    fireEvent.change(within(form).getByLabelText("後続の指し方"), { target: { value: "ref" } });
+    fireEvent.change(within(form).getByLabelText("後続の仮の名前"), { target: { value: "a2" } });
+    fireEvent.click(within(form).getByRole("button", { name: "操作を足す" }));
+    expect(within(form).getByRole("list", { name: "変更内容の操作" })).toHaveTextContent("依存を足す：「a1」 → 「a2」");
   });
 
   it("件名・理由・対象が空なら送らずに理由を出す", async () => {
@@ -287,6 +367,41 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
 
     await openRequest(3);
     expect(screen.queryByRole("button", { name: "反映する（再基準化）" })).toBeNull();
+  });
+
+  it("委託先には変更内容・影響分析が null で届くので、壊れずに表示しない旨を出し、影響分析・直すを出さない（CR-016）", async () => {
+    const contractor = makeMe({
+      user: makeUser({ id: 5, is_system_admin: false }),
+      system_permissions: [],
+      projects: [
+        { project_id: 3, roles: ["CONTRACTOR"], permissions: ["project.view", "change.create"], view_level: "OWN_ASSIGNMENTS" },
+      ],
+    });
+    const hiddenDraft = makeChangeRequest({ operations: null, impact: null });
+    const hiddenSubmitted: ChangeRequest = { ...SUBMITTED, operations: null, impact: null };
+    const { calls } = mockApi(
+      routes(contractor, {
+        [`GET ${BASE}/change-requests`]: () => jsonResponse(200, page([hiddenDraft, hiddenSubmitted])),
+      }),
+    );
+    renderAt();
+
+    await openRequest(1);
+    const draft = screen.getByRole("heading", { name: /^変更要求 #1「/ }).closest("section")!;
+    expect(draft).toHaveTextContent("顧客の追加要望");
+    expect(within(draft).getByText("変更内容と影響分析は表示しない（委託先には返さない）")).toBeInTheDocument();
+    expect(within(draft).queryByRole("list", { name: "変更内容" })).toBeNull();
+    expect(within(draft).queryByRole("button", { name: "影響分析を流す" })).toBeNull();
+    // 直すと変更内容を空で送ってしまうので出さない。提出はできる
+    expect(within(draft).queryByRole("button", { name: "直す" })).toBeNull();
+    expect(within(draft).getByRole("button", { name: "提出する" })).toBeInTheDocument();
+
+    await openRequest(2);
+    const submitted = screen.getByRole("heading", { name: /^変更要求 #2「/ }).closest("section")!;
+    expect(within(submitted).getByText("変更内容と影響分析は表示しない（委託先には返さない）")).toBeInTheDocument();
+    expect(within(submitted).queryByRole("region", { name: "提出のときの影響分析" })).toBeNull();
+    expect(within(submitted).getByRole("button", { name: "提出を取り下げる" })).toBeInTheDocument();
+    expect(calls.filter((c) => c.path.endsWith("/impact"))).toHaveLength(0);
   });
 
   it("提出済みは承認待ち一覧へ案内し、提出のときの影響分析を出す", async () => {

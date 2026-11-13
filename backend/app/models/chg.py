@@ -6,6 +6,10 @@
 - 外部キーに ``ON DELETE`` を付けない（docs/decisions/ASSUMPTIONS.md A-11・A-15・A-19・A-22・A-27 と同じ）
 - 値の一覧が設計書に書かれている列（変更要求の状態は 5.10、是正措置の状態は 4.1・5.10、変更履歴の操作は 4.1）は DB の検査（CHECK）でも拒む
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）
+- 全ての表の内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。外部キーの無い ``entity_id`` が
+  後から作った別の行を指さないため。CR-012）
+- JSON の列の ``None`` は SQL の NULL で持つ（``none_as_null``。JSON の ``null`` を保存しない。ASSUMPTIONS.md A-49 の 5）。
+  NOT NULL の列の ``None`` は、ORM の挿入なら既定値（``default``）になり、既定値の無い列・更新・SQL の挿入では DB が拒む
 
 この群の表ができたので、先に作った表の列へ外部キーを張った（ASSUMPTIONS.md A-15・A-19・A-27 の申し送り）：
 ``scope_baselines.change_request_id``・``schedule_baselines.change_request_id`` → ``change_requests.id``、
@@ -60,6 +64,10 @@ class ChangeRequest(Base):
     - ``status`` は 5.10 の DRAFT → SUBMITTED → APPROVED／REJECTED → APPLIED（遷移は RULE-CHG-003 の担当）
     - ``impact`` は提出のときに保存する影響分析の結果（5.9 の形。RULE-CHG-002）。提出の前は空
     - ``submitted_at`` は提出した時刻、``applied_by``・``applied_at`` は反映（再基準化。CHG-04）した人と時刻。それまでは空
+    - 状態と時刻・人の組は DB の検査でも拒む（5.10 の遷移から。``status_reports`` の ``finalized_pair`` と同じ形。A-49 の 6）：
+      **DRAFT は提出の時刻が空（取り下げで空に戻す）、SUBMITTED 以降は提出の時刻がある**（``submitted_at``）。
+      **APPLIED だけが反映した人・時刻の両方を持ち、ほかの状態では両方とも空**（``applied_pair``）。
+      承認・却下した人と時刻は承認申請（``approval_requests``）が持つ
     """
 
     __tablename__ = "change_requests"
@@ -67,6 +75,17 @@ class ChangeRequest(Base):
         UniqueConstraint("project_id", "number"),
         CheckConstraint("number >= 1", name="number"),
         CheckConstraint(in_list("status", CHANGE_REQUEST_STATUSES), name="status"),
+        CheckConstraint(
+            "(status = 'DRAFT' AND submitted_at IS NULL)"
+            " OR (status IN ('SUBMITTED', 'APPROVED', 'REJECTED', 'APPLIED') AND submitted_at IS NOT NULL)",
+            name="submitted_at",
+        ),
+        CheckConstraint(
+            "(status = 'APPLIED' AND applied_by IS NOT NULL AND applied_at IS NOT NULL)"
+            " OR (status IN ('DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED') AND applied_by IS NULL AND applied_at IS NULL)",
+            name="applied_pair",
+        ),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -74,12 +93,12 @@ class ChangeRequest(Base):
     number: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(200))
     reason: Mapped[str] = mapped_column(Text)
-    target_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
-    operations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    target_codes: Mapped[list[str]] = mapped_column(JSON(none_as_null=True), default=list)
+    operations: Mapped[list[dict[str, Any]]] = mapped_column(JSON(none_as_null=True), default=list)
     status: Mapped[str] = mapped_column(
         String(16), default=CHANGE_REQUEST_STATUS_INITIAL, server_default=text(f"'{CHANGE_REQUEST_STATUS_INITIAL}'")
     )
-    impact: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    impact: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     applied_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
@@ -97,7 +116,10 @@ class CorrectiveAction(Base):
     """
 
     __tablename__ = "corrective_actions"
-    __table_args__ = (CheckConstraint(in_list("status", CORRECTIVE_ACTION_STATUSES), name="status"),)
+    __table_args__ = (
+        CheckConstraint(in_list("status", CORRECTIVE_ACTION_STATUSES), name="status"),
+        {"sqlite_autoincrement": True},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -132,6 +154,7 @@ class AuditLog(Base):
         CheckConstraint(in_list("action", AUDIT_ACTIONS), name="action"),
         Index("ix_audit_logs_entity_type_entity_id", "entity_type", "entity_id"),
         Index("ix_audit_logs_project_id_occurred_at", "project_id", "occurred_at"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -142,8 +165,8 @@ class AuditLog(Base):
     entity_id: Mapped[int] = mapped_column(Integer)
     wbs_code: Mapped[str | None] = mapped_column(String(100), index=True)
     action: Mapped[str] = mapped_column(String(8))
-    before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
 
 
 class AuditLogImmutableError(RuntimeError):

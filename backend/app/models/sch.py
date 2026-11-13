@@ -9,6 +9,9 @@
 - 日程の列のうち ``requested_start``・``duration_days``・``is_milestone`` が利用者の入力、``start_date`` 以降は
   RULE-SCH-002・003 の計算結果（4.2）。計算の前は空。最早・最遅は 5.5 の「結果の日付」と同じ変換の日付、``total_float`` は稼働日の数
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）。工数は人時の小数 ``Numeric(10,2)``（2.4）
+- 全ての表の内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
+- 制約名は 63 文字以下（PostgreSQL の識別子の上限。ASSUMPTIONS.md A-49 の 8）。名前の規約（``app.infra.db``）で
+  63 文字を超える ``schedule_baseline_items.schedule_baseline_id`` の外部キーには短い名前を付ける（移行 0012 で付け直した）
 
 ``schedule_baselines.change_request_id`` の ``change_requests.id``（DB-CHG-001）への外部キーは、
 ``change_requests`` を作る移行（db:CHG の ``0007_chg``）で張った（``scope_baselines.change_request_id`` と同じ。ASSUMPTIONS.md A-15・A-19）。
@@ -60,6 +63,9 @@ BASELINE_ITEM_TYPES = ("ACTIVITY", "WORK_PACKAGE")
 
 # 人時の列（2.4）
 _HOURS = Numeric(10, 2)
+
+# ベースラインの項目から版への外部キーの名前（名前の規約では 63 文字を超える。A-49 の 8）
+SCHEDULE_BASELINE_ITEMS_BASELINE_FK = "fk_schedule_baseline_items_schedule_baseline_id"
 
 
 # DB-SCH-001
@@ -119,6 +125,7 @@ class ActivityDependency(Base):
         CheckConstraint("predecessor_id <> successor_id", name="not_self"),
         CheckConstraint(in_list("dep_type", DEPENDENCY_TYPES), name="dep_type"),
         CheckConstraint(f"lag_days = {LAG_DAYS_DEFAULT}", name="lag_days"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -144,6 +151,7 @@ class ScheduleBaseline(Base):
         UniqueConstraint("project_id", "version"),
         CheckConstraint("version >= 1", name="version"),
         CheckConstraint(in_list("reason", SCHEDULE_BASELINE_REASONS), name="reason"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -174,10 +182,15 @@ class ScheduleBaselineItem(Base):
         CheckConstraint("item_type = 'ACTIVITY' OR activity_id IS NULL", name="work_package_without_activity"),
         CheckConstraint("duration_days IS NULL OR duration_days >= 0", name="duration_days"),
         CheckConstraint("estimate_hours IS NULL OR estimate_hours >= 0", name="estimate_hours"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    schedule_baseline_id: Mapped[int] = mapped_column(ForeignKey("schedule_baselines.id"), index=True)
+    # 名前の規約の名前（fk_schedule_baseline_items_schedule_baseline_id_schedule_baselines）は 66 文字で
+    # PostgreSQL の上限 63 文字を超えるので、指す表を省いた名前にする（A-49 の 8）
+    schedule_baseline_id: Mapped[int] = mapped_column(
+        ForeignKey("schedule_baselines.id", name=SCHEDULE_BASELINE_ITEMS_BASELINE_FK), index=True
+    )
     item_type: Mapped[str] = mapped_column(String(16))
     activity_id: Mapped[int | None] = mapped_column(Integer, index=True)
     element_id: Mapped[int | None] = mapped_column(Integer, index=True)

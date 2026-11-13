@@ -9,7 +9,20 @@ export interface User {
   email: string | null;
   organization: string | null;
   is_system_admin: boolean;
+  /** システム管理者が許したプロジェクトの作成（9.1 の project.create。users.can_create_project） */
+  can_create_project: boolean;
   is_active: boolean;
+  /** ログインのロックの終わり（UTC の ISO 8601）。今より後ならロック中（NFR-04）。ロックしていなければ null */
+  locked_until: string | null;
+}
+
+/**
+ * ユーザーの一覧（API-CMN-003）の 1 件。locked_until・can_create_project は user.admin を持つ人にだけ値が返り、
+ * member.manage だけで読む人には null（CR-019）
+ */
+export interface UserListItem extends Omit<User, "can_create_project"> {
+  /** user.admin を持たない人が読むと null（許しているかを見せない） */
+  can_create_project: boolean | null;
 }
 
 export interface LoginResponse {
@@ -19,6 +32,7 @@ export interface LoginResponse {
   user: User;
 }
 
+/** プロジェクトごとのロールと権限。システム管理者は全てのプロジェクトが載り、メンバーでないものは roles が空（9.2） */
 export interface ProjectPermissions {
   project_id: number;
   roles: string[];
@@ -46,15 +60,17 @@ export interface UserCreateInput {
   email?: string | null;
   organization?: string | null;
   is_system_admin?: boolean;
+  can_create_project?: boolean;
 }
 
-/** 載せた項目だけを変える（API-CMN-005）。ログイン名は変えない */
+/** 載せた項目だけを変える（API-CMN-005）。ログイン名は変えない。パスワードを設定し直すとロックを解く */
 export interface UserUpdateInput {
   display_name?: string;
   email?: string | null;
   organization?: string | null;
   password?: string;
   is_system_admin?: boolean;
+  can_create_project?: boolean;
   is_active?: boolean;
 }
 
@@ -95,8 +111,8 @@ export function getMe(): Promise<Me> {
   return apiFetch<Me>("/me");
 }
 
-export function listUsers(query: PageQuery = {}): Promise<Page<User>> {
-  return apiFetch<Page<User>>("/users", { query: { limit: query.limit, offset: query.offset } });
+export function listUsers(query: PageQuery = {}): Promise<Page<UserListItem>> {
+  return apiFetch<Page<UserListItem>>("/users", { query: { limit: query.limit, offset: query.offset } });
 }
 
 export function createUser(input: UserCreateInput): Promise<User> {

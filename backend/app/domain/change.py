@@ -13,7 +13,7 @@
     期間 0 の活動がマイルストーン（4.2）
 
 - 影響分析（RULE-CHG-002）：計画の写しに変更を当て、前後の計画それぞれに RULE-SCH-002・003（``calculate_schedule``）と
-  RULE-EST-001（``rollup_estimates``）を流し、前後の差を 5.9 の形で返す：``project_finish``（前・後・ずれの稼働日）、
+  ボトムアップ集計の RULE-EST-001（``rollup_estimates``）を流し、前後の差を 5.9 の形で返す：``project_finish``（前・後・ずれの稼働日）、
   ``milestones``（ずれたもの）、``critical_path``（加わった・外れた活動）、``total_estimate_hours``（前・後）、
   ``elements``（追加・変更・削除）。**本計画には書き込まない**（モデルは不変のデータで、写しにだけ当てる）。
 
@@ -31,7 +31,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from app.domain.baseline import working_day_difference
-from app.domain.calendar import WorkCalendar
+from app.domain.calendar import CalendarError, WorkCalendar
 from app.domain.estimate import HOURS_QUANTUM, MAX_HOURS, ActivityEstimate, ElementKind, WbsNode, rollup_estimates
 from app.domain.scheduling import (
     MAX_ACTIVITY_NAME_LENGTH,
@@ -633,8 +633,43 @@ def apply_operations(plan: PlanModel, operations: Sequence[Mapping[str, Any]]) -
     )
 
 
+def _rolled_start(value: object, calendar: WorkCalendar, index: int) -> object:
+    start = _requested_start(value, index)
+    if start is None:
+        return value
+    try:
+        rolled = calendar.roll_forward(start)
+    except CalendarError as exc:
+        raise _fail(index, f"希望開始日（requested_start）を稼働日へ寄せられない: {exc}") from exc
+    if rolled == start:
+        return value
+    return rolled.isoformat() if isinstance(value, str) else rolled
+
+
+def roll_requested_starts(operations: Sequence[Mapping[str, Any]], calendar: WorkCalendar) -> list[dict[str, Any]]:
+    """変更内容の希望開始日を、非稼働日なら次の稼働日へ寄せた操作の列を返す（要求仕様書 BR-04。OQ-42 (16)）。
+
+    ``add_activity`` の ``requested_start`` と ``update_activity`` の ``fields.requested_start`` が対象。寄せ方は活動を足す・
+    変える（API-SCH-002・003）と同じ RULE-CAL-001 の開始日の寄せ（``WorkCalendar.roll_forward``）。寄せた日は
+    ``YYYY-MM-DD`` の文字列で返す（``operations`` は JSON で保存する）。稼働日の値・空の値・ほかの操作はそのまま返す。
+    入力は変えない。操作の形の検査は ``apply_operations`` が行う（ここでは日付でない値だけを ``ChangeError`` にする）。
+    """
+    result: list[dict[str, Any]] = []
+    for index, operation in enumerate(operations):
+        op = dict(operation)
+        if op.get("op") == "add_activity" and op.get("requested_start") is not None:
+            op["requested_start"] = _rolled_start(op["requested_start"], calendar, index)
+        elif op.get("op") == "update_activity" and isinstance(op.get("fields"), Mapping):
+            fields = dict(op["fields"])
+            if fields.get("requested_start") is not None:
+                fields["requested_start"] = _rolled_start(fields["requested_start"], calendar, index)
+                op["fields"] = fields
+        result.append(op)
+    return result
+
+
 # ---------------------------------------------------------------------------
-# RULE-CHG-002 影響分析
+# 影響分析（RULE-CHG-002）
 # ---------------------------------------------------------------------------
 
 

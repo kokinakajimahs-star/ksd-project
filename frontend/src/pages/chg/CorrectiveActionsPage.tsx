@@ -15,6 +15,7 @@ import {
 } from "../../api/chg";
 import { hasProjectPermission } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import { listStatusReports, type StatusReport } from "../../api/prg";
 import { listActivities, type Activity } from "../../api/sch";
 import { getWbsTree, type WbsElement } from "../../api/wbs";
@@ -27,7 +28,6 @@ import {
   ACTION_STATUS_LABELS,
   ACTION_STATUSES,
   CHG_PAGE_SIZE,
-  LIST_LIMIT_MAX,
   nextActionStatuses,
   userLabel,
   WBS_CODE_MAX,
@@ -41,7 +41,7 @@ interface Filters {
   wbsCode: string;
 }
 
-/** 紐付けの候補（登録の欄の選択肢）：WBS の要素・活動（先頭の 1000 件）・報告日（先頭の 1000 件） */
+/** 紐付けの候補（登録の欄の選択肢）：WBS の要素・活動（全件）・報告日（全件） */
 interface LinkOptions {
   elements: WbsElement[];
   activities: Activity[];
@@ -176,12 +176,12 @@ export default function CorrectiveActionsPage() {
     let cancelled = false;
     Promise.all([
       getWbsTree(projectId),
-      listActivities(projectId, { limit: LIST_LIMIT_MAX, offset: 0 }),
-      listStatusReports(projectId, { limit: LIST_LIMIT_MAX, offset: 0 }),
+      fetchAllPages((page) => listActivities(projectId, page)),
+      fetchAllPages((page) => listStatusReports(projectId, page)),
     ]).then(
       ([tree, activities, reports]) => {
         if (!cancelled) {
-          setOptions({ elements: tree.elements, activities: activities.items, reports: reports.items });
+          setOptions({ elements: tree.elements, activities, reports });
         }
       },
       (e: unknown) => {

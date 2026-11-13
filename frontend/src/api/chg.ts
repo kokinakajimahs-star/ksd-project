@@ -22,9 +22,10 @@ export interface ChangeRequest {
   reason: string;
   /** 対象の WBS ID（複数可。CHG-01） */
   target_codes: string[];
-  operations: ChangeOperation[];
+  /** 変更内容（5.9 の操作）。委託先には返さない（null。設計書 1.3 の 9.2・CR-016） */
+  operations: ChangeOperation[] | null;
   status: ChangeRequestStatus;
-  /** 提出のときに保存した影響分析（5.9 の形）。提出の前は null */
+  /** 提出のときに保存した影響分析（5.9 の形）。提出の前は null。委託先には返さない（null。CR-016） */
   impact: ImpactBody | null;
   created_by: number;
   submitted_at: string | null;
@@ -255,7 +256,7 @@ export interface AuditLog {
 
 export type AuditLogList = Page<AuditLog>;
 
-/** 検索の条件（期間は UTC の日付で両端を含む） */
+/** 検索の条件（期間は業務の時間帯（サーバの設定。既定 Asia/Tokyo）の日付で両端を含む。設計書 1.3・CR-019） */
 export interface AuditLogQuery extends PageQuery {
   date_from?: string;
   date_to?: string;

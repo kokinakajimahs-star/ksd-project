@@ -3,6 +3,10 @@
 
 権限は全てここ（サービス層）で RULE-AUTH-001（``app.domain.authz.authorize``）を通す。拒否は 403 ``FORBIDDEN``。
 「今」は呼び手（API 層の ``get_now``）から受ける。
+
+ログインの試行の制限（NFR-04）：続けて ``max_failures`` 回誤ると ``lock_minutes`` 分ロックする（``users.locked_until``）。
+ロック中の試行は数えず（ロックを延ばさない）、誤りと同じ 401 を返す。成功で数えを 0 に戻す。
+変更履歴（NFR-05）の変更者は、ログインの成功は本人、失敗は空（認証されていない試行）。
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from app.infra.audit_listener import bind_actor as bind_actor  # 変更履歴の
 from app.services.project_access import ProjectAccess
 
 _PERMISSION_ORDER = {permission: index for index, permission in enumerate(PERMISSIONS)}
+PERMISSION_MANAGE = "permission.manage"
 
 
 def forbidden() -> AppError:
@@ -54,9 +59,12 @@ def sort_permissions(permissions: Iterable[str]) -> list[str]:
 def principal_of(user: User) -> Principal:
     """``users`` の行から判定の入力を作る。
 
-    システムの権限の個別の許可（project.create）は保存先が 4.1 に無いので空で渡す（＝システム管理者だけが持つ。OQ-09）。
+    システムの権限の個別の許可は ``users.can_create_project``（9.1 の project.create。設計書 1.2・CR-010）。
     """
-    return Principal(user_id=user.id, is_active=user.is_active, is_system_admin=user.is_system_admin)
+    granted = frozenset({"project.create"}) if user.can_create_project else frozenset()
+    return Principal(
+        user_id=user.id, is_active=user.is_active, is_system_admin=user.is_system_admin, system_permissions=granted
+    )
 
 
 def _check_aware(now: datetime) -> None:
@@ -78,21 +86,59 @@ class LoginResult:
     user: User
 
 
-def login(session: Session, *, login_id: str, password: str, now: datetime, ttl_hours: int) -> LoginResult:
+@dataclass(frozen=True)
+class LoginLockPolicy:
+    """ログインの試行の制限（NFR-04。設定の ``PMT_LOGIN_MAX_FAILURES``・``PMT_LOGIN_LOCK_MINUTES``）。"""
+
+    max_failures: int
+    lock_minutes: int
+
+    def __post_init__(self) -> None:
+        if self.max_failures <= 0 or self.lock_minutes <= 0:
+            raise ValueError("ロックする回数と長さ（分）は正の数で渡す")
+
+
+def login(
+    session: Session,
+    *,
+    login_id: str,
+    password: str,
+    now: datetime,
+    ttl_hours: int,
+    lock_policy: LoginLockPolicy,
+) -> LoginResult:
     """ログイン名とパスワードを照合し、有効期間 ``ttl_hours`` 時間の認証トークンを発行する。
 
-    ログイン名が無い・パスワードが違う・無効な利用者は、どれも同じ 401 ``INVALID_CREDENTIALS``（どれに当たったかを漏らさない）。
+    ログイン名が無い・ロック中（``now < locked_until``）・パスワードが違う・無効な利用者は、どれも同じ 401
+    ``INVALID_CREDENTIALS``（どれに当たったか、ロックしているかを漏らさない。NFR-04）。
+
+    - パスワードの誤りは ``failed_login_count`` を 1 増やし、``lock_policy.max_failures`` 回に達したら
+      ``locked_until = now + lock_minutes 分`` にして数えを 0 に戻す。401 を返しても数えは残す（コミットしてから投げる）
+    - ロック中の試行は数えない（ロックを延ばさない）。正しいパスワードでも 401
+    - 成功で数えを 0・``locked_until`` を空にする
     """
     _check_aware(now)
     if ttl_hours <= 0:
         raise ValueError("トークンの有効期間は正の時間で渡す")
-    user = session.scalar(select(User).where(User.login_id == login_id))
+    # 数えの読み書きを同じ利用者の同時の試行と競わせない（PostgreSQL は行をロックする。SQLite は FOR UPDATE を無視する）
+    user = session.scalar(select(User).where(User.login_id == login_id).with_for_update())
     if user is None:
         spend_password_check_time(password)
         raise _invalid_credentials()
-    if not verify_password(password, user.password_hash) or not user.is_active:
+    if user.locked_until is not None and now < user.locked_until:
+        spend_password_check_time(password)
+        raise _invalid_credentials()
+    if not verify_password(password, user.password_hash):
+        _record_login_failure(session, user, now=now, lock_policy=lock_policy)
+        raise _invalid_credentials()
+    if not user.is_active:
         raise _invalid_credentials()
 
+    bind_actor(session, user.id, now)  # ログインの変更者は本人（NFR-05）
+    if user.failed_login_count != 0:
+        user.failed_login_count = 0
+    if user.locked_until is not None:
+        user.locked_until = None
     token = generate_token()
     expires_at = now + timedelta(hours=ttl_hours)
     session.add(AuthSession(user_id=user.id, token_hash=hash_token(token), expires_at=expires_at, created_at=now))
@@ -100,8 +146,21 @@ def login(session: Session, *, login_id: str, password: str, now: datetime, ttl_
     return LoginResult(token=token, expires_at=expires_at, user=user)
 
 
+def _record_login_failure(session: Session, user: User, *, now: datetime, lock_policy: LoginLockPolicy) -> None:
+    """パスワードの誤りを数え、回数に達したらロックする。401 で巻き戻らないよう、ここでコミットする。"""
+    bind_actor(session, None, now)  # 認証されていない試行なので変更者は空（NFR-05）
+    failures = user.failed_login_count + 1
+    if failures >= lock_policy.max_failures:
+        user.locked_until = now + timedelta(minutes=lock_policy.lock_minutes)
+        user.failed_login_count = 0
+    else:
+        user.failed_login_count = failures
+    session.commit()
+
+
 def _invalid_credentials() -> AppError:
-    return AppError(401, "INVALID_CREDENTIALS", "ログイン名またはパスワードが違います")
+    # ロックしていることも明かさない文言（NFR-04）
+    return AppError(401, "INVALID_CREDENTIALS", "ログイン名またはパスワードが違うか、しばらくログインできません")
 
 
 def authenticate(session: Session, token: str, *, now: datetime) -> User | None:
@@ -191,6 +250,7 @@ def replace_role_permissions(
 
     ``grants`` は（ロール, 権限の一覧）の並び。載せなかったロールは何も持たない（表を丸ごと置き換える）。
     同じロールを 2 回書く・3 章に無いロール・プロジェクトの表に載らない権限（未知のコード・システムの権限）は 400。
+    置き換えた後の表で、どのロールも permission.manage を持たなければ 422 ``NO_PERMISSION_MANAGER``（9.2 の注記）。
     """
     authorize_project(session, access, user, project_id, "permission.manage")
 
@@ -210,6 +270,13 @@ def replace_role_permissions(
         errors.append({"message": str(exc)})
     if errors:
         raise AppError(400, "VALIDATION_ERROR", "ロールか権限のコードに誤りがあります", details=errors)
+    # 9.2 の注記：permission.manage を持つロールを少なくとも 1 つ残す（表を誰も直せなくなるのを防ぐ）
+    if not any(PERMISSION_MANAGE in permissions for permissions in table.values()):
+        raise AppError(
+            422, "NO_PERMISSION_MANAGER",
+            "権限の表を変える権限（permission.manage）を持つロールが無くなるため、置き換えられません",
+            details=[{"permission": PERMISSION_MANAGE}],
+        )
 
     session.execute(delete(RolePermission).where(RolePermission.project_id == project_id))
     for role in ROLES:
@@ -226,7 +293,7 @@ def replace_role_permissions(
 
 @dataclass(frozen=True)
 class ProjectPermissions:
-    """メンバーである 1 つのプロジェクトでのロールと権限。"""
+    """1 つのプロジェクトでのロールと権限（メンバーでないプロジェクト（システム管理者）はロールが空）。"""
 
     project_id: int
     roles: list[str]
@@ -244,17 +311,26 @@ class MyPermissions:
 
 
 def my_permissions(session: Session, access: ProjectAccess, user: User) -> MyPermissions:
-    """自分の情報と、システムの権限・メンバーであるプロジェクトごとの権限（RULE-AUTH-001 の ``effective_permissions``）。"""
+    """自分の情報と、システムの権限・プロジェクトごとの権限（RULE-AUTH-001 の ``effective_permissions``）。
+
+    プロジェクトはメンバーであるもの。システム管理者は全てのプロジェクト（9.2 の注記。メンバーでないものはロールが空で、
+    全ての権限を持つ）。
+    """
     principal = principal_of(user)
     system = effective_permissions(principal, role_permissions={}, membership=None) & SYSTEM_PERMISSIONS
+    memberships: Mapping[int, Membership] = access.memberships(session, user.id)
+    project_ids = set(memberships)
+    if principal.is_active and principal.is_system_admin:
+        project_ids.update(access.project_ids(session))
     projects: list[ProjectPermissions] = []
-    for project_id, membership in sorted(access.memberships(session, user.id).items()):
+    for project_id in sorted(project_ids):
+        membership = memberships.get(project_id)
         table = load_role_permission_table(session, project_id)
         granted = effective_permissions(principal, role_permissions=table, membership=membership)
         projects.append(
             ProjectPermissions(
                 project_id=project_id,
-                roles=[role for role in ROLES if role in membership.roles],
+                roles=[role for role in ROLES if membership is not None and role in membership.roles],
                 permissions=sort_permissions(granted - SYSTEM_PERMISSIONS),
                 view_level=project_view_level(principal, role_permissions=table, membership=membership),
             )

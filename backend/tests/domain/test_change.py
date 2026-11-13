@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -28,6 +29,7 @@ from app.domain.change import (
     PlanModel,
     analyze_impact,
     apply_operations,
+    roll_requested_starts,
 )
 from app.domain.estimate import ElementKind
 from app.domain.scheduling import ScheduleCycleError
@@ -324,6 +326,43 @@ def test_empty_operations_return_same_plan() -> None:
     """RULE-CHG-001：操作が無ければ計画は変わらない。"""
     result = apply()
     assert result.plan == PLAN and dict(result.element_refs) == {} and dict(result.activity_refs) == {}
+
+
+def test_requested_start_on_non_working_day_rolls_to_next_working_day() -> None:
+    """RULE-CHG-001：変更内容の希望開始日は BR-04 で次の稼働日へ寄せる（活動を足す・変える API-SCH-002・003 と同じ。OQ-42 (16)）。
+
+    12/05（土）・12/06（日）→ 12/07（月）。稼働日の値・空の値・ほかの操作はそのまま、入力の列は変えない。
+    """
+    operations: list[dict[str, Any]] = [
+        {"op": "add_activity", "wp_code": "1.1", "name": "追加", "duration_days": 2, "estimate_hours": 8, "ref": "x",
+         "requested_start": "2026-12-05"},
+        {"op": "update_activity", "activity_id": 11, "fields": {"requested_start": "2026-12-06", "name": "実装2"}},
+        {"op": "update_activity", "activity_id": 10, "fields": {"requested_start": "2026-12-04"}},
+        {"op": "update_activity", "activity_id": 12, "fields": {"requested_start": None}},
+        {"op": "add_activity", "wp_code": "1.2", "name": "日付なし", "duration_days": 1, "estimate_hours": 1, "ref": "y"},
+        {"op": "add_dependency", "predecessor": 10, "successor": "x"},
+    ]
+    original = copy.deepcopy(operations)
+    rolled = roll_requested_starts(operations, CAL)
+
+    assert rolled[0]["requested_start"] == "2026-12-07"
+    assert rolled[1]["fields"] == {"requested_start": "2026-12-07", "name": "実装2"}
+    assert rolled[2:] == original[2:]
+    assert operations == original  # 入力は変えない
+    # 当てた計画の希望開始日は稼働日（活動を足す・変えるときと同じ値）
+    acts = activities_of(apply(*rolled).plan)
+    added = next(a for a in acts.values() if a.name == "追加")
+    assert (added.requested_start, acts[11].requested_start, acts[10].requested_start) == (
+        date(2026, 12, 7), date(2026, 12, 7), date(2026, 12, 4))
+    # 休日（カレンダーの例外）も寄せる。日付の値は日付で返す
+    holiday = WorkCalendar.of(holidays=[date(2026, 12, 7)])
+    assert roll_requested_starts(operations[:1], holiday)[0]["requested_start"] == "2026-12-08"
+    as_date = [{**operations[0], "requested_start": date(2026, 12, 5)}]
+    assert roll_requested_starts(as_date, CAL)[0]["requested_start"] == date(2026, 12, 7)
+    # 日付でない値は推測せずに拒む（どの操作かを index で返す）
+    with pytest.raises(ChangeError) as excinfo:
+        roll_requested_starts([original[2], {**original[0], "requested_start": "12/05"}], CAL)
+    assert (excinfo.value.code, excinfo.value.index) == (ChangeErrorCode.VALIDATION_ERROR, 1)
 
 
 # ---------------------------------------------------------------------------

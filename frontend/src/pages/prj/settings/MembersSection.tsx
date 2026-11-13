@@ -1,9 +1,12 @@
 // UI-PRJ-002 のメンバー（PRJ-06。API-PRJ-009〜011）。メンバーに 3 章のロールと所属を割り当て、足す・変える・外す。
-// 変えられるのは member.manage を持つ人だけ（9.1）。足す人の候補はユーザーの一覧（API-CMN-003。member.manage で読める）
+// 変えられるのは member.manage を持つ人だけ（9.1）。足す人の候補はユーザーの一覧（API-CMN-003。member.manage で読める）から、
+// 全ての頁のメンバー（API-PRJ-009 を total まで読み足す。A-49 の 2）を除いたもの。
+// 最後の PM を外す・最後の PM から PM のロールを外す変更はサーバが 409 LAST_PM で断る（CR-019）ので、その文言を出す
 import { useEffect, useState, type FormEvent } from "react";
 
-import type { User } from "../../../api/cmn";
+import type { UserListItem } from "../../../api/cmn";
 import { toErrorView, type ErrorView } from "../../../api/errors";
+import { fetchAllPages } from "../../../api/pages";
 import { listMembers, removeMember, upsertMember, type Member, type MemberList } from "../../../api/prj";
 import ErrorAlert from "../../../components/ErrorAlert";
 import Pager from "../../../components/Pager";
@@ -28,7 +31,7 @@ function MemberForm({
 }: {
   /** 変えるメンバー（足すときは null） */
   member: Member | null;
-  candidates: User[];
+  candidates: UserListItem[];
   onSubmit: (userId: number, roles: string[], organization: string | null, team: string | null) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -136,7 +139,10 @@ export default function MembersSection({
   const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<User[] | null>(null);
+  const [candidates, setCandidates] = useState<UserListItem[] | null>(null);
+  /** 全ての頁のメンバーの利用者 ID（足す候補から除く）。読むまで・読めなければ null */
+  const [allMemberIds, setAllMemberIds] = useState<ReadonlySet<number> | null>(null);
+  const [allMembersError, setAllMembersError] = useState<ErrorView | null>(null);
   /** 開いている部品：足す（"add"）・変える（メンバー）・外すことの確かめ */
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Member | null>(null);
@@ -179,6 +185,31 @@ export default function MembersSection({
     };
   }, [canEdit]);
 
+  // 足す候補から除くメンバーは、今の頁でなく全ての頁から（変えたら読み直す）
+  useEffect(() => {
+    if (!canEdit) {
+      return;
+    }
+    let cancelled = false;
+    setAllMemberIds(null);
+    setAllMembersError(null);
+    fetchAllPages((query) => listMembers(projectId, query)).then(
+      (members) => {
+        if (!cancelled) {
+          setAllMemberIds(new Set(members.map((member) => member.user_id)));
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setAllMembersError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, canEdit, reloadKey]);
+
   function closeForms() {
     setAdding(false);
     setEditing(null);
@@ -212,9 +243,9 @@ export default function MembersSection({
     }
   }
 
-  const memberIds = new Set(page?.items.map((member) => member.user_id) ?? []);
-  // 足す候補は、今の頁に載っていない有効なユーザー（他の頁のメンバーを選ぶと、そのロール・所属を置き換える）
-  const addCandidates = (candidates ?? []).filter((user) => !memberIds.has(user.id));
+  // 足す候補は、どの頁のメンバーでもない有効なユーザー（メンバーを選ぶと、そのロール・所属を置き換えてしまう）
+  const addCandidates =
+    allMemberIds === null ? [] : (candidates ?? []).filter((user) => !allMemberIds.has(user.id));
 
   return (
     <section aria-labelledby="project-members-heading">
@@ -225,7 +256,7 @@ export default function MembersSection({
       {canEdit && !adding && editing === null && (
         <button
           type="button"
-          disabled={candidates === null || addCandidates.length === 0}
+          disabled={candidates === null || allMemberIds === null || addCandidates.length === 0}
           onClick={() => {
             setNotice(null);
             setRemoving(null);
@@ -236,6 +267,12 @@ export default function MembersSection({
         </button>
       )}
       {canEdit && candidates === null && <p>ユーザーの一覧を読めないため、メンバーを足せません</p>}
+      {canEdit && allMembersError !== null && (
+        <>
+          <p>メンバーの全件を読めないため、メンバーを足せません</p>
+          <ErrorAlert error={allMembersError} />
+        </>
+      )}
       {canEdit && adding && (
         <MemberForm member={null} candidates={addCandidates} onSubmit={submitMember} onCancel={closeForms} />
       )}

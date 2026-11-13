@@ -10,6 +10,7 @@
 - 手法・前提・参照資料は任意（RULE-EST-002 の ``record_estimate`` が省けるのと同じ）。手法は EST-08 の 5 つのいずれか
 - 外部キーに ``ON DELETE`` を付けない（docs/decisions/ASSUMPTIONS.md A-11・A-15・A-19・A-22・A-27・A-31 と同じ）
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）
+- 内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。外部キーの無い ``target_id`` が後から作った別の行を指さないため。CR-012）
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ class EstimateRecord(Base):
         CheckConstraint("input_value >= 0", name="input_value"),
         # 対象ごとの履歴（API-EST-002）と横断照会（RULE-WBS-008）の読み出し
         Index("ix_estimate_records_project_id_target", "project_id", "target_type", "target_id"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -28,6 +28,17 @@ export function errorResponse(status: number, code: string, message: string): Re
   return jsonResponse(status, { error: { code, message, details: [] } });
 }
 
+/**
+ * 一覧（6.1）の応答：all を要求の limit（既定 100）・offset で切り、total に all の件数を入れて返す。
+ * 1000 件を超える一覧を頁を読み足して読む試験に使う。extra は一覧の他の欄（project_id・dependencies など）
+ */
+export function pagedResponse(all: unknown[], call: RecordedCall, extra: Record<string, unknown> = {}): Response {
+  const query = new URLSearchParams(call.url.split("?")[1] ?? "");
+  const limit = Number(query.get("limit") ?? "100");
+  const offset = Number(query.get("offset") ?? "0");
+  return jsonResponse(200, { ...extra, items: all.slice(offset, offset + limit), total: all.length, limit, offset });
+}
+
 /** 応答の表を受け、fetch を差し替える。呼ばれた要求は calls に順に残る */
 export function mockApi(routes: Record<string, RouteHandler>) {
   const calls: RecordedCall[] = [];

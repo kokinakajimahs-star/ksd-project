@@ -3,12 +3,26 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
+import { ApiError } from "../../api/client";
 import { login } from "../../api/cmn";
 import { describeError } from "../../api/errors";
 import { useSession, type LoginRedirectState } from "../../auth/session";
 import { LOGIN_ID_MAX, PASSWORD_MAX } from "./limits";
 
 export const AFTER_LOGIN_PATH = "/projects";
+
+/**
+ * ログインの 401 の文言。サーバはログイン名が無い・無効・ロック中・パスワードの誤りを同じ 401 で返す（NFR-04）ので、
+ * 画面もどれに当たったか・ロックしているかを明かさず、ロック中の人にも当てはまる言い方にする
+ */
+export const LOGIN_FAILED_MESSAGE = "ログイン名またはパスワードが違うか、しばらくログインできません";
+
+function loginErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 401) {
+    return LOGIN_FAILED_MESSAGE;
+  }
+  return describeError(error);
+}
 
 function redirectTarget(state: unknown): string {
   const from = (state as Partial<LoginRedirectState> | null)?.from;
@@ -43,7 +57,7 @@ export default function LoginPage() {
       signIn(response);
       navigate(target, { replace: true });
     } catch (e: unknown) {
-      setError(describeError(e));
+      setError(loginErrorMessage(e));
       setPassword("");
       setSubmitting(false);
     }

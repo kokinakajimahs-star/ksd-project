@@ -1,18 +1,21 @@
 """表形式の入出力（INT）のユースケース（設計書 6.2 の API-INT-001・002、6.3、9 章。要求仕様書 INT-01・BR-02）。
 
-- 権限（RULE-AUTH-001）：出力は data.export、取込は data.import と対象の書く権限（``wbs`` は wbs.edit、``activities`` は
+- 権限（RULE-AUTH-001）：出力は data.export（``time-entries`` は effort.view も。設計書 1.3・CR-015）、取込は data.import と対象の書く権限（``wbs`` は wbs.edit、``activities`` は
   schedule.edit。どちらも見積の列を変える行があれば estimate.edit も。``time-entries`` は data.import だけ。設計書 1.1・CR-006）。
   委託先だけで読む利用者（9.2 の注記）の出力は、
   自分の割当の活動とその WBS の経路に絞る（見えない活動の先行・実績は出さない）
 - 列・照合・検査・往復の一致は RULE-INT-001（``app.domain.tabular``）。このモジュールは DB の行を 6.3 の行へ直して渡し、
   取込の計画（``ImportPlan``）を DB へ書く
 - 形式：CSV は ``encode_csv``・``decode_csv``（UTF-8 の BOM 付き）。xlsx は openpyxl で 1 枚目のシートに同じ表を置く（6.3）。
-  出力の xlsx のセルは全て文字（``=`` で始まる名称も式にしない。往復で一致させる）
+  出力の xlsx のセルは全て文字（``=`` で始まる名称も式にしない。往復で一致させる）。CSV は式として読まれる文字で始まるセルの
+  先頭へ ``'`` を足し、取込で外す（``encode_csv``・``decode_csv``。6.3・CR-019）
 - 取込は全行を検査し、誤りがあれば何も書かない（6.3）。``dry_run`` は検査と書く行の一覧だけを返す。
+  ファイルの大きさ（``PMT_IMPORT_MAX_BYTES``。API 層が本体を読むときに止める）と行の数（``PMT_IMPORT_MAX_ROWS``。見出しを除く）
+  を超えれば 400 ``VALIDATION_ERROR`` で何も書かない（``dry_run`` でも同じ。6.3・CR-019）
   誤りのある取込（``dry_run`` でない）は 422 ``IMPORT_INVALID``（``details`` が ``{row, column, code, message}`` の配列）
 - 書くときは 1 つのトランザクションで、既存の API と同じ規則を当てる：WBS は RULE-WBS-002 の採番（``new_element_code``）・
   移動（``move_element``。ID は変えない）・RULE-WBS-006 の EDIT（承認待ちは 409）、活動は希望開始日を稼働日へ寄せて日程を計算し直す
-  （RULE-SCH-002・003）、見積の値の変更は見積の記録（``estimate_records``。EST-08）を足す、実績工数の 0 時間は行を持たない
+  （RULE-SCH-002・003。寄せた希望開始日が今と違いプロジェクトの開始日より前なら検査の誤り ``BEFORE_PROJECT_START``。CR-018）、見積の値の変更は見積の記録（``estimate_records``。EST-08）を足す、実績工数の 0 時間は行を持たない
 - 書き込みは ORM を通すので変更履歴（``audit_logs``）に残る（6.1。A-37。割当の置き換えの一括 DELETE は A-37 の限界のとおり記録されない）
 
 詳細と、6.2・6.3 に定めの無かったことの判断は docs/decisions/ASSUMPTIONS.md A-39。
@@ -27,6 +30,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from io import BytesIO
+from itertools import islice
 from typing import Final
 
 from openpyxl import Workbook, load_workbook
@@ -74,20 +78,28 @@ from app.models.prj import ProjectMember
 from app.models.sch import Activity, ActivityDependency
 from app.models.wbs import WbsCodeHistory, WbsDictionaryEntry, WbsElement
 from app.services.auth import authorize_project
-from app.services.estimate import _hours_per_day, _visible
+from app.services.estimate import project_hours_per_day, visible_scope
 from app.services.project_access import ProjectAccess
-from app.services.schedule import Plan, ScheduleLinks, calculate_and_store, load_plan, resolve_activity_dates
+from app.services.schedule import (
+    Plan,
+    ScheduleLinks,
+    calculate_and_store,
+    load_plan,
+    resolve_activity_dates,
+    starts_before_project,
+)
 from app.services.wbs import (
     ActivitiesReader,
     WbsContext,
-    _coded,
-    _load,
-    _mark_edited,
-    _preorder,
+    coded_element,
+    load_wbs_context,
+    mark_wbs_edited,
+    preorder_elements,
 )
 
 DATA_EXPORT: Final = "data.export"
 DATA_IMPORT: Final = "data.import"
+EFFORT_VIEW: Final = "effort.view"
 WBS_EDIT: Final = "wbs.edit"
 SCHEDULE_EDIT: Final = "schedule.edit"
 ESTIMATE_EDIT: Final = "estimate.edit"
@@ -150,8 +162,23 @@ def _unreadable(message: str) -> TabularFileError:
     return TabularFileError([ImportIssue(HEADER_ROW, None, ImportIssueCode.FILE_UNREADABLE, message)])
 
 
-def _xlsx_grid(data: bytes) -> list[list[object]]:
-    """xlsx の 1 枚目のシートの格子（1 行目が見出し）。xlsx として読めなければ ``TabularFileError``。"""
+def file_too_large(max_bytes: int) -> AppError:
+    """取込のファイルが ``PMT_IMPORT_MAX_BYTES`` を超えた（400 ``VALIDATION_ERROR``。何も書かない。6.3・CR-019）。"""
+    return AppError(400, "VALIDATION_ERROR", "取込のファイルが大きすぎます",
+                    details=[{"loc": ["body"], "message": f"ファイルは {max_bytes} バイトまでです（PMT_IMPORT_MAX_BYTES）"}])
+
+
+def _too_many_rows(max_rows: int) -> AppError:
+    """取込のファイルの行（見出しを除く）が ``PMT_IMPORT_MAX_ROWS`` を超えた（400 ``VALIDATION_ERROR``。6.3・CR-019）。"""
+    return AppError(400, "VALIDATION_ERROR", "取込のファイルの行が多すぎます",
+                    details=[{"loc": ["body"], "message": f"データの行は {max_rows} 行までです（見出しを除く。PMT_IMPORT_MAX_ROWS）"}])
+
+
+def _xlsx_grid(data: bytes, max_rows: int) -> list[list[object]]:
+    """xlsx の 1 枚目のシートの格子（1 行目が見出し）。xlsx として読めなければ ``TabularFileError``。
+
+    見出しと ``max_rows`` 行を超える行があれば、そこで読むのを止めて 400（行の多いシートを全て読まない。CR-019）。
+    """
     try:
         workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:  # 壊れた・xlsx でないファイル（zip・XML・形式の誤りなど openpyxl は様々な例外を投げる）
@@ -160,8 +187,11 @@ def _xlsx_grid(data: bytes) -> list[list[object]]:
         if not workbook.worksheets:
             raise _unreadable("xlsx にシートが無い")
         sheet = workbook.worksheets[0]
-        return [[_xlsx_value(v) for v in row] for row in sheet.iter_rows(values_only=True)]
-    except TabularFileError:
+        rows = list(islice(sheet.iter_rows(values_only=True), HEADER_ROW + max_rows + 1))
+        if len(rows) > HEADER_ROW + max_rows:
+            raise _too_many_rows(max_rows)
+        return [[_xlsx_value(v) for v in row] for row in rows]
+    except (TabularFileError, AppError):
         raise
     except Exception as exc:  # シートの XML が壊れている
         raise _unreadable(f"xlsx の 1 枚目のシートを読めない（{type(exc).__name__}）") from exc
@@ -169,11 +199,17 @@ def _xlsx_grid(data: bytes) -> list[list[object]]:
         workbook.close()
 
 
-def read_grid(file_format: FileFormat, data: bytes) -> list[list[object]]:
-    """ファイルのバイト列をセルの格子にする。読めなければ ``TabularFileError``（6.3 の誤りの形）。"""
+def read_grid(file_format: FileFormat, data: bytes, *, max_rows: int) -> list[list[object]]:
+    """ファイルのバイト列をセルの格子にする。読めなければ ``TabularFileError``（6.3 の誤りの形）。
+
+    見出しを除く行が ``max_rows`` を超えれば 400 ``VALIDATION_ERROR``（``PMT_IMPORT_MAX_ROWS``。6.3・CR-019）。
+    """
     if file_format is FileFormat.CSV:
-        return [list(row) for row in decode_csv(data)]
-    return _xlsx_grid(data)
+        grid: list[list[object]] = [list(row) for row in decode_csv(data)]
+        if len(grid) > HEADER_ROW + max_rows:
+            raise _too_many_rows(max_rows)
+        return grid
+    return _xlsx_grid(data, max_rows)
 
 
 def write_file(file_format: FileFormat, grid: Sequence[Sequence[str]], target: TabularTarget) -> bytes:
@@ -246,7 +282,7 @@ def _add_estimate_record(
     """見積の値を変えた記録を 1 行足す（EST-08。単位は人時。API-EST-001 と同じ形）。"""
     record = record_estimate(
         project_id=project_id, target_type=target_type, target_id=target_id, input_value=hours,
-        input_unit=InputUnit.HOUR, hours_per_day=_hours_per_day(session, project_id), entered_by=actor.id,
+        input_unit=InputUnit.HOUR, hours_per_day=project_hours_per_day(session, project_id), entered_by=actor.id,
         entered_at=now,
     )
     session.add(EstimateRecord(
@@ -347,14 +383,18 @@ def export_data(
 
     行の順：``wbs`` は WBS の並び（先行順・兄弟は表示順）、``activities`` は WBS の並び → WP の中の表示順、
     ``time-entries`` は作業日 → ログインID → 活動ID。委託先だけで読む利用者は自分の割当の範囲だけ（RULE-AUTH-001）。
+    実績工数（``time-entries``）は data.export に加えて effort.view も要る（無ければ 403。API-EFF-004 で他人の実績を読めない人に
+    出させない。設計書 1.3 の API-INT-001・CR-015）。
     """
     table = authorize_project(session, access, actor, project_id, DATA_EXPORT)
+    if target is TabularTarget.TIME_ENTRIES:
+        authorize_project(session, access, actor, project_id, EFFORT_VIEW)
     plan = load_plan(session, project_id)
-    visible = _visible(session, access, actor, project_id, table, plan.elements, plan.activities)
+    visible = visible_scope(session, access, actor, project_id, table, plan.elements, plan.activities)
     rows: list[WbsRow] | list[ActivityRow] | list[TimeEntryRow]
     if target is TabularTarget.WBS:
         current = _wbs_rows(session, plan.elements, _dictionaries(session, (e.id for e in plan.elements)))
-        rows = [current[e.id] for e, _ in _preorder(plan.elements) if visible is None or e.id in visible.element_ids]
+        rows = [current[e.id] for e, _ in preorder_elements(plan.elements) if visible is None or e.id in visible.element_ids]
     elif target is TabularTarget.ACTIVITIES:
         rows = _export_activities(session, links, project_id, plan.elements, plan.ordered_activities(),
                                   plan.dependencies, visible)
@@ -440,6 +480,7 @@ def import_data(
     *,
     dry_run: bool,
     now: datetime,
+    max_rows: int,
 ) -> ImportResult:
     """6.3 の表を取り込む（data.import と対象の書く権限。INT-01・BR-02）。全行を検査し、誤りが 1 件でもあれば何も書かない。
 
@@ -447,6 +488,7 @@ def import_data(
     WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006。``dry_run`` でも同じ）。
     権限（設計書 1.1 の API-INT-002・CR-006）：data.import に加えて、``wbs`` は wbs.edit、``activities`` は schedule.edit を
     初めに確かめる（無ければ 403。何も読まない）。見積の列を変える行があれば estimate.edit も確かめる（行の検査の後。``dry_run`` でも同じ）。
+    見出しを除く行が ``max_rows``（``PMT_IMPORT_MAX_ROWS``）を超えれば、検査の前に 400 ``VALIDATION_ERROR``（``dry_run`` でも同じ。CR-019）。
     """
     authorize_project(session, access, actor, project_id, DATA_IMPORT)
     write_permission = _WRITE_PERMISSIONS.get(target)
@@ -457,7 +499,7 @@ def import_data(
         authorize_project(session, access, actor, project_id, ESTIMATE_EDIT)
 
     try:
-        grid = read_grid(file_format, data)
+        grid = read_grid(file_format, data, max_rows=max_rows)
     except TabularFileError as exc:
         return _rejected(target, file_format, dry_run, exc.issues)
     if target is TabularTarget.WBS:
@@ -500,7 +542,9 @@ def _import_wbs(
     file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.WBS
-    context = _load(session, project_id, activities)
+    # 書く取込は WBS の状態の判定と採番を、プロジェクト・採番規則の行をロックした後の値で行う（API-WBS-002〜004 と同じ。A-49 の 3）。
+    # 確かめるだけ（dry_run）は何も書かない
+    context = load_wbs_context(session, project_id, activities, for_update=not dry_run)
     dictionaries = _dictionaries(session, (e.id for e in context.elements))
     current = _wbs_rows(session, context.elements, dictionaries)
     assignable = _assignable(session, project_id)
@@ -508,7 +552,7 @@ def _import_wbs(
     known = set(assignable) | {r.responsible_login_id for r in current.values() if r.responsible_login_id is not None}
     plan = plan_wbs_import(
         grid,
-        elements=[_coded(e) for e in context.elements],
+        elements=[coded_element(e) for e in context.elements],
         current=current,
         login_ids=known,
         history=_history(session, project_id),
@@ -537,7 +581,7 @@ def _import_wbs(
                             plan.unchanged)
 
     keys = _write_wbs(session, actor, context.project.id, context, dictionaries, plan.changes, assignable, now)
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return ImportResult(target, file_format, dry_run, True, (),
                         tuple(ChangeSummary(c.line, c.action.value, keys[c.line], c.changed) for c in plan.changes),
@@ -578,7 +622,7 @@ def _write_wbs(
         parent_id = parent_of(change)
         parent = None if parent_id is None else by_id[parent_id]
         try:
-            code = new_element_code(None if parent is None else _coded(parent), rule,
+            code = new_element_code(None if parent is None else coded_element(parent), rule,
                                     top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None)
         except WbsCodeError as exc:
             raise code_error(exc) from exc
@@ -621,7 +665,7 @@ def _write_wbs(
         element, new_parent_id = by_id[element_id], moves[element_id]
         try:
             result = move_element(
-                [_coded(e) for e in elements], element_id, new_parent_id, rule,
+                [coded_element(e) for e in elements], element_id, new_parent_id, rule,
                 top_last_child_seq=context.rule_row.top_last_child_seq
                 if new_parent_id is None and element.parent_id is not None else None,
             )
@@ -694,7 +738,7 @@ def _import_activities(
     login_ids.update(assignable)
     result = plan_activity_import(
         grid,
-        elements=[_coded(e) for e in plan.elements],
+        elements=[coded_element(e) for e in plan.elements],
         work_package_ids=[e.id for e in plan.elements if e.kind == WORK_PACKAGE],
         current=current,
         login_ids=login_ids,
@@ -711,6 +755,16 @@ def _import_activities(
             if login not in assignable:
                 issues.append(ImportIssue(change.line, column, ImportIssueCode.NOT_FOUND,
                                           f"ログインID {login!r} はプロジェクトのメンバーである有効な利用者でない"))
+    # 書く希望開始日（次の稼働日へ寄せた値。_write_activities と同じ）が今と違い、プロジェクトの開始日より前なら拒む（5.5・CR-018）
+    project_start = plan.project.start_date
+    for change in result.changes:
+        if change.action is ChangeAction.UPDATE and not set(change.changed) & set(_SCHEDULE_COLUMNS):
+            continue
+        start = _written_start(plan, change)
+        old = None if change.activity_id is None else plan.activity_by_id[change.activity_id].requested_start
+        if start is not None and starts_before_project(project_start, start, old):
+            issues.append(ImportIssue(change.line, ACTIVITY_COLUMNS[3], ImportIssueCode.BEFORE_PROJECT_START,
+                                      f"希望開始日 {start.isoformat()} がプロジェクトの開始日 {project_start.isoformat()} より前です"))
     if issues:
         return _rejected(target, file_format, dry_run, issues)
     if any(_changes_estimate(c.action, c.changed, c.row.estimate_hours, "見積（人時）") for c in result.changes):
@@ -730,6 +784,14 @@ def _import_activities(
     return ImportResult(target, file_format, dry_run, True, (),
                         tuple(ChangeSummary(c.line, c.action.value, keys[c.line], c.changed) for c in result.changes),
                         result.unchanged)
+
+
+def _written_start(plan: Plan, change: ActivityChange) -> date | None:
+    """取込の行から書く希望開始日（次の稼働日へ寄せる。API-SCH-002・003 と同じ。BR-04）。"""
+    row = change.row
+    start, _ = resolve_activity_dates(plan.calendar, start=row.requested_start, finish=None,
+                                      duration=row.duration_days, is_milestone=row.is_milestone)
+    return start
 
 
 def _write_activities(

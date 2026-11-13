@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_project_access
+from app.api.deps import get_business_zone, get_current_user, get_project_access, get_today
 from app.schemas.change import (
     AppliedOut,
     AuditLogList,
@@ -39,18 +39,16 @@ from app.services.project_access import ProjectAccess
 router = APIRouter(tags=["change"])
 
 
-def get_today(now: datetime = Depends(get_now)) -> date:
-    """是正措置の期限超過（RULE-CHG-005）の「今日」。``now``（UTC）の日付（docs/open-questions.md OQ-33 (1)）。"""
-    return now.date()
-
-
 def _change_request_out(view: ChangeRequestView) -> ChangeRequestOut:
+    """変更要求を返す全ての応答の形。委託先には影響（``impact``）と操作（``operations``）を null で返す（9.2・CR-016）。"""
     c = view.change_request
     return ChangeRequestOut(
         id=c.id, project_id=c.project_id, number=c.number, title=c.title, reason=c.reason,
-        target_codes=list(c.target_codes or []), operations=list(c.operations or []), status=c.status,  # type: ignore[arg-type]
-        impact=c.impact, created_by=c.created_by, submitted_at=c.submitted_at, applied_by=c.applied_by,
-        applied_at=c.applied_at, approval_request_id=view.approval_request_id,
+        target_codes=list(c.target_codes or []),
+        operations=None if view.hide_details else list(c.operations or []),
+        status=c.status,  # type: ignore[arg-type]
+        impact=None if view.hide_details else c.impact, created_by=c.created_by, submitted_at=c.submitted_at,
+        applied_by=c.applied_by, applied_at=c.applied_at, approval_request_id=view.approval_request_id,
     )
 
 
@@ -76,6 +74,7 @@ def create_change_request(
 
     権限は change.create。番号はプロジェクトの中の連番、状態は DRAFT。対象の WBS ID（旧 ID も可）が解決できなければ 422
     ``REFERENCE_NOT_FOUND``。変更内容（5.9）は今の計画へ当てて検査する（形の誤りは 400、参照・業務ルールの違反は 422。本計画は変えない）。
+    活動の希望開始日（``requested_start``）は次の稼働日へ寄せて保存し、寄せた値を返す（BR-04。API-SCH-002・003 と同じ）。
     """
     view = change_service.create_change_request(session, access, user, project_id, title=body.title,
                                                 reason=body.reason, target_codes=body.target_codes,
@@ -95,7 +94,8 @@ def list_change_requests(
 ) -> ChangeRequestList:
     """API-CHG-002 変更要求の一覧（状態で絞れる）。
 
-    権限は project.view。番号の順。委託先は自分の割当の活動の WBS の経路に入る変更要求だけ。
+    権限は project.view。番号の順。委託先は自分の割当の活動の WBS の経路に入る変更要求だけで、影響（``impact``）と
+    操作（``operations``）は null（9.2・CR-016。変更要求を返す他の応答も同じ）。
     """
     views, total = change_service.list_change_requests(session, access, user, project_id, status=status, limit=limit,
                                                        offset=offset)
@@ -113,7 +113,7 @@ def update_change_request(
 ) -> ChangeRequestOut:
     """API-CHG-003 変更要求を直す（DRAFT のときだけ）。
 
-    権限は change.create。DRAFT でなければ 409 ``INVALID_STATE``。載せた項目だけを変え、検査は起票と同じ。
+    権限は change.create。DRAFT でなければ 409 ``INVALID_STATE``。載せた項目だけを変え、検査と希望開始日の寄せは起票と同じ。
     """
     changes = body.model_dump(exclude_unset=True)
     for name in ("title", "reason", "target_codes", "operations"):
@@ -134,7 +134,7 @@ def analyze_change_request(
     """API-CHG-004 影響分析を流す（本計画は変えない）。
 
     権限は project.view。今の計画の写しに変更内容を当てて再計算し、5.9 の形で前後の差を返す（RULE-CHG-002）。
-    本計画にも変更要求にも書かない。反映済み・却下の変更要求は 409 ``INVALID_STATE``。
+    本計画にも変更要求にも書かない。反映済み・却下の変更要求は 409 ``INVALID_STATE``。委託先は 403（9.2・CR-016）。
     """
     impact = change_service.analyze_change_request(session, access, user, project_id, change_request_id)
     return ImpactOut(change_request_id=change_request_id, **impact)
@@ -188,11 +188,13 @@ def apply_change_request(
 
     権限は change.apply。APPROVED → APPLIED（それ以外は 409）。変更内容を本計画へ当て（RULE-CHG-001）、日程を計算し直し、
     スコープとスケジュールの新しい版（理由 CHANGE_REQUEST）を作る（RULE-CHG-004。旧版は残す）。
+    活動の希望開始日が今と違う値でプロジェクトの開始日より前になるなら何も書かずに 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
     """
     view = change_service.apply_change_request(session, access, user, project_id, change_request_id, now=now)
     return AppliedOut(
         change_request=_change_request_out(ChangeRequestView(change_request=view.change_request,
-                                                             approval_request_id=view.approval_request_id)),
+                                                             approval_request_id=view.approval_request_id,
+                                                             hide_details=view.hide_details)),
         scope_baseline=BaselineVersionOut(id=view.scope_baseline.id, version=view.scope_baseline.version,
                                           reason=view.scope_baseline.reason),
         schedule_baseline=BaselineVersionOut(id=view.schedule_baseline.id, version=view.schedule_baseline.version,
@@ -275,15 +277,18 @@ def search_audit_logs(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
+    zone: tzinfo = Depends(get_business_zone),
 ) -> AuditLogList:
     """API-CHG-010 変更履歴の検索（期間・変更者・対象・WBS ID）。
 
-    権限は audit.view。期間（``date_from``〜``date_to``。UTC の日付で両端を含む）・変更者（``user_id``）・対象（``entity_type``・
-    ``entity_id``）・WBS ID（記録した時点の ID）で絞る。新しい順。履歴は追記だけで、更新・削除の API は無い（4.2・NFR-05）。
+    権限は audit.view。期間（``date_from``〜``date_to``。業務の時間帯の日付で両端を含む。設計書 1.3・CR-019）・変更者（``user_id``）・
+    対象（``entity_type``・``entity_id``）・WBS ID（記録した時点の ID）で絞る。新しい順。履歴は追記だけで、更新・削除の API は無い
+    （4.2・NFR-05）。
     """
     rows, total = change_service.search_audit_logs(session, access, user, project_id, date_from=date_from,
                                                    date_to=date_to, user_id=user_id, entity_type=entity_type,
-                                                   entity_id=entity_id, wbs_code=wbs_code, limit=limit, offset=offset)
+                                                   entity_id=entity_id, wbs_code=wbs_code, limit=limit, offset=offset,
+                                                   zone=zone)
     items = [
         AuditLogOut(id=r.id, occurred_at=r.occurred_at, user_id=r.user_id, project_id=r.project_id,
                     entity_type=r.entity_type, entity_id=r.entity_id, wbs_code=r.wbs_code,

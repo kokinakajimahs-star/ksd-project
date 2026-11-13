@@ -11,7 +11,9 @@ export function makeUser(overrides: Partial<User> = {}): User {
     email: null,
     organization: null,
     is_system_admin: true,
+    can_create_project: false,
     is_active: true,
+    locked_until: null,
     ...overrides,
   };
 }

@@ -8,6 +8,7 @@
 - 工数は人時の小数 ``Numeric(10,2)``（2.4）。負の工数は DB も拒む（RULE-EFF-005 の「負の値の禁止」）。
   実績工数は 1 行でも 24 時間を超えない（1 日の合計 24 時間以下（EFF-02・RULE-EFF-005）の必要条件。日の合計はドメインが見る）
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）
+- 全ての表の内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
 
 ``variance_notes.corrective_action_id`` の ``corrective_actions.id``（DB-CHG-002）への外部キーは、
 ``corrective_actions`` を作る移行（db:CHG の ``0007_chg``）で張った（``scope_baselines.change_request_id`` と同じ形。ASSUMPTIONS.md A-15・A-19・A-27）。
@@ -43,6 +44,7 @@ class Assignment(Base):
     __table_args__ = (
         UniqueConstraint("activity_id", "user_id"),
         CheckConstraint("planned_hours IS NULL OR planned_hours >= 0", name="planned_hours"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -64,6 +66,7 @@ class TimeEntry(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "activity_id", "work_date"),
         CheckConstraint(f"hours >= 0 AND hours <= {TIME_ENTRY_MAX_HOURS}", name="hours"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -85,6 +88,7 @@ class VarianceNote(Base):
     """
 
     __tablename__ = "variance_notes"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))

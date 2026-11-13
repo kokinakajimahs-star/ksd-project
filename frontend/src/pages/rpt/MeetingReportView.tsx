@@ -1,6 +1,7 @@
 // 定例会議レポートの本体（設計書 7.4）。UI-RPT-001 と、REPORT の共有ビュー（UI-RPT-002）が同じものを出す。
 // 上段：ガント＋イナズマ線（報告日の前後 4 週）、下段左：遅延一覧（ずれの大きい順・遅延理由・完了見込み）、
-// 下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要 KPI。値の並び・計算はサーバ（RULE-RPT-001）のまま出す
+// 下段中：マイルストーンの状況（予定日・見込み日・ずれ）、下段右：主要 KPI。値の並び・計算はサーバ（RULE-RPT-001）のまま出す。
+// 進捗の値は確定済みなら確定時の写し、計画の値は表示した時点の最新計画（CR-013）なので、その旨を注記する
 import type { Judgement } from "../../api/prg";
 import type { MeetingReport, ReportKpi } from "../../api/rpt";
 import GanttChart from "../../components/gantt/GanttChart";
@@ -69,8 +70,12 @@ export default function MeetingReportView({ report, unit }: { report: MeetingRep
     <div className="meeting-report-sheet">
       <style>{MEETING_REPORT_CSS}</style>
       <p className="report-meta">
-        報告日 {report.report_date}（{reportStatusLabel(report.status)}）・値：{sourceLabel(report.source)}・表示の範囲{" "}
+        報告日 {report.report_date}（{reportStatusLabel(report.status)}）・進捗の値：{sourceLabel(report.source)}・表示の範囲{" "}
         {report.window.start}〜{report.window.end}
+      </p>
+      {/* 計画の値は確定済みでも表示した時点の最新計画（7.4。設計書 1.2・CR-013）。印刷にも残す */}
+      <p className="note" data-note="plan-source">
+        計画は表示した時点の最新計画（ガントのバー、マイルストーンの予定日・見込み日・ずれ）
       </p>
       {report.restricted && <p className="note">自分の割当の活動だけを表示している（主要 KPI は出さない）</p>}
 
