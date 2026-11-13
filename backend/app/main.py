@@ -1,6 +1,7 @@
 """FastAPI のアプリの生成とルータの登録（設計書 1.2・2.1・6.1）。
 
 開発時の起動：``.venv/bin/uvicorn app.main:app --app-dir backend --reload``
+（API の説明 ``/docs`` を使うときは ``PMT_API_DOCS=true`` を渡す。既定は出さない。CR-019）
 
 ``app`` は最初に参照されたときに作る（モジュールを import しただけでは環境変数を読まず、DB のエンジンも作らない）。
 試験は ``create_app(settings)`` で接続先を差し替えて作る。
@@ -41,6 +42,10 @@ from app.services.wbs import (
 )
 
 API_PREFIX = "/api/v1"
+# API の説明の口（設計書 6.1。PMT_API_DOCS が真のときだけ出す。CR-019）
+OPENAPI_URL = f"{API_PREFIX}/openapi.json"
+DOCS_URL = "/docs"
+REDOC_URL = "/redoc"
 
 # HTTP の状態コード → エラーのコード・文言（設計書 2.4・6.1。文言は日本語）
 _HTTP_ERRORS: dict[int, tuple[str, str]] = {
@@ -158,7 +163,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     engine = create_db_engine(settings.database_url)
 
-    app = FastAPI(title="PMT", version="0.1.0", openapi_url=f"{API_PREFIX}/openapi.json", lifespan=_lifespan)
+    # API の説明（/docs・/redoc・/api/v1/openapi.json）は PMT_API_DOCS が真のときだけ出す（6.1・CR-019）
+    docs = settings.api_docs
+    app = FastAPI(title="PMT", version="0.1.0", openapi_url=OPENAPI_URL if docs else None,
+                  docs_url=DOCS_URL if docs else None, redoc_url=REDOC_URL if docs else None, lifespan=_lifespan)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
