@@ -1439,6 +1439,67 @@
   16. OQ-42 (25)（2026-11-12 の追加）：`frontend/package.json` に `engines`（Node 20 以上）を置き、`frontend/.npmrc` の `engine-strict=true` で古い Node の `npm ci` を止める
      （`scripts/setup-dev.sh` は保護パスなので変えない）
 - **理由:** 設計書 1.2 と 6.1・1.3・2.3・BR-04・BR-13・NFR-01。利用者の推奨案での決定
-- **影響範囲:** 実装した時点で書き足す
+- **影響範囲:**
+  - CR-010（wt/oq-g1）：models/cmn.py（users の 3 列・CHECK failed_login_count >= 0）・移行 0011_users_auth・config.py（3 設定）・services/auth.py
+    （ロックの判定・principal_of の project.create・API-CMN-007 の 422・API-CMN-008）・services/users.py（方針の検査・初期管理者）・services/project_access.py
+    （project_ids）・schemas/users.py・api/deps.py・auth.py・users.py・main.py。画面 LoginPage・UserAdminPage・RolePermissionsSection・api/cmn.ts
+    - 実装の判断：システム管理者の API-CMN-008 は全てのプロジェクト（メンバーでなければ roles は空、権限は全て・view_level ALL）。初期管理者のパスワードは
+      利用者が既にいても起動時に確かめる（反すれば起動しない）。無効の利用者の誤りも数える。ロック中は now < locked_until。ログインの利用者の行を
+      with_for_update で読む。401 の文言は「ログイン名またはパスワードが違うか、しばらくログインできません」。パスワードを設定し直すとロックを解く（本人の変更でも）。
+      作成では方針の検査（400）がログイン名の重複（409）より先
+  - 1・2・13・16（wt/oq-g5）：api/pages.ts の fetchAllPages（読む間に total が変われば画面で 409 LIST_CHANGED を作って読み直しを促す）・lib/leaveGuard.ts・
+    chg/operations.ts ほか・ApprovalsPage（100 件の頁送りをやめて全件）・WbsReviewPage・StatusReportPage・EffortPage・GanttPage・ActivityListPage・MembersSection・
+    CorrectiveActionsPage・useProjectMembers・gantt/scale.ts（unplacedVertexCounts）・package.json の engines（`^20.0.0 || ^22.0.0 || >=24.0.0`。vitest 4 の
+    engines に合わせ、「Node 20 以上」のうち依存が動く版に絞った）・frontend/.npmrc・package-lock.json の root の engines
+  - CR-013・9〜12（wt/oq-g4）：domain/report.py（マイルストーンを最新計画のガントの行から求める）・services/report.py（確定済みでも日程が未計算なら 409。
+    写しの判定を Judgement に戻す＝既存の不具合の修正：確定済みのレポートの KPI の遅れの件数が常に 0 だった）・MeetingReportView の注記・domain/change.py
+    （roll_requested_starts。起票・更新の時点で寄せる）・api 層のモデルの import をやめる（サービスで型を再公開）・サービス間の非公開の関数を公開の名前に
+    （numbering_rule_row・load_wbs_context・coded_element・mark_wbs_edited・preorder_elements・project_hours_per_day・visible_scope）・RULE の宣言を 5.1 の実装先の
+    40 か所に 1 つずつ・共有リンクの 404 を 1 つの応答に
+  - CR-011（wt/oq-g2）：services/wbs.py（見える範囲の文脈で検査・木の集計・責任分担表・範囲のベースラインの件数）・estimate.py（見える分へ絞ってから集計）・
+    schedule.py（依存の相手・ベースラインの項目の件数）・progress.py（entry_count・見えない活動の 404・approved の権限）・effort.py（API-EFF-003 の見えない活動の 404）・
+    画面 EntryEditor・StatusReportPage（承認の欄は progress.enter_all だけ）
+    - 直した API：WBS-001・011・012・021、EST-003、SCH-001・012、PRG-002・006・009（report.entry_count）。404 にした API：PRG-003・004・EFF-003
+      （判定の順は 404（無い・見えない）→ 403（自分の割当。全て読める人だけ）→ 409 → 400）
+    - approved の「変える」：id で既存の項目と対応づけ、保存済みと違う値、または足す項目に真を置くこと。同じ値は変えるに数えない。id の誤り（400）の後に判定し、
+      1 件でもあれば 403 で何も書かない（details に loc ["body","items",i,"approved"]）
+  - CR-012 の 1・3（補い）・4〜8（wt/oq-g3a）：移行 0012_db_integrity（SQLite の 33 表を AUTOINCREMENT で作り直す・JSON の null を NULL に・採番規則の行の補い・
+    CHECK 3 つ・FK の名前の付け直し。新しい CHECK に反する行や NOT NULL の JSON 列の null があれば、直さずに止まる）・models の 8 ファイル（全ての表に
+    sqlite_autoincrement、JSON の 9 列を none_as_null、CHECK、短い FK 名）・schemas/numeric.py（numeric_column）・schemas/progress.py・projects.py
+    - CHECK：`ck_approval_requests_decided_pair`（PENDING は判断者・時刻が空、APPROVED・REJECTED は両方あり）、`ck_change_requests_submitted_at`（DRAFT だけ空。
+      取り下げで空に戻す今の動きに合わせた）、`ck_change_requests_applied_pair`（APPLIED だけ反映者・時刻あり）
+    - 小数の桁を確かめる入力：percent_complete・remaining_hours（2 桁）、weight（2 桁・0.01 以上）、delay_tolerance_days・delay_extract_days（2 桁・9999.99 以下）。
+      誤りは 400 VALIDATION_ERROR（type は decimal_max_places・decimal_whole_digits。既存の Decimal の入力と同じ）
+    - 付け直した名前：`fk_schedule_baseline_items_schedule_baseline_id`（元は SQLite で 66 文字の名前、PostgreSQL で SQLAlchemy が縮めた
+      `fk_schedule_baseline_items_schedule_baseline_id_schedul_ee77`）
+  - 3（wt/oq-g3b）：infra/db.py（lock_row・lock_rows・is_unique_violation）・main.py（IntegrityError のうち一意制約の違反だけを 409 CONFLICT。CHECK・外部キー・
+    NOT NULL は今どおり 500）・services/wbs.py（numbering_rule_row は読む経路で書かず既定の値を返し、書く経路はロックして無ければ作る。読む経路の commit を除いた）・
+    change.py・progress.py・io.py。ロックの順は change_requests → projects → wbs_numbering_rules → approval_requests（status_reports は単独）
+    - ロックする操作：WBS の編集（API-WBS-002〜005・007・010・013、取込）・採番規則の変更・レビュー（開く・閉じる・指摘を書く・更新）・申請・判断、変更要求の修正・提出・
+      取り下げ・反映、報告日の入力・確定・算定方式の変更による求め直し。依頼の範囲（状態を変える操作）より広く、採番の順を揃えるため WBS の全ての編集をロックした
+    - 一意制約の見分け：PostgreSQL は sqlstate 23505、SQLite は sqlite_errorname が SQLITE_CONSTRAINT_UNIQUE・PRIMARYKEY
+  - CR-014（wt/oq-open）：services/progress.py（`replace_progress_items` の CR-011 の判定と 1 つにし、id の誤りの 400 の後、progress.enter_all を持たないときだけ判定する。守る項目は保存済みの値で承認済みか WORK のもの）・services/projects.py（`create_project` の同じトランザクションで、システム管理者でなければ作った人を `roles=["PM"]` のメンバーにする。所属は空）・画面 EntryEditor（保存済みの承認済みの項目と作業項目は、enter_own だけの人には種類を文字で出し、外すボタンを出さない）
+    - 403 の details：送った項目は `{"loc": ["body","items",i,"approved"|"item_type"]}`、消した項目は `{"loc": ["body","items"], "progress_item_id": id}`。未承認で作業でない項目を WORK に変えるのは許す（率を下げる向きにしか動かない）
+  - 独立レビューの指摘（wt/oq-open）：services/estimate.py（API-EST-001 は権限の確認の直後にプロジェクトの行をロックしてから WBS の状態を読む）・services/report.py（共有リンクの会議レポートの 409 の details に活動の ID を載せない）
 - **覆す場合:** CR の分は設計書を 1.1 に戻すことになる（Change Request を起票する）。実装の分は、その項目のコミットの差分を戻す
-- **限界:** 実装した時点で書き足す
+- **限界:**
+  - PostgreSQL では流していない（FOR UPDATE・CHECK・移行）
+  - CR-010：無いログイン名は DB に書かないので、応答の時間がわずかに違いうる。既にある短いパスワードの利用者はそのままログインできる（方針は設定するときに効く）。
+    システム管理者の API-CMN-008 はプロジェクトごとに権限を読む（件数が多いと遅い。未計測）。`PMT_INITIAL_ADMIN_PASSWORD` が 12 文字未満の環境はこの版から起動しない
+  - 13 c：BrowserRouter のため useBlocker を使えず、ブラウザの戻る・進む、コードからの移動（ログアウト）、画面の中で保存して読み直す操作では確かめない
+  - 2：利用者の一覧（prj/activeUsers.ts）・ベースライン・スコープは先頭 1000 件のまま（A-49 の 2 の対象外）
+  - 13 b：会議レポート（MeetingReportView）は行の番号が当たらない頂点を数えない（今の行に無い活動の数だけ）
+  - 9：既に保存された非稼働日の requested_start は移行で寄せない（日程の計算では次の稼働日として扱う）
+  - 10：API 層がドメインを直接 import する所は残る。サービス・モデル・infra の docstring に行頭の RULE の参照が残る（検証器の対象外）
+  - 12：共有リンクの応答の時間の差は扱わない
+  - CR-013：遅延一覧の予定・見込みの終了日は今の計画、ずれは写し（確定済み）
+  - CR-011：委託先の WBS の検査（SUM_MISMATCH など）は見える子だけで比べるので、全体では出ない差異が委託先にだけ出ることがある（9.2 の注記の字句どおり）。
+    件数は今の割当・今の WP の置き場で数える。書く権限（wbs.edit など）を委託先に与えたときの書き込みの応答は絞らない。progress.enter_own の人が承認済みの項目を
+    消す・名前や重みを変えるのは「approved を変える」に数えない。変更要求（API-CHG-002・004）の保存した影響（impact）と操作は絞らない（OQ-43）
+  - CR-012：0012 より前に今の最大より大きい id を消していた表は、その id が 1 度だけ使い直されうる（記録が無い）。PostgreSQL での 0012 の実行・json_typeof の判定・
+    元の FK 名は、SQL の描画とコードの読みで確かめただけ。大きな SQLite の DB で作り直す時間は測っていない
+  - 4：浮動小数の誤差を含む数（0.1+0.2 など）を送ると 400 になる（丸めない）。誤りの文言は Pydantic の英語（既存の Decimal の入力と同じ）
+  - 3：SQLite は FOR UPDATE を無視するので、試験は PostgreSQL の方言で FOR UPDATE が付くことと、ロックの直前に別のセッションが変えた値で判定することを見る。
+    実際の PostgreSQL でのロック待ち・デッドロックは確かめていない。申請の前提に効くスコープ項目・活動の見積、工数の群はロックしない
+  - CR-014：画面の守りは読み込んだ時点の値で決める（読み込んだ後に他の人が承認した項目は、読み直すまで画面では外せ、サーバが 403 を返す）。システム管理者が作ったプロジェクトは今どおりメンバーを作らない
+  - 独立レビュー（2026-11-13）で残したもの：報告日の入力の求め直し（`_refresh_open_entries`）と同時の入力の重なりは、報告日の行のロックの外で起こりうる（未確認）。API-PRG の作成・確定の応答の `entry_count` は委託先にも見える範囲で絞らない。共有リンクの `_build` の 422 `SCHEDULE_CYCLE`（details に活動の ID）は日程の計算の後には起きない経路として残した
