@@ -84,6 +84,20 @@ def _project(session: Session, code: str = "P-001") -> Project:
     return project
 
 
+def _project_at_old_revision(session: Session, code: str) -> Project:
+    """古い版まで移行した DB にプロジェクトを作る。責任者は SQL で入れる（ORM の ``User`` は最新の版の列を書くが、
+    古い版の ``users`` には後の移行（0011）で足した列が無い）。"""
+    session.execute(
+        sa.text("INSERT INTO users (login_id, display_name, password_hash) VALUES (:login, '利用者', 'scrypt$dummy')"),
+        {"login": f"owner-{code}"},
+    )
+    owner_id = session.scalar(sa.text("SELECT id FROM users WHERE login_id = :login"), {"login": f"owner-{code}"})
+    project = Project(code=code, name="プロジェクト", start_date=date(2026, 12, 1), owner_user_id=owner_id)
+    session.add(project)
+    session.flush()
+    return project
+
+
 def _element(
     session: Session,
     project: Project,
@@ -807,8 +821,8 @@ def test_migration_fills_top_last_child_seq_from_existing_first_level(tmp_path: 
     engine = create_db_engine(url)
     try:
         with Session(engine) as session:
-            filled = _project(session, "P-001")
-            empty = _project(session, "P-002")
+            filled = _project_at_old_revision(session, "P-001")
+            empty = _project_at_old_revision(session, "P-002")
             for project in (filled, empty):
                 session.execute(sa.text("INSERT INTO wbs_numbering_rules (project_id) VALUES (:p)"), {"p": project.id})
             insert = sa.text(

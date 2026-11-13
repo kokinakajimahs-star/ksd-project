@@ -4,6 +4,9 @@
 - ``PMT_TOKEN_TTL_HOURS``：認証トークンの有効期間（時間）。既定 12（設計書 6.1）
 - ``PMT_INITIAL_ADMIN_LOGIN``・``PMT_INITIAL_ADMIN_PASSWORD``：最初のシステム管理者。
   既定値を持たない（本番値を独自に決めない）。使う側が未指定なら fail fast する
+- ``PMT_PASSWORD_MIN_LENGTH``：パスワードの最小の長さ。既定 12（NFR-04。最大は 1024 で設定にしない）
+- ``PMT_LOGIN_MAX_FAILURES``：ログインを続けて誤るとロックする回数。既定 10（NFR-04）
+- ``PMT_LOGIN_LOCK_MINUTES``：ロックの長さ（分）。既定 15（NFR-04）
 
 ``.env`` ファイルは読まない（秘密情報をファイルに置かせない）。
 """
@@ -28,6 +31,10 @@ class Settings(BaseSettings):
     token_ttl_hours: int = Field(default=12, gt=0)
     initial_admin_login: str | None = None
     initial_admin_password: str | None = None
+    # 最大の長さ（1024。app.services.users の PASSWORD_MAX_LENGTH）を超える最小は、どのパスワードも通らないので拒む
+    password_min_length: int = Field(default=12, ge=1, le=1024)
+    login_max_failures: int = Field(default=10, gt=0)
+    login_lock_minutes: int = Field(default=15, gt=0)
 
 
 def get_settings() -> Settings:

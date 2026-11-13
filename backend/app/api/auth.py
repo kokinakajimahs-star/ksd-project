@@ -7,7 +7,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_bearer_token, get_current_user, get_project_access, get_token_ttl_hours
+from app.api.deps import (
+    get_bearer_token,
+    get_current_user,
+    get_login_lock_policy,
+    get_project_access,
+    get_token_ttl_hours,
+)
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
@@ -33,13 +39,16 @@ def login(
     session: Session = Depends(get_session),
     now: datetime = Depends(get_now),
     ttl_hours: int = Depends(get_token_ttl_hours),
+    lock_policy: auth_service.LoginLockPolicy = Depends(get_login_lock_policy),
 ) -> LoginResponse:
     """API-CMN-001 ログインしてトークンを得る。
 
-    認証を要らない。ログイン名が無い・パスワードが違う・無効な利用者は 401 ``INVALID_CREDENTIALS``。
+    認証を要らない。ログイン名が無い・ロック中・パスワードが違う・無効な利用者は、どれも同じ 401 ``INVALID_CREDENTIALS``。
+    続けて誤ると設定の回数でロックする（NFR-04）。
     """
     result = auth_service.login(
-        session, login_id=body.login_id, password=body.password, now=now, ttl_hours=ttl_hours
+        session, login_id=body.login_id, password=body.password, now=now, ttl_hours=ttl_hours,
+        lock_policy=lock_policy,
     )
     return LoginResponse(
         access_token=result.token, expires_at=result.expires_at, user=UserOut.model_validate(result.user)
@@ -94,6 +103,7 @@ def replace_role_permissions(
     """API-CMN-007 ロール×権限の表を置き換える。
 
     権限は permission.manage。載せなかったロールは何も持たなくなる。未知のロール・権限のコードは 400。
+    どのロールも permission.manage を持たない表は 422 ``NO_PERMISSION_MANAGER``。
     """
     table = auth_service.replace_role_permissions(
         session, access, user, project_id, ((grant.role, grant.permissions) for grant in body.roles)
@@ -110,6 +120,7 @@ def me(
     """API-CMN-008 自分の情報とプロジェクトごとの権限。
 
     ログインが要る。画面は権限の無い操作のボタンをこの応答で出し分ける（設計書 7.2。サーバでも必ず判定する）。
+    システム管理者は全てのプロジェクトを持つ（メンバーでないものはロールが空）。
     """
     mine = auth_service.my_permissions(session, access, user)
     return MeOut(

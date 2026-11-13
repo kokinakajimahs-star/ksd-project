@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.services import get_session
-from app.services.auth import User, authenticate, bind_actor
+from app.services.auth import LoginLockPolicy, User, authenticate, bind_actor
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
 from app.services.projects import NumberingRulesStore, ScheduleRecalculator
@@ -67,3 +67,16 @@ def get_schedule_recalculator(request: Request) -> ScheduleRecalculator:
 def get_token_ttl_hours(request: Request) -> int:
     """認証トークンの有効期間（時間。設定の ``PMT_TOKEN_TTL_HOURS``）。"""
     return int(request.app.state.settings.token_ttl_hours)
+
+
+def get_login_lock_policy(request: Request) -> LoginLockPolicy:
+    """ログインの試行の制限（設定の ``PMT_LOGIN_MAX_FAILURES``・``PMT_LOGIN_LOCK_MINUTES``。NFR-04）。"""
+    settings = request.app.state.settings
+    return LoginLockPolicy(
+        max_failures=int(settings.login_max_failures), lock_minutes=int(settings.login_lock_minutes)
+    )
+
+
+def get_password_min_length(request: Request) -> int:
+    """パスワードの最小の長さ（設定の ``PMT_PASSWORD_MIN_LENGTH``。NFR-04）。"""
+    return int(request.app.state.settings.password_min_length)

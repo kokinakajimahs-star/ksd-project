@@ -30,7 +30,8 @@ EXPIRES = datetime(2026, 11, 11, 0, 0, tzinfo=UTC)
 # 設計書 4.1 の「主な列」
 COLUMNS_4_1 = {
     "users": {
-        "id", "login_id", "display_name", "email", "password_hash", "is_system_admin", "is_active", "organization",
+        "id", "login_id", "display_name", "email", "password_hash", "is_system_admin", "can_create_project", "is_active",
+        "organization", "failed_login_count", "locked_until",
     },
     "role_permissions": {"id", "project_id", "role", "permission"},
     "share_links": {
@@ -62,12 +63,16 @@ def test_columns_match_design_4_1(table: str) -> None:
 
 
 def test_users_defaults_and_login_id_unique(db_session: Session) -> None:
-    """DB-CMN-001 users：login_id は一意。is_system_admin の既定は偽、is_active の既定は真。"""
+    """DB-CMN-001 users：login_id は一意。is_system_admin・can_create_project の既定は偽、is_active の既定は真、
+    failed_login_count の既定は 0、locked_until は空（設計書 1.2 の 4.1。CR-010）。"""
     user = _user(db_session)
     db_session.commit()
     db_session.refresh(user)
     assert user.is_system_admin is False
+    assert user.can_create_project is False
     assert user.is_active is True
+    assert user.failed_login_count == 0
+    assert user.locked_until is None
     assert user.email is None and user.organization is None
 
     db_session.add(User(login_id="u1", display_name="別の利用者", password_hash="scrypt$dummy"))
@@ -87,8 +92,25 @@ def test_users_server_defaults_apply_to_raw_insert(db_session: Session) -> None:
     db_session.execute(
         sa.text("INSERT INTO users (login_id, display_name, password_hash) VALUES ('raw', '利用者', 'h')")
     )
-    row = db_session.execute(sa.text("SELECT is_system_admin, is_active FROM users WHERE login_id = 'raw'")).one()
-    assert (bool(row[0]), bool(row[1])) == (False, True)
+    row = db_session.execute(
+        sa.text(
+            "SELECT is_system_admin, is_active, can_create_project, failed_login_count, locked_until "
+            "FROM users WHERE login_id = 'raw'"
+        )
+    ).one()
+    assert (bool(row[0]), bool(row[1]), bool(row[2]), row[3], row[4]) == (False, True, False, 0, None)
+
+
+def test_users_failed_login_count_is_not_negative(db_session: Session) -> None:
+    """DB-CMN-001 users：failed_login_count は 0 以上（DB の検査）。locked_until は UTC の時刻で往復する。"""
+    user = _user(db_session)
+    user.locked_until = datetime(2026, 11, 13, 18, 15, tzinfo=timezone(timedelta(hours=9)))
+    db_session.commit()
+    db_session.expire_all()
+    assert db_session.get(User, user.id).locked_until == datetime(2026, 11, 13, 9, 15, tzinfo=UTC)  # type: ignore[union-attr]
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(sa.text("UPDATE users SET failed_login_count = -1 WHERE id = :id"), {"id": user.id})
 
 
 def test_role_permissions_unique_per_project_role_permission(db_session: Session) -> None:

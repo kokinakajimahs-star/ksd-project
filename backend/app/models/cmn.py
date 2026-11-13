@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, false, true
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, false, text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infra.db import Base
@@ -27,9 +27,15 @@ TOKEN_HASH_LENGTH = 64
 
 # DB-CMN-001
 class User(Base):
-    """ユーザー。ログイン名は一意。無効にした利用者は ``is_active`` を偽にする（行は消さない）。"""
+    """ユーザー。ログイン名は一意。無効にした利用者は ``is_active`` を偽にする（行は消さない）。
+
+    - ``can_create_project``：システム管理者が許したプロジェクトの作成（9.1 の project.create。設計書 1.2・CR-010）
+    - ``failed_login_count``・``locked_until``：続けて誤ったログインの回数と、ロックの終わり（NFR-04。``locked_until`` が
+      今より後ならロック中。ロックした時に数えは 0 に戻す）
+    """
 
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("failed_login_count >= 0", name="failed_login_count"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     login_id: Mapped[str] = mapped_column(String(100), unique=True)
@@ -38,8 +44,11 @@ class User(Base):
     # hashlib.scrypt のハッシュ（塩と係数を含む文字列。形式は app.infra.security が決める）
     password_hash: Mapped[str] = mapped_column(String(255))
     is_system_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    can_create_project: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     organization: Mapped[str | None] = mapped_column(String(200))
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    locked_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 # DB-CMN-002

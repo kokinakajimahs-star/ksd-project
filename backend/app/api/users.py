@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_project_access
+from app.api.deps import get_current_user, get_password_min_length, get_project_access
 from app.schemas.users import UserCreate, UserList, UserOut, UserUpdate
 from app.services import get_session
 from app.services import users as users_service
@@ -39,10 +39,11 @@ def create_user(
     body: UserCreate,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
+    password_min_length: int = Depends(get_password_min_length),
 ) -> UserOut:
     """API-CMN-004 ユーザーを作る。
 
-    権限は user.admin。ログイン名が既にあれば 409 ``DUPLICATE_LOGIN_ID``。
+    権限は user.admin。パスワードが方針（NFR-04）に反すれば 400。ログイン名が既にあれば 409 ``DUPLICATE_LOGIN_ID``。
     """
     created = users_service.create_user(
         session,
@@ -50,9 +51,11 @@ def create_user(
         login_id=body.login_id,
         display_name=body.display_name,
         password=body.password,
+        password_min_length=password_min_length,
         email=body.email,
         organization=body.organization,
         is_system_admin=body.is_system_admin,
+        can_create_project=body.can_create_project,
     )
     return UserOut.model_validate(created)
 
@@ -64,11 +67,15 @@ def update_user(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     now: datetime = Depends(get_now),
+    password_min_length: int = Depends(get_password_min_length),
 ) -> UserOut:
     """API-CMN-005 ユーザーを変える・無効にする。
 
     権限は user.admin。載せた項目だけを変える（無効にするのは ``is_active: false``）。
+    パスワードが方針（NFR-04）に反すれば 400。パスワードを設定し直すとログインのロックを解く。
     有効なシステム管理者がいなくなる変更は 422 ``LAST_SYSTEM_ADMIN``。
     """
-    updated = users_service.update_user(session, user, user_id, body.model_dump(exclude_unset=True), now=now)
+    updated = users_service.update_user(
+        session, user, user_id, body.model_dump(exclude_unset=True), now=now, password_min_length=password_min_length
+    )
     return UserOut.model_validate(updated)
