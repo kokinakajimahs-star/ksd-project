@@ -247,10 +247,11 @@ def _project_of(session: Session, project_id: int) -> Project:
 
 @dataclass(frozen=True)
 class _EntryPermission:
-    """進捗を書く権限の確認の途中の値（自分の割当の判定に使う）。"""
+    """進捗を書く権限の確認の途中の値（自分の割当の判定と、算定項目の承認済みを変えられるかの判定に使う）。"""
 
     table: Mapping[str, frozenset[str]]
     membership: Membership | None
+    granted: frozenset[str]
 
 
 def _check_entry_permission(session: Session, access: ProjectAccess, actor: User, project_id: int) -> _EntryPermission:
@@ -265,7 +266,7 @@ def _check_entry_permission(session: Session, access: ProjectAccess, actor: User
     granted = effective_permissions(principal_of(actor), role_permissions=table, membership=membership)
     if not {ENTER_OWN, ENTER_ALL} & granted:
         raise forbidden()
-    return _EntryPermission(table=table, membership=membership)
+    return _EntryPermission(table=table, membership=membership, granted=frozenset(granted))
 
 
 def _check_own_activity(actor: User, permission: _EntryPermission, activity_id: int) -> None:
@@ -652,6 +653,9 @@ def replace_progress_items(
     無い活動・委託先に見えない活動は同じ 404、自分の割当でなければ 403（API-PRG-003 と同じ）。
     ``id`` を載せた項目はその項目を変え、載せない項目は足し、載せなかった既存の項目は消す。``id`` がこの活動の項目でない・
     同じ ``id`` が 2 つは 400。完了の時刻は、完了になったときに「今」、完了のままなら保ち、完了でなければ空。
+    ``approved`` を変えるのは progress.enter_all を持つ人だけ（6.2 の API-PRG-004）。enter_own だけの人が変えると 403
+    ``FORBIDDEN``（何も書かない）。「変える」は、``id`` を載せた項目では保存済みの値と違うこと、足す項目では真にすること
+    （省いた ``approved`` は偽）。保存済みと同じ値を送るのは変えたことにしない。
     置き換えた後、OPEN の報告日の入力の進捗率を求め直す。
     """
     permission = _check_entry_permission(session, access, actor, project_id)
@@ -668,6 +672,17 @@ def replace_progress_items(
         if item_id in seen:
             raise _invalid(["body", "items", index, "id"], "同じ算定項目が 2 回あります")
         seen.add(item_id)
+    if ENTER_ALL not in permission.granted:
+        approving = [
+            index for index, item in enumerate(items)
+            if bool(item.get("approved", False))
+            != (existing[item["id"]].approved if item.get("id") is not None else False)
+        ]
+        if approving:
+            raise AppError(403, "FORBIDDEN", "算定項目の承認済みを変えられるのは progress.enter_all を持つ人だけです",
+                           details=[{"loc": ["body", "items", index, "approved"],
+                                     "message": "承認済みは progress.enter_all を持つ人だけが変えられます"}
+                                    for index in approving])
 
     for item in items:
         done = bool(item.get("done", False))

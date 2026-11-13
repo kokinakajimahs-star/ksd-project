@@ -362,6 +362,7 @@ export default function StatusReportPage() {
           row={editingRow}
           canEnter={canEnterActivity(editingRow.activity_id)}
           canEditMethod={canEditMethod}
+          canApprove={canEnterAll}
           onSaved={saved}
           onClose={() => setEditingId(null)}
         />

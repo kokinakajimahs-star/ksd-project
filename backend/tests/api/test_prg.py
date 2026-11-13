@@ -370,6 +370,52 @@ def test_progress_items_and_method_drive_percent(world: World, client: TestClien
     assert world.line(report)["rows"][0]["percent_complete"] == 100.0
 
 
+def test_only_enter_all_changes_approved(app: FastAPI, world: World, client: TestClient) -> None:
+    """API-PRG-004（設計書 6.2）：``approved`` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人が変えると 403
+    （何も書かない）。足す項目を真にするのも変えるうち。保存済みと同じ値を送るのは変えたことにしない（項目は ``id`` で対応づける）。"""
+    a = world.add("A", duration_days=4)
+    world.report("2026-12-03")
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["executor"].id: {a}, world.users["contractor"].id: {a}}))
+    url = world.url(f"/activities/{a}/progress-items")
+
+    def put(who: str, *items: dict[str, Any]) -> Any:
+        return client.put(url, json={"items": list(items)}, headers=world.h[who])
+
+    def current() -> list[tuple[str, bool, bool]]:
+        return [(i["title"], i["done"], i["approved"]) for i in client.get(url, headers=world.h["viewer"]).json()["items"]]
+
+    # enter_own だけ（実行担当者・委託先）：承認済みで足すのは 403、偽（省いても偽）なら足せる
+    for who in ("executor", "contractor"):
+        refused = put(who, {"item_type": "WORK", "title": "下書き"}, {"item_type": "DELIVERABLE", "title": "設計書",
+                                                                     "approved": True})
+        assert refused.status_code == 403 and error_code(refused) == "FORBIDDEN", refused.text
+        assert [d["loc"] for d in refused.json()["error"]["details"]] == [["body", "items", 1, "approved"]]
+    assert current() == []
+    created = put("executor", {"item_type": "DELIVERABLE", "title": "設計書", "approved": False})
+    assert created.status_code == 200, created.text
+    item_id = created.json()["items"][0]["id"]
+    design = {"id": item_id, "item_type": "DELIVERABLE", "title": "設計書"}
+
+    # enter_own だけの人が保存済みの偽を真に変えるのは 403。enter_all（進捗管理担当者・PM）は変えられる
+    assert error_code(put("executor", {**design, "approved": True})) == "FORBIDDEN"
+    assert current() == [("設計書", False, False)]
+    approved = put("progress", {**design, "approved": True})
+    assert approved.status_code == 200, approved.text
+    assert current() == [("設計書", False, True)]
+
+    # 同じ値（真）を送って完了だけ変えるのは enter_own だけでも通る。省く（偽）のは真を偽へ変えることなので 403
+    kept = put("contractor", {**design, "done": True, "approved": True})
+    assert kept.status_code == 200, kept.text
+    assert current() == [("設計書", True, True)]
+    assert error_code(put("executor", {**design, "done": True})) == "FORBIDDEN"
+    assert error_code(put("executor", {**design, "done": True, "approved": False})) == "FORBIDDEN"
+    assert current() == [("設計書", True, True)]
+    both = put("pm", {**design, "done": True, "approved": False}, {"item_type": "CHECK", "title": "試験", "approved": True})
+    assert both.status_code == 200, both.text
+    assert current() == [("設計書", True, False), ("試験", False, True)]
+
+
 def test_project_default_method_change_refreshes_open_entries(world: World, client: TestClient,
                                                               db_session: Session) -> None:
     """API-PRJ-004 で算定方式の既定を変えると、既定に従う活動の OPEN の報告日の進捗率を求め直す（ガントとイナズマ線を揃える）。"""
