@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -25,6 +25,9 @@ from app.models.prj import Calendar, Project
 from app.models.sch import Activity
 from app.models.wbs import WbsElement
 from app.services.clock import get_now
+
+if TYPE_CHECKING:
+    from conftest import RaceProbe
 
 NOW = datetime(2026, 12, 10, 9, 0, tzinfo=UTC)
 MISSING = 9999
@@ -216,6 +219,41 @@ def test_put_element_estimate_while_pending_approval_is_409(world: World) -> Non
     element = world.session.get(WbsElement, world.wp2)
     assert element is not None and element.own_estimate_hours is None
     assert world.session.scalar(select(EstimateRecord.id).where(EstimateRecord.project_id == world.pid)) is None
+
+
+def _pending_by_other(world: World) -> Any:
+    """先に終わった承認申請（別のセッション）：WBS を承認待ちにしてコミットする。"""
+    def submit(other: Session) -> None:
+        project = other.get(Project, world.pid)
+        assert project is not None
+        project.wbs_status = "PENDING_APPROVAL"
+    return submit
+
+
+def test_put_element_estimate_judges_wbs_status_after_locking_project(world: World, race: RaceProbe) -> None:
+    """API-EST-001：WBS の状態（RULE-WBS-006）はプロジェクトの行をロックして読み直した値で判定する（A-49 の 3）。ロックの直前に
+    別のセッションが WBS を承認待ちにしてコミットしていれば、WBS要素の見積は 409 INVALID_STATE で何も書かない。"""
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    error = world.put("ELEMENT", world.wp2, {"input_value": "16", "input_unit": "HOUR"}, expect=409)
+    assert error["error"]["code"] == "INVALID_STATE"
+    assert error["error"]["details"] == [{"wbs_status": "PENDING_APPROVAL"}]
+    assert race.locked == ["projects"]
+    world.session.expire_all()
+    element = world.session.get(WbsElement, world.wp2)
+    assert element is not None and element.own_estimate_hours is None
+    assert world.session.scalar(select(EstimateRecord.id).where(EstimateRecord.project_id == world.pid)) is None
+    assert world.wbs_status() == "PENDING_APPROVAL"
+
+
+def test_put_activity_estimate_locks_project_like_wbs_edits(world: World, race: RaceProbe) -> None:
+    """API-EST-001：活動の見積も WBS の編集と同じくプロジェクトの行をロックしてから書く。WBS の状態は変えない（承認待ちでも書ける）。"""
+    race.before_lock("projects", _pending_by_other(world))
+    race.locked.clear()
+    written = world.put("ACTIVITY", world.a, {"input_value": "8", "input_unit": "HOUR"})
+    assert written["wbs_status"] == "PENDING_APPROVAL" and written["current_hours"] == 8.0
+    assert race.locked == ["projects"]
+    assert world.wbs_status() == "PENDING_APPROVAL"
 
 
 @pytest.mark.parametrize(

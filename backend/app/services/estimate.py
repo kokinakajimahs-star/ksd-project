@@ -37,6 +37,7 @@ from app.domain.estimate import (
     rollup_estimates,
 )
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.cmn import User
 from app.models.est import EstimateRecord
 from app.models.prj import HOURS_PER_DAY_DEFAULT, Calendar, Project
@@ -175,9 +176,11 @@ def write_estimate(
 
     対象がそのプロジェクトに無ければ 404。WBS要素の見積は承認待ちの間は 409（RULE-WBS-006）。
     換算・値の検査は RULE-EST-002（負の値・小数 3 桁以降・換算後の上限超えは 400）。記録を足し、対象の今の見積を同じ値にする。
+    WBS の状態はプロジェクトの行をロックして読み直した値で判定する（A-49 の 3）。WBS の編集（``app.services.wbs`` の
+    ``_editing``）と同じく、対象の種類を問わず対象を読む前にロックする。
     """
     authorize_project(session, access, actor, project_id, ESTIMATE_EDIT)
-    project = session.get(Project, project_id)
+    project = lock_row(session, Project, project_id)
     if project is None:  # authorize_project が先に 404 を返すので、ここへは来ない
         raise AppError(404, "NOT_FOUND", "プロジェクトが見つかりません", details=[{"project_id": project_id}])
     target = _target_of(session, project_id, target_type, target_id)
