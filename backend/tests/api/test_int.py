@@ -1,12 +1,13 @@
 """表形式の入出力の API の試験（設計書 6.2 の API-INT-001・002、6.3、9 章。要求仕様書 INT-01・BR-02）。
 
 SQLite の一時ファイルの DB と TestClient で、正常系（出力・往復の一致・追加・更新・移動・日程の再計算・実績工数）と、
-401・403・409・422・400 と ``dry_run`` を確かめる。
+401・403・409・422・400 と ``dry_run``、取込の大きさ・行の上限（CR-019）を確かめる。
 WBS は 成果物 D（1.0）の下に WP1（1.1。活動 A・B）と WP2（1.2）、管理 M（2.0）の下に WP3（2.1。活動 C。委託先の割当）。
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -20,7 +21,10 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
+from starlette.requests import Request
+from starlette.types import Message
 
+from app.api.io import read_import_file
 from app.domain.tabular import ACTIVITY_COLUMNS, TIME_ENTRY_COLUMNS, WBS_COLUMNS, decode_csv, encode_csv
 from app.infra.security import generate_token, hash_token
 from app.models.chg import AuditLog
@@ -29,6 +33,7 @@ from app.models.eff import Assignment, TimeEntry
 from app.models.est import EstimateRecord
 from app.models.prj import Project
 from app.models.sch import Activity, ActivityDependency
+from app.errors import AppError
 from app.models.wbs import WbsDictionaryEntry, WbsElement, WbsNumberingRule
 from app.services.clock import get_now
 
@@ -560,6 +565,115 @@ def test_import_xlsx_reads_typed_cells(world: World) -> None:
     assert body["written"] is True and body["updated"] == 1
     a = world.activity(world.a)
     assert (a.requested_start, a.duration_days, a.estimate_hours) == (date(2026, 12, 7), 4, Decimal("6.5"))
+
+
+def xlsx_of(rows: list[list[str]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    for row in rows:
+        sheet.append(row)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def limit_import(app: FastAPI, **limits: int) -> None:
+    """取込の上限（``PMT_IMPORT_MAX_BYTES``・``PMT_IMPORT_MAX_ROWS``）をこの試験の app だけで小さくする。"""
+    app.state.settings = app.state.settings.model_copy(update=limits)
+
+
+def post_import(world: World, content: bytes, *, fmt: str = "csv", dry_run: bool = False) -> Any:
+    media = "text/csv" if fmt == "csv" else XLSX
+    return world.client.post(world.url("/import"), params={"target": "wbs", "format": fmt, "dry_run": str(dry_run).lower()},
+                             content=content, headers={**world.h["planner"], "Content-Type": media})
+
+
+def test_import_file_over_max_bytes_is_400_and_writes_nothing(world: World, app: FastAPI) -> None:
+    """API-INT-002：ファイルが ``PMT_IMPORT_MAX_BYTES`` を超えれば 400 ``VALIDATION_ERROR`` で何も書かない（dry_run でも。CR-019）。
+    上限ちょうどは読む。"""
+    grid = world.grid("wbs")
+    grid[2][3] = "WP1（改）"
+    for fmt, content in (("csv", csv_of(grid)), ("xlsx", xlsx_of(grid))):
+        limit_import(app, import_max_bytes=len(content) - 1)
+        for dry_run in (True, False):
+            response = post_import(world, content, fmt=fmt, dry_run=dry_run)
+            assert response.status_code == 400, response.text
+            error = response.json()["error"]
+            assert error["code"] == "VALIDATION_ERROR"
+            assert [d["loc"] for d in error["details"]] == [["body"]]
+            assert str(len(content) - 1) in error["details"][0]["message"]
+        assert world.elements()["WP1"].name == "WP1"
+
+    content = csv_of(grid)
+    limit_import(app, import_max_bytes=len(content))
+    response = post_import(world, content)
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] is True and "WP1（改）" in world.elements()
+
+
+def test_import_rows_over_max_rows_is_400_and_writes_nothing(world: World, app: FastAPI) -> None:
+    """API-INT-002：見出しを除く行が ``PMT_IMPORT_MAX_ROWS`` を超えれば 400 ``VALIDATION_ERROR`` で何も書かない
+    （CSV・xlsx、dry_run でも。CR-019）。上限ちょうどは読む。"""
+    grid = world.grid("wbs")
+    grid[2][3] = "WP1（改）"
+    rows = len(grid) - 1
+    limit_import(app, import_max_rows=rows - 1)
+    for fmt, content in (("csv", csv_of(grid)), ("xlsx", xlsx_of(grid))):
+        for dry_run in (True, False):
+            response = post_import(world, content, fmt=fmt, dry_run=dry_run)
+            assert response.status_code == 400, response.text
+            error = response.json()["error"]
+            assert error["code"] == "VALIDATION_ERROR"
+            assert [d["loc"] for d in error["details"]] == [["body"]]
+            assert str(rows - 1) in error["details"][0]["message"]
+    assert world.elements()["WP1"].name == "WP1"
+
+    limit_import(app, import_max_rows=rows)
+    preview = post_import(world, xlsx_of(grid), fmt="xlsx", dry_run=True)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["ok"] is True and preview.json()["updated"] == 1
+    response = post_import(world, csv_of(grid))
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] is True and "WP1（改）" in world.elements()
+
+
+def test_import_file_reader_stops_reading_at_max_bytes() -> None:
+    """API-INT-002：本体は ``PMT_IMPORT_MAX_BYTES`` を超えた時点で読むのを止める（残りを受け取らない。CR-019）。
+    ``Content-Length`` が上限を超えていれば 1 度も受け取らない。上限ちょうどは全て読む。"""
+
+    def run(chunks: list[bytes], max_bytes: int, headers: list[tuple[bytes, bytes]]) -> tuple[bytes | AppError, int]:
+        received = 0
+
+        async def receive() -> Message:
+            nonlocal received
+            received += 1
+            index = received - 1
+            return {"type": "http.request", "body": chunks[index], "more_body": index + 1 < len(chunks)}
+
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": headers}, receive)
+        try:
+            result: bytes | AppError = asyncio.run(read_import_file(request, max_bytes=max_bytes))
+        except AppError as exc:
+            result = exc
+        return result, received
+
+    chunks = [b"x" * 10] * 100
+    too_large, received = run(chunks, 25, [])
+    assert isinstance(too_large, AppError) and (too_large.status_code, too_large.code) == (400, "VALIDATION_ERROR")
+    assert received == 3
+
+    declared, received = run(chunks, 25, [(b"content-length", b"1000")])
+    assert isinstance(declared, AppError) and declared.code == "VALIDATION_ERROR"
+    assert received == 0
+
+    understated, received = run(chunks, 25, [(b"content-length", b"20")])
+    assert isinstance(understated, AppError) and understated.code == "VALIDATION_ERROR"
+    assert received == 3
+
+    exact, received = run([b"x" * 10, b"y" * 10, b"z" * 5], 25, [(b"content-length", b"25")])
+    assert exact == b"x" * 10 + b"y" * 10 + b"z" * 5
+    assert received == 3
 
 
 # ---------------------------------------------------------------------------

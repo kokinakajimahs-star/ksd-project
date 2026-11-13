@@ -10,6 +10,8 @@
   出力の xlsx のセルは全て文字（``=`` で始まる名称も式にしない。往復で一致させる）。CSV は式として読まれる文字で始まるセルの
   先頭へ ``'`` を足し、取込で外す（``encode_csv``・``decode_csv``。6.3・CR-019）
 - 取込は全行を検査し、誤りがあれば何も書かない（6.3）。``dry_run`` は検査と書く行の一覧だけを返す。
+  ファイルの大きさ（``PMT_IMPORT_MAX_BYTES``。API 層が本体を読むときに止める）と行の数（``PMT_IMPORT_MAX_ROWS``。見出しを除く）
+  を超えれば 400 ``VALIDATION_ERROR`` で何も書かない（``dry_run`` でも同じ。6.3・CR-019）
   誤りのある取込（``dry_run`` でない）は 422 ``IMPORT_INVALID``（``details`` が ``{row, column, code, message}`` の配列）
 - 書くときは 1 つのトランザクションで、既存の API と同じ規則を当てる：WBS は RULE-WBS-002 の採番（``new_element_code``）・
   移動（``move_element``。ID は変えない）・RULE-WBS-006 の EDIT（承認待ちは 409）、活動は希望開始日を稼働日へ寄せて日程を計算し直す
@@ -28,6 +30,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from io import BytesIO
+from itertools import islice
 from typing import Final
 
 from openpyxl import Workbook, load_workbook
@@ -159,8 +162,23 @@ def _unreadable(message: str) -> TabularFileError:
     return TabularFileError([ImportIssue(HEADER_ROW, None, ImportIssueCode.FILE_UNREADABLE, message)])
 
 
-def _xlsx_grid(data: bytes) -> list[list[object]]:
-    """xlsx の 1 枚目のシートの格子（1 行目が見出し）。xlsx として読めなければ ``TabularFileError``。"""
+def file_too_large(max_bytes: int) -> AppError:
+    """取込のファイルが ``PMT_IMPORT_MAX_BYTES`` を超えた（400 ``VALIDATION_ERROR``。何も書かない。6.3・CR-019）。"""
+    return AppError(400, "VALIDATION_ERROR", "取込のファイルが大きすぎます",
+                    details=[{"loc": ["body"], "message": f"ファイルは {max_bytes} バイトまでです（PMT_IMPORT_MAX_BYTES）"}])
+
+
+def _too_many_rows(max_rows: int) -> AppError:
+    """取込のファイルの行（見出しを除く）が ``PMT_IMPORT_MAX_ROWS`` を超えた（400 ``VALIDATION_ERROR``。6.3・CR-019）。"""
+    return AppError(400, "VALIDATION_ERROR", "取込のファイルの行が多すぎます",
+                    details=[{"loc": ["body"], "message": f"データの行は {max_rows} 行までです（見出しを除く。PMT_IMPORT_MAX_ROWS）"}])
+
+
+def _xlsx_grid(data: bytes, max_rows: int) -> list[list[object]]:
+    """xlsx の 1 枚目のシートの格子（1 行目が見出し）。xlsx として読めなければ ``TabularFileError``。
+
+    見出しと ``max_rows`` 行を超える行があれば、そこで読むのを止めて 400（行の多いシートを全て読まない。CR-019）。
+    """
     try:
         workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:  # 壊れた・xlsx でないファイル（zip・XML・形式の誤りなど openpyxl は様々な例外を投げる）
@@ -169,8 +187,11 @@ def _xlsx_grid(data: bytes) -> list[list[object]]:
         if not workbook.worksheets:
             raise _unreadable("xlsx にシートが無い")
         sheet = workbook.worksheets[0]
-        return [[_xlsx_value(v) for v in row] for row in sheet.iter_rows(values_only=True)]
-    except TabularFileError:
+        rows = list(islice(sheet.iter_rows(values_only=True), HEADER_ROW + max_rows + 1))
+        if len(rows) > HEADER_ROW + max_rows:
+            raise _too_many_rows(max_rows)
+        return [[_xlsx_value(v) for v in row] for row in rows]
+    except (TabularFileError, AppError):
         raise
     except Exception as exc:  # シートの XML が壊れている
         raise _unreadable(f"xlsx の 1 枚目のシートを読めない（{type(exc).__name__}）") from exc
@@ -178,11 +199,17 @@ def _xlsx_grid(data: bytes) -> list[list[object]]:
         workbook.close()
 
 
-def read_grid(file_format: FileFormat, data: bytes) -> list[list[object]]:
-    """ファイルのバイト列をセルの格子にする。読めなければ ``TabularFileError``（6.3 の誤りの形）。"""
+def read_grid(file_format: FileFormat, data: bytes, *, max_rows: int) -> list[list[object]]:
+    """ファイルのバイト列をセルの格子にする。読めなければ ``TabularFileError``（6.3 の誤りの形）。
+
+    見出しを除く行が ``max_rows`` を超えれば 400 ``VALIDATION_ERROR``（``PMT_IMPORT_MAX_ROWS``。6.3・CR-019）。
+    """
     if file_format is FileFormat.CSV:
-        return [list(row) for row in decode_csv(data)]
-    return _xlsx_grid(data)
+        grid: list[list[object]] = [list(row) for row in decode_csv(data)]
+        if len(grid) > HEADER_ROW + max_rows:
+            raise _too_many_rows(max_rows)
+        return grid
+    return _xlsx_grid(data, max_rows)
 
 
 def write_file(file_format: FileFormat, grid: Sequence[Sequence[str]], target: TabularTarget) -> bytes:
@@ -453,6 +480,7 @@ def import_data(
     *,
     dry_run: bool,
     now: datetime,
+    max_rows: int,
 ) -> ImportResult:
     """6.3 の表を取り込む（data.import と対象の書く権限。INT-01・BR-02）。全行を検査し、誤りが 1 件でもあれば何も書かない。
 
@@ -460,6 +488,7 @@ def import_data(
     WBS を変える取込は承認待ちの間は 409 ``INVALID_STATE``（RULE-WBS-006。``dry_run`` でも同じ）。
     権限（設計書 1.1 の API-INT-002・CR-006）：data.import に加えて、``wbs`` は wbs.edit、``activities`` は schedule.edit を
     初めに確かめる（無ければ 403。何も読まない）。見積の列を変える行があれば estimate.edit も確かめる（行の検査の後。``dry_run`` でも同じ）。
+    見出しを除く行が ``max_rows``（``PMT_IMPORT_MAX_ROWS``）を超えれば、検査の前に 400 ``VALIDATION_ERROR``（``dry_run`` でも同じ。CR-019）。
     """
     authorize_project(session, access, actor, project_id, DATA_IMPORT)
     write_permission = _WRITE_PERMISSIONS.get(target)
@@ -470,7 +499,7 @@ def import_data(
         authorize_project(session, access, actor, project_id, ESTIMATE_EDIT)
 
     try:
-        grid = read_grid(file_format, data)
+        grid = read_grid(file_format, data, max_rows=max_rows)
     except TabularFileError as exc:
         return _rejected(target, file_format, dry_run, exc.issues)
     if target is TabularTarget.WBS:
