@@ -4,8 +4,9 @@
   あるときだけ、その PostgreSQL に試験ごとの新しいデータベースを作って指す（本番と同じ DB での確認。CR-020。既定は SQLite のまま）
 - ``app``：その設定で作ったアプリ。``Base.metadata`` の全てのテーブルを作ってある
   （テーブルを作った SQLite のファイルを試験の流れごとに 1 度だけ作り、試験ごとに複製する。
-  DDL を試験ごとに流すと 1 件 1 秒を超え、検証が重くなるため。複製の後にも ``create_all`` を呼ぶので、
-  足りないテーブルがあれば作られる）
+  DDL を試験ごとに流すと 1 件 1 秒を超え、検証が重くなるため。SQLite では複製の後にも ``create_all`` を呼ぶので、
+  足りないテーブルがあれば作られる。PostgreSQL では雛形のデータベースを ``create_all`` で作ってから複製するので呼ばない
+  （表ごとの有無の問い合わせを試験ごとに流さない））
 - ``client``：FastAPI の TestClient
 - ``db_session``：同じ DB へのセッション（試験の準備・確認に使う）
 - ``race``：同時実行の試験の道具（``RaceProbe``）。``SELECT … FOR UPDATE`` を PostgreSQL の方言で書き直して記録し、決めた表の
@@ -19,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -29,7 +31,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, make_url, text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import ORMExecuteState, Session, sessionmaker
 
 import app.models as _all_models  # noqa: F401  全てのモデルを Base.metadata に載せる
@@ -40,6 +42,12 @@ from app.main import create_app
 
 # PostgreSQL で試験を流すときの接続先（管理用。試験ごとのデータベースをここから作って消す）。無ければ SQLite で流す
 TEST_DATABASE_URL_ENV = "PMT_TEST_DATABASE_URL"
+# データベースを消せないときのやり直し。Cloud SQL では管理用のスーパーユーザー（cloudsqladmin）が試験のデータベースに
+# つなぐことがあり、その接続は ``WITH (FORCE)`` でも切れない（SQLSTATE 42501 insufficient_privilege）。少し待てば離れるので、
+# 待つ時間を延ばしながら 10 回まで試す（待つのは最長で 0.5 秒 × (1 + 2 + … + 9) ＝ 22.5 秒）
+_DROP_ATTEMPTS = 10
+_DROP_WAIT_SECONDS = 0.5
+_PG_INSUFFICIENT_PRIVILEGE = "42501"
 
 
 class PostgresDatabases:
@@ -56,6 +64,7 @@ class PostgresDatabases:
         self._url = url
         self._admin = create_engine(url, isolation_level="AUTOCOMMIT")
         self._prefix = f"pmt_test_{uuid.uuid4().hex[:8]}"
+        self._leftovers: list[str] = []
         self.template = f"{self._prefix}_tpl"
         self._execute(f'CREATE DATABASE "{self.template}"')
         engine = create_db_engine(self.url_of(self.template))
@@ -78,13 +87,34 @@ class PostgresDatabases:
         self._execute(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
         return self.url_of(name)
 
+    def _drop(self, name: str) -> bool:
+        """データベースを消す。スーパーユーザーの接続が残っていて消せなければ、待ってやり直す。やり直しても消せなければ偽。"""
+        for attempt in range(1, _DROP_ATTEMPTS + 1):
+            try:
+                self._execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+                return True
+            except ProgrammingError as exc:
+                if getattr(exc.orig, "sqlstate", None) != _PG_INSUFFICIENT_PRIVILEGE:
+                    raise
+                if attempt < _DROP_ATTEMPTS:
+                    time.sleep(_DROP_WAIT_SECONDS * attempt)
+        return False
+
     def drop(self, database_url: str) -> None:
+        """試験のデータベースを消す。やり直しても消せなければ、流れの終わり（``close``）にもう一度消す（試験は落とさない）。"""
         name = make_url(database_url).database
-        self._execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        assert name is not None
+        if not self._drop(name):
+            self._leftovers.append(name)
 
     def close(self) -> None:
-        self._execute(f'DROP DATABASE IF EXISTS "{self.template}" WITH (FORCE)')
-        self._admin.dispose()
+        """雛形と、消し残したデータベースを消す。それでも消せないものがあれば、名前を挙げて誤りにする（Cloud SQL に残さない）。"""
+        try:
+            remaining = [name for name in [*self._leftovers, self.template] if not self._drop(name)]
+        finally:
+            self._admin.dispose()
+        if remaining:
+            raise RuntimeError(f"試験のデータベースを消せませんでした。手で消してください：{', '.join(remaining)}")
 
 
 @pytest.fixture(scope="session")
@@ -142,7 +172,8 @@ def _seed_from_template(database_url: str, template: Path) -> None:
 def app(settings: Settings, schema_template: Path) -> Iterator[FastAPI]:
     _seed_from_template(settings.database_url, schema_template)
     application = create_app(settings)
-    Base.metadata.create_all(application.state.engine)
+    if application.state.engine.dialect.name != "postgresql":  # PostgreSQL は雛形の複製（表は全てある）
+        Base.metadata.create_all(application.state.engine)
     yield application
     application.state.engine.dispose()
 

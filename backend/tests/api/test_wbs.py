@@ -16,6 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.domain.estimate import ActivityEstimate
@@ -1401,14 +1402,30 @@ def test_reads_do_not_create_numbering_rule_row_and_first_write_does(world: Worl
 def test_numbering_rule_row_created_at_once_is_409_conflict(world: World, db_session: Session,
                                                             race: RaceProbe) -> None:
     """API-WBS-002：採番規則の行が無いプロジェクトで、同時の操作が先に行を作った（一意制約の違反）。500 でなく 409 CONFLICT で、
-    何も書かない（A-49 の 3）。"""
+    何も書かない（A-49 の 3）。
+
+    PostgreSQL では、この割り込みは起こらない：WBS を変える操作はプロジェクトの行を ``FOR UPDATE`` でロックしてから採番規則の行を
+    読んで作り、同時の操作の INSERT は外部キーの確認（プロジェクトの行の ``FOR KEY SHARE``）でそのロックを待つ。そこで PostgreSQL
+    では、別のセッションの INSERT がプロジェクトの行のロックを待って lock_timeout になり、何も書かれないことを確かめる。
+    """
     raw, _ = _project_without_numbering_rule(world, db_session)
     race.before_insert(WbsNumberingRule, lambda other: other.add(WbsNumberingRule(project_id=raw.id)))
     elements_before = _row_counts(db_session)["wbs_elements"]
     race.locked.clear()
 
-    response = world.client.post(f"/api/v1/projects/{raw.id}/wbs/elements",
+    def post() -> Any:
+        return world.client.post(f"/api/v1/projects/{raw.id}/wbs/elements",
                                  json={"parent_id": None, "kind": "DELIVERABLE", "name": "四"}, headers=world.admin_h)
+
+    if db_session.get_bind().dialect.name == "postgresql":
+        with pytest.raises(OperationalError, match=r'(?s)lock timeout.*relation "projects"'):
+            post()
+        assert race.locked == ["projects", "wbs_numbering_rules"]
+        assert _row_counts(db_session)["wbs_elements"] == elements_before
+        assert db_session.scalars(select(WbsNumberingRule).where(WbsNumberingRule.project_id == raw.id)).all() == []
+        return
+
+    response = post()
     assert response.status_code == 409, response.text
     assert response.json()["error"] == {
         "code": "CONFLICT",

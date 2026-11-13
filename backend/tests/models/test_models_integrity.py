@@ -1,6 +1,7 @@
 """表を横に見る DB の整合の試験（設計書 1.2 の 4.2、CR-012、docs/decisions/ASSUMPTIONS.md A-49 の 3・5・7・8）。
 
-- 全ての表の内部キーを再利用しない（SQLite は ``AUTOINCREMENT``。消した最大の ``id`` を使い直さない。CR-012）
+- 全ての表の内部キーを再利用しない（SQLite は ``AUTOINCREMENT``。PostgreSQL は主キーの列のシーケンス。消した最大の ``id`` を
+  使い直さない。CR-012）
 - 制約・索引の名前は PostgreSQL の上限の 63 文字以内（切り詰めた名前を付けない。A-49 の 8）
 - JSON の列の ``None`` は SQL の NULL で持つ（JSON の ``null`` を保存しない。A-49 の 5）
 - 移行（alembic upgrade head）とモデル（``create_all``）で、CHECK の名前と式・既定値（server_default）・制約と索引の名前・
@@ -79,6 +80,19 @@ def _alembic(url: str) -> Config:
 
 
 def _autoincrement_tables(connection: sa.Connection) -> dict[str, bool]:
+    """DB にある表（モデルの表に限る）→ 主キーが消した値を使い直さない作りか。
+
+    SQLite は表の DDL に ``AUTOINCREMENT`` があるか（無いと最大の ``rowid`` の次を使い、消した最大の値を使い直す）。PostgreSQL は
+    主キーの列 ``id`` がシーケンス（SERIAL・IDENTITY）を持つか（シーケンスは戻らないので、消した値を使い直さない）。
+    """
+    if connection.dialect.name == "postgresql":
+        names = connection.execute(sa.text(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+        )).scalars().all()
+        return {
+            name: connection.execute(sa.text("SELECT pg_get_serial_sequence(:t, 'id') IS NOT NULL"), {"t": name}).scalar_one()
+            for name in names if name in Base.metadata.tables
+        }
     rows = connection.execute(sa.text("SELECT name, sql FROM sqlite_master WHERE type = 'table'")).all()
     return {name: "AUTOINCREMENT" in sql for name, sql in rows if name in Base.metadata.tables}
 
@@ -122,7 +136,8 @@ def test_every_table_is_declared_autoincrement() -> None:
 
 
 def test_every_table_is_created_with_autoincrement(db_session: Session) -> None:
-    """CR-012（4.2）：モデルから作った SQLite の表は、全て ``AUTOINCREMENT`` の主キーを持つ。"""
+    """CR-012（4.2）：モデルから作った SQLite の表は、全て ``AUTOINCREMENT`` の主キーを持つ（PostgreSQL では、全ての表の主キーが
+    シーケンスを持つ）。"""
     tables = _autoincrement_tables(db_session.connection())
     assert set(tables) == set(Base.metadata.tables)
     assert sorted(name for name, has in tables.items() if not has) == []
@@ -266,7 +281,11 @@ def test_none_in_nullable_json_columns_is_stored_as_sql_null(db_session: Session
         "(SELECT impact IS NULL FROM change_requests WHERE id = :c), "
         "(SELECT dictionary IS NULL FROM scope_baseline_elements WHERE id = :s)"
     ), {"a": audit.id, "c": change_request.id, "s": snapshot.id}).one()
-    assert tuple(raw) == (1, '{"name": "x"}', 1, 1)
+    if db_session.get_bind().dialect.name == "postgresql":
+        # PostgreSQL は ``IS NULL`` を真偽値で返し、JSON の列を復号して返す（JSON の ``null`` は SQL の NULL でないので ``IS NULL`` が偽になる）
+        assert tuple(raw) == (True, {"name": "x"}, True, True)
+    else:
+        assert tuple(raw) == (1, '{"name": "x"}', 1, 1)
 
     db_session.expunge_all()
     loaded = db_session.get(AuditLog, audit.id)
@@ -285,16 +304,24 @@ def _not_null_json_row(session: Session, table: str) -> Any:
     return rows[table]()
 
 
+def _not_null_violation(session: Session, table: str, column: str) -> str:
+    """その列の NOT NULL の違反の DB の文言（正規表現。方言ごと）。"""
+    if session.get_bind().dialect.name == "postgresql":
+        return f'null value in column "{column}" of relation "{table}" violates not-null constraint'
+    return f"NOT NULL constraint failed: {table}.{column}"
+
+
 @pytest.mark.parametrize(("table", "column"), sorted(NOT_NULL_JSON))
 def test_none_in_not_null_json_columns_is_refused(db_session: Session, table: str, column: str) -> None:
     """A-49 の 5：NOT NULL の JSON の列に ``None`` を書くと、JSON の ``null`` で通らず DB が拒む（SQL の挿入・ORM の更新）。"""
+    violation = _not_null_violation(db_session, table, column)
     row = _not_null_json_row(db_session, table)
     db_session.add(row)
     db_session.flush()
     values = {c.name: getattr(row, c.key) for c in row.__table__.columns if c.name != "id"}
     db_session.rollback()
 
-    with pytest.raises(IntegrityError, match=f"NOT NULL constraint failed: {table}.{column}"):
+    with pytest.raises(IntegrityError, match=violation):
         db_session.execute(sa.insert(row.__table__).values({**values, column: None}))
     db_session.rollback()
 
@@ -302,7 +329,7 @@ def test_none_in_not_null_json_columns_is_refused(db_session: Session, table: st
     db_session.add(row)
     db_session.commit()
     setattr(row, column, None)
-    with pytest.raises(IntegrityError, match=f"NOT NULL constraint failed: {table}.{column}"):
+    with pytest.raises(IntegrityError, match=violation):
         db_session.flush()
     db_session.rollback()
 

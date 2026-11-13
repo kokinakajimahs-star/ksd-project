@@ -9,10 +9,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
 from app.errors import AppError
+from app.models.prj import Calendar
 
 
 def test_health_returns_ok(client: TestClient) -> None:
@@ -52,9 +54,16 @@ def test_app_error_keeps_status_code_and_details(app: FastAPI, client: TestClien
     }
 
 
-def test_sqlite_foreign_keys_are_enabled(app: FastAPI) -> None:
-    with app.state.engine.connect() as connection:
-        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+def test_foreign_keys_are_enforced(app: FastAPI) -> None:
+    """アプリのエンジンでは外部キーが効く。SQLite は接続ごとに ``PRAGMA foreign_keys`` を有効にしてある（既定は無効）。
+    PostgreSQL は常に効く。どちらも、無い行を指す行を拒む。"""
+    engine = app.state.engine
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+    with pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed|violates foreign key constraint"), \
+            engine.begin() as connection:
+        connection.execute(insert(Calendar).values(project_id=999_999, working_weekdays="1111100", hours_per_day=8))
 
 
 def test_settings_defaults(monkeypatch) -> None:
