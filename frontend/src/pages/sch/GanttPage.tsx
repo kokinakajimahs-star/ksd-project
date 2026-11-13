@@ -10,6 +10,7 @@ import { Link, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import {
   getLightningLine,
   getLightningLines,
@@ -91,7 +92,7 @@ export default function GanttPage() {
   const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
   const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
 
-  // 自分の権限・基準の版・報告日（画面を開いたときに 1 回）
+  // 自分の権限・基準の版・報告日（全件。画面を開いたときに 1 回）
   useEffect(() => {
     if (projectId === null) {
       return;
@@ -100,14 +101,14 @@ export default function GanttPage() {
     Promise.all([
       getMe(),
       listScheduleBaselines(projectId, { limit: LIST_LIMIT_MAX }),
-      listStatusReports(projectId, { limit: LIST_LIMIT_MAX }),
+      fetchAllPages((page) => listStatusReports(projectId, page)),
     ]).then(
-      ([meResult, baselineList, reportList]) => {
+      ([meResult, baselineList, reportItems]) => {
         if (!cancelled) {
           setMe(meResult);
           setBaselines(baselineList.items);
-          setReports(reportList.items);
-          setReportId(latestReport(reportList.items)?.id ?? null);
+          setReports(reportItems);
+          setReportId(latestReport(reportItems)?.id ?? null);
         }
       },
       (e: unknown) => {

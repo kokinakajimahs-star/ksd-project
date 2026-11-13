@@ -9,6 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import type { EstimateWritten } from "../../api/est";
+import { fetchAllPages } from "../../api/pages";
 import { listMembers, type Member } from "../../api/prj";
 import {
   bulkUpdateActivities,
@@ -26,7 +27,7 @@ import AddActivityForm from "./activities/AddActivityForm";
 import AssignmentEditor from "./activities/AssignmentEditor";
 import { collectChanges, draftOf, type ActivityDraft } from "./activities/bulkEdit";
 import DependencySection from "./activities/DependencySection";
-import { ACTIVITIES_PAGE_SIZE, ACTIVITY_NAME_MAX, LIST_LIMIT_MAX } from "./limits";
+import { ACTIVITIES_PAGE_SIZE, ACTIVITY_NAME_MAX } from "./limits";
 
 function text(value: string | number | null): string {
   return value === null ? "—" : String(value);
@@ -109,17 +110,17 @@ export default function ActivityListPage() {
   const canEstimate = projectId !== null && me !== null && hasProjectPermission(me, projectId, "estimate.edit");
   const showActions = canEdit || canEstimate;
 
-  // 変える人だけが要る：置き場の WP（API-WBS-001）と担当の候補（API-PRJ-009）
+  // 変える人だけが要る：置き場の WP（API-WBS-001）と担当の候補（API-PRJ-009。全件）
   useEffect(() => {
     if (projectId === null || !canEdit) {
       return;
     }
     let cancelled = false;
-    Promise.all([getWbsTree(projectId), listMembers(projectId, { limit: LIST_LIMIT_MAX })]).then(
-      ([tree, memberList]) => {
+    Promise.all([getWbsTree(projectId), fetchAllPages((page) => listMembers(projectId, page))]).then(
+      ([tree, memberItems]) => {
         if (!cancelled) {
           setWorkPackages(tree.elements.filter((e) => e.kind === "WORK_PACKAGE"));
-          setMembers(memberList.items);
+          setMembers(memberItems);
         }
       },
       (e: unknown) => {

@@ -7,6 +7,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
 import {
   finalizeStatusReport,
   getLightningLine,
@@ -22,7 +23,6 @@ import { parseProjectId } from "../prj/ProjectSettingsPage";
 import CreateReportForm from "./CreateReportForm";
 import EntryEditor from "./EntryEditor";
 import { newestFirst, progressMethodLabel, reportStatusLabel, signedDays } from "./labels";
-import { LIST_LIMIT_MAX } from "./limits";
 
 /** 残工数の表示：入力した値か自動（BR-10。EFF-06：自動か入力かを区別して出す） */
 export function remainingText(hours: number | null): string {
@@ -74,16 +74,16 @@ export default function StatusReportPage() {
     };
   }, [projectId, valid]);
 
-  // 報告日の一覧（作る・確定すると読み直す）
+  // 報告日の一覧（全件。作る・確定すると読み直す）
   useEffect(() => {
     if (projectId === null || !valid) {
       return;
     }
     let cancelled = false;
-    listStatusReports(projectId, { limit: LIST_LIMIT_MAX }).then(
-      (result) => {
+    fetchAllPages((page) => listStatusReports(projectId, page)).then(
+      (items) => {
         if (!cancelled) {
-          setReports(result.items);
+          setReports(items);
         }
       },
       (e: unknown) => {
