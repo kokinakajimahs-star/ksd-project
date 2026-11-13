@@ -258,6 +258,35 @@ def test_export_xlsx_keeps_cells_as_text(world: World) -> None:
     assert "<f>" not in sheet_xml and "<f " not in sheet_xml  # 式のセルが無い
 
 
+def test_export_csv_escapes_formula_cells_and_import_restores_them(world: World, db_session: Session) -> None:
+    """API-INT-001・002：CSV の出力は =・+・-・@・タブ・' で始まるセルの先頭へ ' を 1 つ足し（表計算ソフトが式として読まない）、
+    出力したファイルを取り込むと ' を外して変更は 0 件（往復の一致。6.3・CR-019）。xlsx は文字列の型で書き、' を足さない。
+    """
+    names = ("=1+1", "+加算", "-減算", "@参照", "\tタブ", "'引用")
+    for name in names:
+        world.element(name, world.d, "WORK_PACKAGE")
+    db_session.add(TimeEntry(user_id=world.users["contractor"].id, activity_id=world.c, work_date=date(2026, 12, 2),
+                             hours=Decimal("1"), note="=cmd|' /C calc'!A0"))
+    db_session.commit()
+
+    wbs = world.export("wbs").content
+    text = wbs.decode("utf-8-sig")
+    for cell in ("'=1+1", "'+加算", "'-減算", "'@参照", "'\tタブ", "''引用"):
+        assert f",WORK_PACKAGE,{cell}," in text
+    added = slice(4, 4 + len(names))  # 成果物 1.0 の下の 1.3〜（見出し・1.0・1.1・1.2 の後）
+    assert [row[3] for row in decode_csv(wbs)[added]] == list(names)
+    body = world.load("wbs", wbs)
+    assert (body["created"], body["updated"], body["unchanged"], body["changes"]) == (0, 0, 5 + len(names), [])
+
+    entries = world.export("time-entries").content
+    assert ",'=cmd|' /C calc'!A0" in entries.decode("utf-8-sig")
+    body = world.load("time-entries", entries)
+    assert (body["unchanged"], body["changes"]) == (1, [])
+
+    grid = xlsx_grid(world.export("wbs", "xlsx").content)
+    assert [row[3] for row in grid[added]] == list(names)
+
+
 def test_export_permission_is_data_export(world: World) -> None:
     """API-INT-001：権限は data.export（9.2：PM・PLANNER・PROGRESS_MANAGER・VIEWER）。無ければ 403、未認証は 401。"""
     world.export("wbs", who="viewer")

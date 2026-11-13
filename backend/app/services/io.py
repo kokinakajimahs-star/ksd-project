@@ -7,7 +7,8 @@
 - 列・照合・検査・往復の一致は RULE-INT-001（``app.domain.tabular``）。このモジュールは DB の行を 6.3 の行へ直して渡し、
   取込の計画（``ImportPlan``）を DB へ書く
 - 形式：CSV は ``encode_csv``・``decode_csv``（UTF-8 の BOM 付き）。xlsx は openpyxl で 1 枚目のシートに同じ表を置く（6.3）。
-  出力の xlsx のセルは全て文字（``=`` で始まる名称も式にしない。往復で一致させる）
+  出力の xlsx のセルは全て文字（``=`` で始まる名称も式にしない。往復で一致させる）。CSV は式として読まれる文字で始まるセルの
+  先頭へ ``'`` を足し、取込で外す（``encode_csv``・``decode_csv``。6.3・CR-019）
 - 取込は全行を検査し、誤りがあれば何も書かない（6.3）。``dry_run`` は検査と書く行の一覧だけを返す。
   誤りのある取込（``dry_run`` でない）は 422 ``IMPORT_INVALID``（``details`` が ``{row, column, code, message}`` の配列）
 - 書くときは 1 つのトランザクションで、既存の API と同じ規則を当てる：WBS は RULE-WBS-002 の採番（``new_element_code``）・
