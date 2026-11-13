@@ -6,7 +6,8 @@
   持つプロジェクトの分」、集計・差異を読むは effort.view、差異の理由を書くは variance.note
 - 実績工数の書き込み（API-EFF-003）は日×活動のマスの置き換え。RULE-EFF-005 で全てのマスを検査し、1 件でも問題があれば全体を拒む
   （値の誤り・重複は 400、自分の割当でない活動は 403、確定した報告日以前の日は 409 ``INVALID_STATE``、1 日の合計 24 時間超は
-  422 ``DAY_TOTAL_EXCEEDED``。問題は全て ``details`` に載せる）。0 時間のマスは行を持たない（行を消す）
+  422 ``DAY_TOTAL_EXCEEDED``。問題は全て ``details`` に載せる）。0 時間のマスは行を持たない（行を消す）。
+  読めないプロジェクト（メンバーでなく、システム管理者でもない）の活動は、無い活動と同じ 404（6.1・CR-019）
 - 集計（API-EFF-005）と差異（API-EFF-006）は 5.8 のとおり：実績＝``time_entries`` の合計（報告日を指定したときは報告日以前の分）、
   進捗率・入力した ETC＝対象の報告日（指定しなければ 4.2 の「最新」）の ``progress_entries``、計画＝今の見積、
   基準＝選んだスケジュールベースライン（指定しなければ最新の版）の見積。ETC・EAC は RULE-EFF-001・002、軸は RULE-EFF-003、
@@ -378,8 +379,10 @@ def put_time_entries(
     """自分の実績工数をまとめて書く（effort.enter_own。EFF-02）。日×活動のマスを置き換える。プロジェクトをまたいでよい。
 
     確かめる順：活動が無い 404 → 活動のプロジェクトで effort.enter_own を持たない 403 → RULE-EFF-005 の検査（全てのマス）。
-    委託先だけで読むプロジェクト（view_level が OWN_ASSIGNMENTS）の自分の割当でない活動は見えないので、無い活動と同じ 404 にする
-    （9.2 の注記：有無を明かさない。RULE-EFF-005 の「自分の割当でない」403 より先）。
+    読めないプロジェクト（メンバーでなく、システム管理者でもない）の活動は無い活動と同じ 404 にする（6.1・CR-019：他のプロジェクトの
+    活動の有無を明かさない。``details`` にプロジェクトの ID を載せない）。委託先だけで読むプロジェクト（view_level が
+    OWN_ASSIGNMENTS）の自分の割当でない活動も見えないので、無い活動と同じ 404 にする（9.2 の注記。RULE-EFF-005 の
+    「自分の割当でない」403 より先）。
     RULE-EFF-005 の「自分の割当の活動だけ」「確定した報告日以前の日は変えない」はマスのプロジェクトごとに（割当と確定した報告日は
     プロジェクトのもの）、「1 日の合計 24 時間以下」はプロジェクトをまたいだ全ての行で見る。メモだけを変えたマスも「変える」とみなす。
     1 件でも問題があれば何も書かない。
@@ -390,6 +393,9 @@ def put_time_entries(
     hidden: set[int] = set()
     for project_id in sorted({a.project_id for a in activities.values()}):
         membership = access.membership(session, project_id, actor.id)
+        if membership is None and not principal.is_system_admin:
+            hidden |= {a.id for a in activities.values() if a.project_id == project_id}
+            continue
         level = project_view_level(principal, role_permissions=load_role_permission_table(session, project_id),
                                    membership=membership)
         if level is ViewLevel.OWN_ASSIGNMENTS:

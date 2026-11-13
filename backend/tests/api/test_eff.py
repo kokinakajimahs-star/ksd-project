@@ -300,6 +300,40 @@ def test_put_time_entries_gives_contractor_same_404_for_hidden_and_missing_activ
     assert [d["code"] for d in executor.json()["error"]["details"]] == ["NOT_ASSIGNED"]
 
 
+def test_put_time_entries_gives_non_member_same_404_as_missing_activity(
+    world: World, client: TestClient, db_session: Session
+) -> None:
+    """API-EFF-003（6.1・CR-019）：メンバーでない（システム管理者でもない）人が他のプロジェクトの活動を指すと、無い活動と同じ
+    404（``code``・``message``・``details`` の形が同じで、プロジェクトの ID を載せない。活動の有無を明かさない）。
+    メンバーでないシステム管理者は読めるので 404 にしない（今どおり）。読めるプロジェクトで effort.enter_own を持たない閲覧者は 403。"""
+    other = World(client, db_session, code="PRJ-E2")
+    other.assign(other.a, [{"user_id": other.uid("executor")}])
+    world.assign(world.a, [{"user_id": world.uid("executor")}])
+    me = world.uid("executor")
+
+    def put(headers: dict[str, str], *cells: dict[str, Any]) -> Any:
+        return client.put("/api/v1/time-entries", json={"entries": list(cells)}, headers=headers)
+
+    foreign, missing = put(world.h["executor"], cell(other.a, "2026-12-03", 1)), put(world.h["executor"],
+                                                                                  cell(MISSING, "2026-12-03", 1))
+    assert (foreign.status_code, missing.status_code) == (404, 404)
+    assert foreign.json()["error"] == {**missing.json()["error"], "details": [{"activity_ids": [other.a]}]}
+    # 自分の活動・無い活動と混ぜても、他のプロジェクトの活動は無い活動と並べて 404（何も書かない）
+    mixed = put(world.h["executor"], cell(world.a, "2026-12-03", 1), cell(other.a, "2026-12-03", 1),
+                cell(MISSING, "2026-12-03", 1))
+    assert mixed.status_code == 404 and mixed.json()["error"]["details"] == [{"activity_ids": [other.a, MISSING]}]
+    assert stored(db_session, me) == []
+    # どのプロジェクトのメンバーでもない人も同じ
+    outsider = put(world.h["outsider"], cell(world.a, "2026-12-03", 1))
+    assert outsider.status_code == 404 and outsider.json()["error"]["details"] == [{"activity_ids": [world.a]}]
+
+    # 読めるプロジェクト：メンバーでないシステム管理者は 404 にならない（今どおり）。閲覧者は effort.enter_own を持たない 403
+    assert put(world.admin_h, cell(world.a, "2026-12-03", 1)).status_code == 200
+    viewer = put(world.h["viewer"], cell(world.a, "2026-12-03", 1))
+    assert viewer.status_code == 403 and viewer.json()["error"]["details"] == [{"project_id": world.pid}]
+    assert world.enter("executor", [cell(world.a, "2026-12-03", 2)])["changed"] == 1
+
+
 def test_put_time_entries_rejects_invalid_values_and_day_total_over_24(world: World, client: TestClient,
                                                                         db_session: Session) -> None:
     world.assign(world.a, [{"user_id": world.uid("executor")}])
