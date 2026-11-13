@@ -12,7 +12,7 @@ import ProjectSettingsPage, { parseProjectId } from "./ProjectSettingsPage";
 import { collectProjectChanges, formOf } from "./settings/BasicInfoSection";
 import { addHoliday, formatWeekdays, parseWeekdays } from "./settings/CalendarSection";
 import { orderRoles } from "./settings/MembersSection";
-import { tableOf, toRoleGrants } from "./settings/RolePermissionsSection";
+import { NO_PERMISSION_MANAGER_HINT, tableOf, toRoleGrants } from "./settings/RolePermissionsSection";
 import { toScopeInputs } from "./settings/ScopeSection";
 
 const BASE = "/api/v1/projects/3";
@@ -475,6 +475,32 @@ describe("UI-PRJ-002 プロジェクト設定", () => {
     expect(body.roles[1]).toEqual({ role: "PLANNER", permissions: ["project.view", "wbs.edit", "estimate.edit"] });
     expect(body.roles[6]).toEqual({ role: "VIEWER", permissions: ["project.view"] });
     expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(2);
+  });
+
+  it("permission.manage を持つロールが無くなる表（422）は、サーバの文言と直し方を出す", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PM_PERMISSIONS), {
+        [`PUT ${BASE}/role-permissions`]: () =>
+          errorResponse(
+            422,
+            "NO_PERMISSION_MANAGER",
+            "権限の表を変える権限（permission.manage）を持つロールが無くなるため、置き換えられません",
+          ),
+      }),
+    );
+
+    renderAt();
+    const section = await region("権限");
+    fireEvent.click(await within(section).findByLabelText("PM：permission.manage"));
+    fireEvent.click(within(section).getByRole("button", { name: "権限の表を保存する" }));
+
+    const alert = await within(section).findByRole("alert");
+    expect(alert).toHaveTextContent("権限の表を変える権限（permission.manage）を持つロールが無くなるため、置き換えられません");
+    expect(alert).toHaveTextContent(NO_PERMISSION_MANAGER_HINT);
+    const body = sent(calls, "PUT", `${BASE}/role-permissions`)[0]?.body as { roles: RoleGrants[] };
+    expect(body.roles[0]?.permissions).not.toContain("permission.manage");
+    expect(within(section).queryByRole("status")).not.toBeInTheDocument();
+    expect(sent(calls, "GET", "/api/v1/me")).toHaveLength(1);
   });
 
   it("プロジェクトを見られなければ（403）サーバの文言を出し、各節を出さない", async () => {

@@ -9,7 +9,11 @@ export interface User {
   email: string | null;
   organization: string | null;
   is_system_admin: boolean;
+  /** システム管理者が許したプロジェクトの作成（9.1 の project.create。users.can_create_project） */
+  can_create_project: boolean;
   is_active: boolean;
+  /** ログインのロックの終わり（UTC の ISO 8601）。今より後ならロック中（NFR-04）。ロックしていなければ null */
+  locked_until: string | null;
 }
 
 export interface LoginResponse {
@@ -19,6 +23,7 @@ export interface LoginResponse {
   user: User;
 }
 
+/** プロジェクトごとのロールと権限。システム管理者は全てのプロジェクトが載り、メンバーでないものは roles が空（9.2） */
 export interface ProjectPermissions {
   project_id: number;
   roles: string[];
@@ -46,15 +51,17 @@ export interface UserCreateInput {
   email?: string | null;
   organization?: string | null;
   is_system_admin?: boolean;
+  can_create_project?: boolean;
 }
 
-/** 載せた項目だけを変える（API-CMN-005）。ログイン名は変えない */
+/** 載せた項目だけを変える（API-CMN-005）。ログイン名は変えない。パスワードを設定し直すとロックを解く */
 export interface UserUpdateInput {
   display_name?: string;
   email?: string | null;
   organization?: string | null;
   password?: string;
   is_system_admin?: boolean;
+  can_create_project?: boolean;
   is_active?: boolean;
 }
 
