@@ -62,10 +62,22 @@ export interface OperationDraft {
   requestedStart: string;
   /** update_activity・remove_activity：対象の活動の ID */
   activityId: string;
-  /** 依存の端：活動の ID（数字だけ）か、この変更要求で足す活動の仮の名前 */
-  predecessor: string;
-  successor: string;
+  /**
+   * 依存の端（5.9：活動の id か ref）の指し方：今ある活動（一覧から選び、整数の ID を送る）か、
+   * この変更要求で足す活動の仮の名前（文字列の ref を送る。数字だけの名前も文字列のまま）。サーバは JSON の型で区別する
+   */
+  predecessorBy: EndpointBy;
+  /** 今ある活動を選んだときの活動の ID（選択肢の値） */
+  predecessorId: string;
+  /** 仮の名前を選んだときの名前 */
+  predecessorRef: string;
+  successorBy: EndpointBy;
+  successorId: string;
+  successorRef: string;
 }
+
+/** 依存の端の指し方：今ある活動（"id"）か、この変更要求で足す活動の仮の名前（"ref"） */
+export type EndpointBy = "id" | "ref";
 
 export function emptyDraft(op: OperationName = "add_element"): OperationDraft {
   return {
@@ -84,8 +96,12 @@ export function emptyDraft(op: OperationName = "add_element"): OperationDraft {
     estimateHours: "",
     requestedStart: "",
     activityId: "",
-    predecessor: "",
-    successor: "",
+    predecessorBy: "id",
+    predecessorId: "",
+    predecessorRef: "",
+    successorBy: "id",
+    successorId: "",
+    successorRef: "",
   };
 }
 
@@ -127,10 +143,18 @@ function integer(value: string, label: string, min: number): number {
   return Number(text);
 }
 
-/** 依存の端：数字だけなら活動の ID、それ以外は仮の名前（5.9：活動の id か ref） */
-export function activityEndpoint(value: string): number | string {
-  const text = value.trim();
-  return /^\d+$/.test(text) ? Number(text) : text;
+/**
+ * 依存の端（5.9：活動の id か ref）。指し方で型を決める：今ある活動は整数の ID、仮の名前は文字列
+ * （数字だけの名前も文字列のまま送る。サーバの resolve_activity は JSON の型で区別する）
+ */
+function activityEndpoint(by: EndpointBy, activityId: string, ref: string, label: string): number | string {
+  if (by === "ref") {
+    return required(ref, `${label}の仮の名前`);
+  }
+  if (activityId.trim() === "") {
+    throw new DraftError(`${label}の活動を選んでください`);
+  }
+  return integer(activityId, `${label}の活動の ID`, 1);
 }
 
 function build(d: OperationDraft): ChangeOperation {
@@ -211,8 +235,8 @@ function build(d: OperationDraft): ChangeOperation {
     case "remove_dependency":
       return {
         op: d.op,
-        predecessor: activityEndpoint(required(d.predecessor, "先行")),
-        successor: activityEndpoint(required(d.successor, "後続")),
+        predecessor: activityEndpoint(d.predecessorBy, d.predecessorId, d.predecessorRef, "先行"),
+        successor: activityEndpoint(d.successorBy, d.successorId, d.successorRef, "後続"),
       };
   }
 }

@@ -22,6 +22,8 @@ import {
 } from "../../api/chg";
 import { hasProjectPermission } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
+import { fetchAllPages } from "../../api/pages";
+import { listActivities, type Activity } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
 import { formatDateTime } from "../../lib/format";
@@ -51,6 +53,9 @@ export default function ChangeRequestsPage() {
   const [page, setPage] = useState<ChangeRequestList | null>(null);
   const [selected, setSelected] = useState<ChangeRequest | null>(null);
   const [form, setForm] = useState<FormState>(null);
+  /** 変更内容の依存の端に選べる今ある活動（起票・手直しの部品を開いたときに全件を読む。OQ-38 (2)） */
+  const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [activitiesError, setActivitiesError] = useState<ErrorView | null>(null);
   const [impact, setImpact] = useState<Impact | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -87,6 +92,31 @@ export default function ChangeRequestsPage() {
       cancelled = true;
     };
   }, [projectId, statusFilter, offset, reloadKey]);
+
+  const formOpen = form !== null;
+  useEffect(() => {
+    if (projectId === null || !formOpen) {
+      return;
+    }
+    let cancelled = false;
+    setActivities(null);
+    setActivitiesError(null);
+    fetchAllPages((page) => listActivities(projectId, page)).then(
+      (items) => {
+        if (!cancelled) {
+          setActivities(items);
+        }
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setActivitiesError(toErrorView(e));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, formOpen]);
 
   if (projectId === null) {
     return (
@@ -207,6 +237,8 @@ export default function ChangeRequestsPage() {
         <ChangeRequestForm
           key={form.mode === "create" ? "create" : `edit-${form.target.id}`}
           initial={form.mode === "create" ? null : form.target}
+          activities={activities}
+          activitiesError={activitiesError}
           onSave={handleSave}
           onCancel={() => setForm(null)}
         />

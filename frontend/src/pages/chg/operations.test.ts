@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { nextActionStatuses, parseTargetCodes, shiftLabel } from "./labels";
-import { activityEndpoint, buildOperation, describeOperation, emptyDraft, type OperationDraft } from "./operations";
+import { buildOperation, describeOperation, emptyDraft, type OperationDraft } from "./operations";
 
 function draft(overrides: Partial<OperationDraft>): OperationDraft {
   return { ...emptyDraft(overrides.op), ...overrides };
@@ -93,16 +93,47 @@ describe("変更内容の操作の組み立て（5.9）", () => {
     });
   });
 
-  it("依存の端は数字だけなら活動の ID、それ以外は仮の名前", () => {
-    expect(activityEndpoint(" 21 ")).toBe(21);
-    expect(activityEndpoint("a1")).toBe("a1");
-    expect(buildOperation(draft({ op: "add_dependency", predecessor: "21", successor: "a1" }))).toEqual({
+  it("依存の端は指し方で型を決める：今ある活動は整数の ID、仮の名前は文字列（OQ-38 (2)・A-49 の 1）", () => {
+    expect(
+      buildOperation(
+        draft({ op: "add_dependency", predecessorId: "21", successorBy: "ref", successorRef: " a1 " }),
+      ),
+    ).toEqual({
       ok: true,
       operation: { op: "add_dependency", predecessor: 21, successor: "a1" },
     });
-    expect(buildOperation(draft({ op: "remove_dependency", predecessor: "21" }))).toEqual({
+    // 既定の指し方は今ある活動（一覧から選ぶ）
+    expect(emptyDraft("add_dependency")).toMatchObject({ predecessorBy: "id", successorBy: "id" });
+    expect(buildOperation(draft({ op: "remove_dependency", predecessorId: "21" }))).toEqual({
       ok: false,
-      message: "後続を入力してください",
+      message: "後続の活動を選んでください",
+    });
+    expect(buildOperation(draft({ op: "add_dependency", predecessorBy: "ref", successorId: "22" }))).toEqual({
+      ok: false,
+      message: "先行の仮の名前を入力してください",
+    });
+  });
+
+  it("数字だけの仮の名前も文字列の ref として送る（活動の ID とみなさない）", () => {
+    expect(
+      buildOperation(
+        draft({
+          op: "add_dependency",
+          predecessorBy: "ref",
+          predecessorRef: "21",
+          successorBy: "ref",
+          successorRef: "007",
+        }),
+      ),
+    ).toEqual({
+      ok: true,
+      operation: { op: "add_dependency", predecessor: "21", successor: "007" },
+    });
+    expect(
+      buildOperation(draft({ op: "remove_dependency", predecessorId: "21", successorBy: "ref", successorRef: "22" })),
+    ).toEqual({
+      ok: true,
+      operation: { op: "remove_dependency", predecessor: 21, successor: "22" },
     });
   });
 
