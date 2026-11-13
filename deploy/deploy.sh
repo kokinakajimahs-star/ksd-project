@@ -77,9 +77,16 @@ tf() {
   "$TERRAFORM" -chdir="$TF_DIR" "$@"
 }
 
-# 出力の値（状態が無い・出力が無ければ空）
+# 出力の値（状態が無い・出力が無ければ空）。
+# 出力が 1 つも無い状態では、terraform は警告の文を標準出力へ出して終了の状態 0 を返すため、
+# 失敗・複数の行・警告の文は値として使わない（出力はどれも 1 行の値）
 tf_output() {
-  tf output -raw "$1" 2>/dev/null || true
+  local value
+  value="$(tf output -no-color -raw "$1" 2>/dev/null)" || return 0
+  case "$value" in
+    *$'\n'* | *Warning:*) return 0 ;;
+  esac
+  printf '%s' "$value"
 }
 
 ensure_state_bucket() {

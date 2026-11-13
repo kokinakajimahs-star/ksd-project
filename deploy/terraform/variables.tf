@@ -28,12 +28,22 @@ variable "image" {
   description = "サーバのイメージ（Dockerfile の app の段。ダイジェストで指定する）。空なら Cloud Run のサービスと移行のジョブを作らない"
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.image == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?/[^@[:space:]]+@sha256:[0-9a-f]{64}$", var.image))
+    error_message = "image は空か、ダイジェストで指すイメージの名前（…@sha256:<64 桁>）にする。"
+  }
 }
 
 variable "test_image" {
   description = "試験のイメージ（Dockerfile の test の段。ダイジェストで指定する）。空なら PostgreSQL の検証のジョブを作らない"
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.test_image == "" || can(regex("^[a-z0-9.-]+(:[0-9]+)?/[^@[:space:]]+@sha256:[0-9a-f]{64}$", var.test_image))
+    error_message = "test_image は空か、ダイジェストで指すイメージの名前（…@sha256:<64 桁>）にする。"
+  }
 }
 
 variable "db_tier" {
