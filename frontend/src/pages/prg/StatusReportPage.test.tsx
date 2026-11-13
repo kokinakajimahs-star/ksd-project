@@ -6,14 +6,21 @@ import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import type { LightningLine } from "../../api/prg";
 import { makeMe, makeUser } from "../../test/fixtures";
-import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import {
+  errorResponse,
+  jsonResponse,
+  mockApi,
+  pagedResponse,
+  type RecordedCall,
+  type RouteHandler,
+} from "../../test/mockApi";
 import {
   makeFinalizeResult,
   makeProgressEntry,
   makeProgressItems,
   makeProgressMethodResult,
 } from "../../test/prgFixtures";
-import { makeLightningLine, makeLightningRow, makeStatusReport, point } from "../../test/schFixtures";
+import { makeActivity, makeLightningLine, makeLightningRow, makeStatusReport, point } from "../../test/schFixtures";
 import { buildEntryInput, buildItemsInput, itemDraftsFrom, type EntryForm } from "./EntryEditor";
 import StatusReportPage, { remainingText } from "./StatusReportPage";
 
@@ -78,9 +85,19 @@ const REPORTS = [
   makeStatusReport({ id: 41, report_date: "2026-12-10", status: "OPEN" }),
 ];
 
+/** 自分（利用者 5）が担当の活動：lineFor の 3 つの活動の全て（API-SCH-001 の assignees） */
+const MINE = { user_id: 5, display_name: "PM 一郎", planned_hours: null };
+const OTHER = { user_id: 9, display_name: "実行 花子", planned_hours: null };
+const ALL_MINE = [21, 22, 24].map((id) => makeActivity({ id, assignees: [MINE] }));
+
+function activitiesRoute(activities = ALL_MINE): RouteHandler {
+  return (call) => pagedResponse(activities, call, { dependencies: [], restricted: false });
+}
+
 function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<string, RouteHandler> {
   return {
     "GET /api/v1/me": () => jsonResponse(200, me),
+    [`GET ${BASE}/activities`]: activitiesRoute(),
     [`GET ${BASE}/status-reports`]: () => jsonResponse(200, { items: REPORTS, total: 2, limit: 1000, offset: 0 }),
     [`GET ${BASE}/status-reports/41/lightning-line`]: () => jsonResponse(200, lineFor(41)),
     [`GET ${BASE}/status-reports/40/lightning-line`]: () => jsonResponse(200, lineFor(40, "FINALIZED")),
@@ -225,7 +242,7 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     expect(body.actual_finish).toBe("2026-12-08");
   });
 
-  it("自分の割当でない活動への 403 はサーバの文言を出す", async () => {
+  it("担当と読んだ活動でも、サーバが 403（読んだ後に割当が外れた など）を返せばその文言を出す", async () => {
     mockApi(
       routes(meWith(["project.view", "progress.enter_own"]), {
         [`PUT ${BASE}/status-reports/41/progress/21`]: () =>
@@ -239,6 +256,68 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     fireEvent.click(screen.getByRole("button", { name: "進捗を保存する" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("自分の割当の活動ではありません");
+  });
+
+  it("progress.enter_own だけの人には、自分が担当（API-SCH-001 の assignees）の活動にだけ「入力する」を出す（OQ-42 (21)）", async () => {
+    // 1000 件を超える活動を読み足し、2 頁目にある活動 24 の担当に自分がいる
+    const fillers = Array.from({ length: 1000 }, (_, i) => makeActivity({ id: 1000 + i, assignees: [MINE] }));
+    const activities = [
+      makeActivity({ id: 21, assignees: [OTHER] }),
+      makeActivity({ id: 22, assignees: [] }),
+      ...fillers,
+      makeActivity({ id: 24, assignees: [OTHER, MINE] }),
+    ];
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), { [`GET ${BASE}/activities`]: activitiesRoute(activities) }),
+    );
+    renderAt();
+    await table();
+
+    expect(await screen.findByRole("button", { name: "環境整備 を入力する" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "資料作成 を入力する" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "関係者調整 を入力する" })).toBeNull();
+    expect(sent(calls, "GET", `${BASE}/activities`).map((c) => c.url)).toEqual([
+      `${BASE}/activities?limit=1000&offset=0`,
+      `${BASE}/activities?limit=1000&offset=1000`,
+    ]);
+  });
+
+  it("progress.enter_own と schedule.edit を持つ人は、担当でない活動では算定方式だけを変えられる", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_own", "schedule.edit"]), {
+        [`GET ${BASE}/activities`]: activitiesRoute([makeActivity({ id: 21, assignees: [OTHER] })]),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "資料作成 を入力する" }));
+    expect(screen.getByRole("form", { name: "算定方式" })).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "進捗の入力" })).toBeNull();
+  });
+
+  it("progress.enter_all を持つ人は全ての活動に「入力する」を出し、担当を読まない", async () => {
+    const { calls } = mockApi(routes(meWith(["project.view", "progress.enter_own", "progress.enter_all"])));
+    renderAt();
+    await table();
+
+    expect(await screen.findByRole("button", { name: "資料作成 を入力する" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "関係者調整 を入力する" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "環境整備 を入力する" })).toBeInTheDocument();
+    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(0);
+  });
+
+  it("担当の活動を読めなければ理由を出し、「入力する」を出さない", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        [`GET ${BASE}/activities`]: () => errorResponse(500, "INTERNAL_ERROR", "サーバの内部で誤りが起きました"),
+      }),
+    );
+    renderAt();
+    await table();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("サーバの内部で誤りが起きました");
+    expect(screen.queryByRole("button", { name: /を入力する$/ })).toBeNull();
   });
 
   it("schedule.edit を持つ人は活動の算定方式を変えられる（API-PRG-005。PRG-05）", async () => {
