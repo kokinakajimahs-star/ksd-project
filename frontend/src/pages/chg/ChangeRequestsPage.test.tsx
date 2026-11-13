@@ -6,7 +6,7 @@ import type { ChangeRequest } from "../../api/chg";
 import { setAuthToken } from "../../api/client";
 import type { Me } from "../../api/cmn";
 import { makeChangeRequest, makeImpact, makeImpactBody, memberPage } from "../../test/chgFixtures";
-import { makeMe, makeMember, makeUser } from "../../test/fixtures";
+import { makeMe, makeMember, makeProject, makeUser } from "../../test/fixtures";
 import {
   errorResponse,
   jsonResponse,
@@ -16,7 +16,7 @@ import {
   type RouteHandler,
 } from "../../test/mockApi";
 import { makeActivity } from "../../test/schFixtures";
-import ChangeRequestsPage, { canAnalyze } from "./ChangeRequestsPage";
+import ChangeRequestsPage, { canAnalyze, wbsAllowsApply } from "./ChangeRequestsPage";
 
 const BASE = "/api/v1/projects/3";
 
@@ -57,6 +57,8 @@ function routes(me: Me, overrides: Record<string, RouteHandler> = {}): Record<st
       jsonResponse(200, memberPage([makeMember({ user_id: 2, display_name: "計画 太郎" })])),
     [`GET ${BASE}/change-requests`]: () => jsonResponse(200, page([DRAFT, SUBMITTED, APPROVED])),
     [`GET ${BASE}/activities`]: (call) => pagedResponse(ACTIVITIES, call, { dependencies: [], restricted: false }),
+    // 承認済みを change.apply を持つ人が開くと、反映を押せるかを決めるために WBS の状態を読む（API-PRJ-003）
+    [`GET ${BASE}`]: () => jsonResponse(200, makeProject({ id: 3, wbs_status: "BASELINED" })),
     ...overrides,
   };
 }
@@ -526,6 +528,74 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
     expect(await screen.findByRole("alert")).toHaveTextContent("承認済みではない");
   });
 
+  it("WBS が基準化済みでなければ、反映を押せなくし、理由と今の状態を出す（API-CHG-006 は 409 になるため。A-47 の 2）", async () => {
+    const { calls } = mockApi(
+      routes(meWith(PM), {
+        [`GET ${BASE}`]: () => jsonResponse(200, makeProject({ id: 3, wbs_status: "IN_REVIEW" })),
+      }),
+    );
+    renderAt();
+
+    await openRequest(3);
+    const button = screen.getByRole("button", { name: "反映する（再基準化）" });
+    await waitFor(() => {
+      expect(button).toBeDisabled();
+    });
+    expect(screen.getByText(/反映は WBS が基準化済みのときだけできる（いまの WBS の状態：レビュー中）/)).toBeInTheDocument();
+    fireEvent.click(button);
+    expect(sent(calls, "POST", `${BASE}/change-requests/73/apply`)).toHaveLength(0);
+  });
+
+  it("開き直すと WBS の状態を読み直し、別の画面で基準化されていれば反映を押せるようにする", async () => {
+    let wbsStatus = "IN_REVIEW";
+    const { calls } = mockApi(
+      routes(meWith(PM), {
+        [`GET ${BASE}`]: () => jsonResponse(200, makeProject({ id: 3, wbs_status: wbsStatus })),
+      }),
+    );
+    renderAt();
+
+    await openRequest(3);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "反映する（再基準化）" })).toBeDisabled();
+    });
+    expect(sent(calls, "GET", BASE)).toHaveLength(1);
+
+    wbsStatus = "BASELINED";
+    fireEvent.click(screen.getByRole("button", { name: "変更要求 #3 を開く" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "反映する（再基準化）" })).toBeEnabled();
+    });
+    expect(sent(calls, "GET", BASE)).toHaveLength(2);
+    expect(screen.queryByText(/反映は WBS が基準化済みのときだけできる/)).toBeNull();
+  });
+
+  it("WBS の状態を読めないときは、反映を押させてサーバの判断を出す", async () => {
+    mockApi(
+      routes(meWith(PM), {
+        [`GET ${BASE}`]: () => errorResponse(500, "INTERNAL", "読めない"),
+        [`POST ${BASE}/change-requests/73/apply`]: () =>
+          errorResponse(409, "INVALID_STATE", "WBS が基準化済みでないので反映できない"),
+      }),
+    );
+    renderAt();
+
+    await openRequest(3);
+    const button = screen.getByRole("button", { name: "反映する（再基準化）" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("WBS が基準化済みでないので反映できない");
+  });
+
+  it("change.apply の無い人が承認済みを開いても、WBS の状態は読まない", async () => {
+    const { calls } = mockApi(routes(meWith(PLANNER)));
+    renderAt();
+
+    await openRequest(3);
+    expect(screen.queryByRole("button", { name: "反映する（再基準化）" })).toBeNull();
+    expect(sent(calls, "GET", BASE)).toHaveLength(0);
+  });
+
   it("一覧を読めない（403）ときはサーバの文言を出す", async () => {
     mockApi(
       routes(meWith([]), {
@@ -542,6 +612,14 @@ describe("UI-CHG-001 変更要求（作成・影響分析・提出・反映）",
     expect(container.querySelector('[data-screen-id="UI-CHG-001"]')).not.toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("プロジェクトが見つかりません");
     expect(calls).toHaveLength(0);
+  });
+
+  it("反映を押せるのは、WBS が基準化済みか、状態を読めなかったとき", () => {
+    expect(wbsAllowsApply("BASELINED")).toBe(true);
+    expect(wbsAllowsApply(null)).toBe(true);
+    expect(wbsAllowsApply("DRAFT")).toBe(false);
+    expect(wbsAllowsApply("IN_REVIEW")).toBe(false);
+    expect(wbsAllowsApply("PENDING_APPROVAL")).toBe(false);
   });
 
   it("影響分析を流せるのは、反映済み・却下でないとき", () => {

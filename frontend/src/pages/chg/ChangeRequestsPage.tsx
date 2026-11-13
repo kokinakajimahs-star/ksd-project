@@ -23,10 +23,12 @@ import {
 import { hasProjectPermission } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import { fetchAllPages } from "../../api/pages";
+import { getProject } from "../../api/prj";
 import { listActivities, type Activity } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
 import { formatDateTime } from "../../lib/format";
+import { wbsStatusLabel } from "../prj/labels";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
 import ChangeRequestForm from "./ChangeRequestForm";
 import ImpactView from "./ImpactView";
@@ -38,6 +40,14 @@ import { useProjectMembers } from "./useProjectMembers";
 /** 影響分析を流せる状態（反映済み・却下はサーバが 409 を返す。API-CHG-004） */
 export function canAnalyze(status: ChangeRequestStatus): boolean {
   return status !== "APPLIED" && status !== "REJECTED";
+}
+
+/**
+ * 反映（API-CHG-006）を押せる WBS の状態。サーバは WBS が基準化済み（BASELINED）のときだけ反映し、
+ * それ以外は 409 `INVALID_STATE` で何も書かない（5.10・A-47 の 2）。状態を読めなかった（null）ときは押させ、サーバに判断させる
+ */
+export function wbsAllowsApply(wbsStatus: string | null): boolean {
+  return wbsStatus === null || wbsStatus === "BASELINED";
 }
 
 type FormState = { mode: "create" } | { mode: "edit"; target: ChangeRequest } | null;
@@ -61,6 +71,10 @@ export default function ChangeRequestsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<ErrorView | null>(null);
   const [actionError, setActionError] = useState<ErrorView | null>(null);
+  /** 承認済みを開いたときに読む WBS の状態（反映を押せるかを決める。読めなければ null） */
+  const [wbsStatus, setWbsStatus] = useState<string | null>(null);
+  /** 変更要求を開いた回数。開き直すたびに WBS の状態を読み直す（別の画面で基準化されたのを拾う） */
+  const [openCount, setOpenCount] = useState(0);
 
   useEffect(() => {
     if (projectId === null) {
@@ -118,6 +132,36 @@ export default function ChangeRequestsPage() {
     };
   }, [projectId, formOpen]);
 
+  const needsWbsStatus =
+    projectId !== null &&
+    selected?.status === "APPROVED" &&
+    me !== null &&
+    hasProjectPermission(me, projectId, "change.apply");
+  useEffect(() => {
+    if (projectId === null || !needsWbsStatus) {
+      return;
+    }
+    let cancelled = false;
+    setWbsStatus(null);
+    getProject(projectId).then(
+      (project) => {
+        if (!cancelled) {
+          setWbsStatus(project.wbs_status);
+        }
+      },
+      () => {
+        // 読めなければ反映を押させ、サーバの判断（409 なら文言）を出す
+        if (!cancelled) {
+          setWbsStatus(null);
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // 開き直したとき・一覧を読み直したとき（page が変わる）にも読み直す
+  }, [projectId, needsWbsStatus, openCount, page]);
+
   if (projectId === null) {
     return (
       <section data-screen-id="UI-CHG-001" className="change-requests-page">
@@ -135,6 +179,7 @@ export default function ChangeRequestsPage() {
 
   function open(item: ChangeRequest) {
     setSelected(item);
+    setOpenCount((n) => n + 1);
     setImpact(null);
     setActionError(null);
     setForm(null);
@@ -377,11 +422,21 @@ export default function ChangeRequestsPage() {
               </button>
             )}
             {selected.status === "APPROVED" && canApply && (
-              <button type="button" disabled={busy} onClick={() => void handleApply()}>
+              <button
+                type="button"
+                disabled={busy || !wbsAllowsApply(wbsStatus)}
+                onClick={() => void handleApply()}
+              >
                 反映する（再基準化）
               </button>
             )}
           </div>
+          {selected.status === "APPROVED" && canApply && !wbsAllowsApply(wbsStatus) && wbsStatus !== null && (
+            <p className="hint">
+              反映は WBS が基準化済みのときだけできる（いまの WBS の状態：{wbsStatusLabel(wbsStatus)}）。
+              WBS のレビューと承認で基準化してから反映する。
+            </p>
+          )}
 
           {impact !== null && <ImpactView impact={impact} title="影響分析（試算。本計画は変えない）" />}
           {impact === null && selected.impact !== null && (
