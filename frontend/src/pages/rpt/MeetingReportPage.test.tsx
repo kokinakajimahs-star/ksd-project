@@ -61,8 +61,10 @@ describe("UI-RPT-001 定例会議レポート", () => {
     expect(container.querySelector('[data-screen-id="UI-RPT-001"]')).not.toBeNull();
     expect(calls.map((c) => c.url).sort()).toEqual(["/api/v1/me", REPORT_URL]);
     expect(screen.getByText(/報告日 2026-12-10（入力中）/)).toHaveTextContent(
-      "値：計算値（確定前）・表示の範囲 2026-11-12〜2027-01-07",
+      "進捗の値：計算値（確定前）・表示の範囲 2026-11-12〜2027-01-07",
     );
+    // 計画の値は表示した時点の最新計画（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent("計画は表示した時点の最新計画");
 
     // 下段左：遅延一覧（サーバの順＝遅れの大きい順・遅延理由・完了見込み）
     const delayRows = within(delays).getAllByRole("row").slice(1);
@@ -174,7 +176,11 @@ describe("UI-RPT-001 定例会議レポート", () => {
     const { container } = renderAt();
 
     expect(await screen.findByText("遅延している活動はありません")).toBeInTheDocument();
-    expect(screen.getByText(/報告日 2026-12-10（確定済み）/)).toHaveTextContent("値：確定時の写し");
+    expect(screen.getByText(/報告日 2026-12-10（確定済み）/)).toHaveTextContent("進捗の値：確定時の写し");
+    // 確定済みでも計画の値は写しでなく、表示した時点の最新計画（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent(
+      "計画は表示した時点の最新計画（ガントのバー、マイルストーンの予定日・見込み日・ずれ）",
+    );
     expect(screen.getByText("マイルストーンはありません")).toBeInTheDocument();
     expect(container.querySelector('[data-kpi="overall_progress"]')).toHaveTextContent("算定できない");
     expect(container.querySelector('[data-kpi="eac_variance_hours"]')).toHaveTextContent(

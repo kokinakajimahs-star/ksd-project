@@ -50,6 +50,8 @@ describe("UI-RPT-002 共有ビュー（ログイン不要）", () => {
       "（読むだけ）",
     );
     expect(screen.getByRole("table", { name: "マイルストーンの状況" })).toBeInTheDocument();
+    // 共有の会議レポートにも、計画は表示した時点の最新計画と書く（7.4。CR-013）
+    expect(container.querySelector('[data-note="plan-source"]')).toHaveTextContent("計画は表示した時点の最新計画");
     expect(container.querySelector('[data-kpi="overall_progress"]')).toHaveTextContent("37.5%");
     expect(screen.getByRole("img", { name: "ガントチャート" })).toHaveAttribute("width", String(280 + 57 * 24));
     // 読むだけ：書き込みの部品（共有リンクの作成など）は置かない

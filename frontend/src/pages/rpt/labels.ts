@@ -2,7 +2,7 @@
 import type { ReportSource, ShareLink, ShareLinkFailure, ShareScope } from "../../api/rpt";
 import { serverTime } from "../../lib/format";
 
-/** 値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値 */
+/** 進捗の値の源（API-RPT-001 の source）。確定済みは写し（BR-13）、確定前は計算値。計画の値は常に最新計画（CR-013） */
 export function sourceLabel(source: ReportSource): string {
   return source === "SNAPSHOT" ? "確定時の写し" : "計算値（確定前）";
 }
