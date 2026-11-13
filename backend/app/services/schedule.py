@@ -68,7 +68,12 @@ from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
 from app.models.prg import ProgressEntry, ProgressItem, StatusReport
 from app.models.prj import WORKING_WEEKDAYS_DEFAULT, Calendar, CalendarHoliday, Project, ProjectMember
-from app.models.sch import Activity, ActivityDependency, ScheduleBaseline, ScheduleBaselineItem
+from app.models.sch import (  # API 層は依存・スケジュールベースラインの型をここから取る（1.3：API はモデルを直接 import しない）
+    Activity,
+    ActivityDependency as ActivityDependency,
+    ScheduleBaseline as ScheduleBaseline,
+    ScheduleBaselineItem,
+)
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess

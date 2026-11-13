@@ -74,16 +74,16 @@ from app.models.prj import ProjectMember
 from app.models.sch import Activity, ActivityDependency
 from app.models.wbs import WbsCodeHistory, WbsDictionaryEntry, WbsElement
 from app.services.auth import authorize_project
-from app.services.estimate import _hours_per_day, _visible
+from app.services.estimate import project_hours_per_day, visible_scope
 from app.services.project_access import ProjectAccess
 from app.services.schedule import Plan, ScheduleLinks, calculate_and_store, load_plan, resolve_activity_dates
 from app.services.wbs import (
     ActivitiesReader,
     WbsContext,
-    _coded,
-    _load,
-    _mark_edited,
-    _preorder,
+    coded_element,
+    load_wbs_context,
+    mark_wbs_edited,
+    preorder_elements,
 )
 
 DATA_EXPORT: Final = "data.export"
@@ -246,7 +246,7 @@ def _add_estimate_record(
     """見積の値を変えた記録を 1 行足す（EST-08。単位は人時。API-EST-001 と同じ形）。"""
     record = record_estimate(
         project_id=project_id, target_type=target_type, target_id=target_id, input_value=hours,
-        input_unit=InputUnit.HOUR, hours_per_day=_hours_per_day(session, project_id), entered_by=actor.id,
+        input_unit=InputUnit.HOUR, hours_per_day=project_hours_per_day(session, project_id), entered_by=actor.id,
         entered_at=now,
     )
     session.add(EstimateRecord(
@@ -350,11 +350,11 @@ def export_data(
     """
     table = authorize_project(session, access, actor, project_id, DATA_EXPORT)
     plan = load_plan(session, project_id)
-    visible = _visible(session, access, actor, project_id, table, plan.elements, plan.activities)
+    visible = visible_scope(session, access, actor, project_id, table, plan.elements, plan.activities)
     rows: list[WbsRow] | list[ActivityRow] | list[TimeEntryRow]
     if target is TabularTarget.WBS:
         current = _wbs_rows(session, plan.elements, _dictionaries(session, (e.id for e in plan.elements)))
-        rows = [current[e.id] for e, _ in _preorder(plan.elements) if visible is None or e.id in visible.element_ids]
+        rows = [current[e.id] for e, _ in preorder_elements(plan.elements) if visible is None or e.id in visible.element_ids]
     elif target is TabularTarget.ACTIVITIES:
         rows = _export_activities(session, links, project_id, plan.elements, plan.ordered_activities(),
                                   plan.dependencies, visible)
@@ -500,7 +500,7 @@ def _import_wbs(
     file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.WBS
-    context = _load(session, project_id, activities)
+    context = load_wbs_context(session, project_id, activities)
     dictionaries = _dictionaries(session, (e.id for e in context.elements))
     current = _wbs_rows(session, context.elements, dictionaries)
     assignable = _assignable(session, project_id)
@@ -508,7 +508,7 @@ def _import_wbs(
     known = set(assignable) | {r.responsible_login_id for r in current.values() if r.responsible_login_id is not None}
     plan = plan_wbs_import(
         grid,
-        elements=[_coded(e) for e in context.elements],
+        elements=[coded_element(e) for e in context.elements],
         current=current,
         login_ids=known,
         history=_history(session, project_id),
@@ -537,7 +537,7 @@ def _import_wbs(
                             plan.unchanged)
 
     keys = _write_wbs(session, actor, context.project.id, context, dictionaries, plan.changes, assignable, now)
-    _mark_edited(context.project)
+    mark_wbs_edited(context.project)
     session.commit()
     return ImportResult(target, file_format, dry_run, True, (),
                         tuple(ChangeSummary(c.line, c.action.value, keys[c.line], c.changed) for c in plan.changes),
@@ -578,7 +578,7 @@ def _write_wbs(
         parent_id = parent_of(change)
         parent = None if parent_id is None else by_id[parent_id]
         try:
-            code = new_element_code(None if parent is None else _coded(parent), rule,
+            code = new_element_code(None if parent is None else coded_element(parent), rule,
                                     top_last_child_seq=context.rule_row.top_last_child_seq if parent is None else None)
         except WbsCodeError as exc:
             raise code_error(exc) from exc
@@ -621,7 +621,7 @@ def _write_wbs(
         element, new_parent_id = by_id[element_id], moves[element_id]
         try:
             result = move_element(
-                [_coded(e) for e in elements], element_id, new_parent_id, rule,
+                [coded_element(e) for e in elements], element_id, new_parent_id, rule,
                 top_last_child_seq=context.rule_row.top_last_child_seq
                 if new_parent_id is None and element.parent_id is not None else None,
             )
@@ -694,7 +694,7 @@ def _import_activities(
     login_ids.update(assignable)
     result = plan_activity_import(
         grid,
-        elements=[_coded(e) for e in plan.elements],
+        elements=[coded_element(e) for e in plan.elements],
         work_package_ids=[e.id for e in plan.elements if e.kind == WORK_PACKAGE],
         current=current,
         login_ids=login_ids,

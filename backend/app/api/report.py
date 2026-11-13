@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_project_access
 from app.api.schedule import gantt_out, get_schedule_links
-from app.models.cmn import ShareLink
 from app.schemas.progress import OverlaidVertexOut
 from app.schemas.report import (
     MeetingReportOut,
@@ -32,7 +31,7 @@ from app.services import report as report_service
 from app.services.auth import User
 from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
-from app.services.report import MeetingReportView
+from app.services.report import MeetingReportView, ShareLink
 from app.services.schedule import ScheduleLinks
 
 router = APIRouter(tags=["report"])

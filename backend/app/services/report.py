@@ -43,7 +43,8 @@ from app.domain.snapshot import Snapshot, SnapshotActivity, SnapshotItem, Status
 from app.errors import AppError
 from app.infra.security import generate_token
 from app.models.chg import CorrectiveAction
-from app.models.cmn import ShareLink, User
+from app.models.cmn import ShareLink as ShareLink  # API 層は共有リンクの型をここから取る（1.3：API はモデルを直接 import しない）
+from app.models.cmn import User
 from app.models.prg import ProgressEntry, ProgressSnapshot, ProgressSnapshotItem, StatusReport
 from app.models.prj import Project
 from app.models.sch import Activity, ScheduleBaseline

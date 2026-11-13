@@ -70,7 +70,7 @@ from app.models.wbs import (
 from app.services.auth import User, authorize_project, principal_of
 from app.services.project_access import ProjectAccess
 from app.services.schedule import calculate_and_store, load_plan, work_calendar
-from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, _rule_row
+from app.services.wbs import DICTIONARY_FIELDS, TARGET_CHANGE_REQUEST, numbering_rule_row
 
 # 4.1 の schedule_baselines.name の列の長さ（A-19）
 _BASELINE_NAME_LIMIT = 200
@@ -578,7 +578,7 @@ def _write_plan(session: Session, project_id: int, applied: AppliedChange) -> No
         row.needs_renumber = element.needs_renumber
     # 第 1 階層の数え（設計書 1.1 の 4.1・5.2。第 1 階層へ足したら進む。減らさない）
     if applied.plan.top_last_child_seq is not None:
-        rule_row = _rule_row(session, project_id)
+        rule_row = numbering_rule_row(session, project_id)
         rule_row.top_last_child_seq = max(rule_row.top_last_child_seq, applied.plan.top_last_child_seq)
 
     # 活動：足す・変える（日程の計算結果の列は後で計算し直す）
