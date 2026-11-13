@@ -462,6 +462,79 @@ def test_only_enter_all_changes_approved(app: FastAPI, world: World, client: Tes
     assert current() == [("設計書", True, False), ("試験", False, True)]
 
 
+def test_only_enter_all_removes_or_retypes_approved_and_work_items(app: FastAPI, world: World,
+                                                                   client: TestClient) -> None:
+    """API-PRG-004（設計書 6.2・CR-014）：enter_own だけの人は、承認済みの項目と作業項目（WORK）を消せず、種類を変えられない
+    （承認済み作業割合を承認なしで変えないため。403 で何も書かない）。判定は保存済みの値で行う。名前・重み・完了の変更と、
+    未承認で作業でない項目を消す・種類を変えること、未承認の項目を足すことは今どおり。enter_all の人は全てできる。"""
+    a = world.add("A", duration_days=4)
+    world.report("2026-12-03")
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["executor"].id: {a}, world.users["contractor"].id: {a}}))
+    url = world.url(f"/activities/{a}/progress-items")
+
+    def put(who: str, *items: dict[str, Any]) -> Any:
+        return client.put(url, json={"items": list(items)}, headers=world.h[who])
+
+    def current() -> list[dict[str, Any]]:
+        return [{k: i[k] for k in ("id", "item_type", "title", "weight", "done", "approved")}
+                for i in client.get(url, headers=world.h["viewer"]).json()["items"]]
+
+    def refused_details(response: Any) -> list[tuple[Any, Any]]:
+        assert response.status_code == 403 and error_code(response) == "FORBIDDEN", response.text
+        return [(d.get("loc"), d.get("progress_item_id")) for d in response.json()["error"]["details"]]
+
+    created = put("pm", {"item_type": "WORK", "title": "承認済み作業", "approved": True},
+                  {"item_type": "WORK", "title": "未承認作業"},
+                  {"item_type": "CHECK", "title": "承認済み検証", "approved": True},
+                  {"item_type": "CHECK", "title": "未承認検証"},
+                  {"item_type": "DELIVERABLE", "title": "未承認成果物"})
+    assert created.status_code == 200, created.text
+    saved = current()
+    aw, uw, ac, uc, ud = saved
+    assert [(i["item_type"], i["approved"]) for i in saved] == [
+        ("WORK", True), ("WORK", False), ("CHECK", True), ("CHECK", False), ("DELIVERABLE", False)]
+
+    items_loc = ["body", "items"]
+    for who in ("executor", "contractor"):
+        # 承認済みの項目・作業項目を消す（送った一覧に載せない）
+        assert refused_details(put(who, uw, ac, uc, ud)) == [(items_loc, aw["id"])]
+        assert refused_details(put(who, aw, ac, uc, ud)) == [(items_loc, uw["id"])]
+        assert refused_details(put(who, aw, uw, uc, ud)) == [(items_loc, ac["id"])]
+        # 承認済みの項目・作業項目の種類を変える
+        assert refused_details(put(who, {**aw, "item_type": "CHECK"}, uw, ac, uc, ud)) == [
+            (["body", "items", 0, "item_type"], None)]
+        assert refused_details(put(who, aw, {**uw, "item_type": "CHECK"}, ac, uc, ud)) == [
+            (["body", "items", 1, "item_type"], None)]
+        assert refused_details(put(who, aw, uw, {**ac, "item_type": "WORK"}, uc, ud)) == [
+            (["body", "items", 2, "item_type"], None)]
+        # 許す変更（名前・完了）と並べても、拒む変更があれば何も書かない。拒む理由は全て載せる（承認済みの変更も同じ 403）
+        mixed = put(who, {**uw, "item_type": "DELIVERABLE"}, {**ac, "title": "改名", "done": True, "approved": False},
+                    {**uc, "done": True}, ud)
+        assert refused_details(mixed) == [(["body", "items", 0, "item_type"], None),
+                                          (["body", "items", 1, "approved"], None), (items_loc, aw["id"])]
+        assert current() == saved
+
+    # enter_own だけでも：名前・重み・完了を変える、未承認で作業でない項目を消す・種類を変える、未承認の項目を足すのは通る
+    allowed = put("executor", {**aw, "title": "承認済み作業（改）", "weight": 2, "done": True}, {**uw, "done": True},
+                  {**ac, "weight": 3}, {**ud, "item_type": "CHECK"}, {"item_type": "WORK", "title": "足した作業"})
+    assert allowed.status_code == 200, allowed.text
+    after = current()
+    assert [(i["item_type"], i["title"], i["weight"], i["done"], i["approved"]) for i in after] == [
+        ("WORK", "承認済み作業（改）", 2.0, True, True), ("WORK", "未承認作業", 1.0, True, False),
+        ("CHECK", "承認済み検証", 3.0, False, True), ("CHECK", "未承認成果物", 1.0, False, False),
+        ("WORK", "足した作業", 1.0, False, False)]
+    assert uc["id"] not in [i["id"] for i in after]
+
+    # enter_all（進捗管理担当者）は承認済みの項目・作業項目を消し、種類を変えられる
+    aw2, uw2, ac2, ud2, added = after
+    done = put("progress", {**uw2, "item_type": "CHECK"}, {**ac2, "item_type": "DELIVERABLE"}, ud2)
+    assert done.status_code == 200, done.text
+    assert [(i["id"], i["item_type"], i["approved"]) for i in current()] == [
+        (uw2["id"], "CHECK", False), (ac2["id"], "DELIVERABLE", True), (ud2["id"], "CHECK", False)]
+    assert aw2["id"] not in [i["id"] for i in current()] and added["id"] not in [i["id"] for i in current()]
+
+
 def test_project_default_method_change_refreshes_open_entries(world: World, client: TestClient,
                                                               db_session: Session) -> None:
     """API-PRJ-004 で算定方式の既定を変えると、既定に従う活動の OPEN の報告日の進捗率を求め直す（ガントとイナズマ線を揃える）。"""

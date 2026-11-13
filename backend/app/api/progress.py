@@ -179,7 +179,8 @@ def replace_progress_items(
     権限は progress.enter_own（自分の割当の活動）か progress.enter_all。委託先に見えない活動は無い活動と同じ 404（9.2 の注記）。
     ``id`` を載せた項目は変え、載せない項目は足し、載せなかった既存の項目は消す（他の活動の項目の ``id`` は 400）。
     ``approved`` を変えるのは progress.enter_all を持つ人だけ（enter_own だけの人が変えると 403。足す項目を真にするのも変える。
-    保存済みと同じ値を送るのは変えたことにしない）。OPEN の報告日の進捗率を求め直す（BR-06）。
+    保存済みと同じ値を送るのは変えたことにしない）。enter_own だけの人は、承認済みの項目と作業項目（WORK）を消せず種類を
+    変えられない（同じ 403。CR-014）。OPEN の報告日の進捗率を求め直す（BR-06）。
     """
     view = progress_service.replace_progress_items(
         session, access, user, project_id, activity_id, [i.model_dump() for i in body.items], now=now

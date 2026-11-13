@@ -21,7 +21,7 @@ import {
   makeProgressMethodResult,
 } from "../../test/prgFixtures";
 import { makeActivity, makeLightningLine, makeLightningRow, makeStatusReport, point } from "../../test/schFixtures";
-import { buildEntryInput, buildItemsInput, itemDraftsFrom, type EntryForm } from "./EntryEditor";
+import { buildEntryInput, buildItemsInput, guardedItemIds, itemDraftsFrom, type EntryForm } from "./EntryEditor";
 import StatusReportPage, { remainingText } from "./StatusReportPage";
 
 const BASE = "/api/v1/projects/3";
@@ -532,6 +532,107 @@ describe("UI-PRG-001 進捗入力（報告日）", () => {
     });
   });
 
+  it("progress.enter_own だけの人には、承認済みの項目と作業項目の削除・種類の変更を出さない（API-PRG-004。CR-014）", async () => {
+    const current = makeProgressItems({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: false, approved: true, done_at: null },
+        { id: 91, item_type: "WORK", title: "作業", weight: 1, done: false, approved: false, done_at: null },
+        { id: 92, item_type: "DELIVERABLE", title: "試験仕様書", weight: 1, done: false, approved: false, done_at: null },
+        { id: 93, item_type: "CHECK", title: "確認", weight: 1, done: false, approved: false, done_at: null },
+      ],
+    });
+    const after = makeProgressItems({
+      items: [
+        current.items[0]!,
+        { ...current.items[1]!, done: true },
+        { ...current.items[2]!, item_type: "WORK" },
+        { id: 94, item_type: "DELIVERABLE", title: "移行手順書", weight: 1, done: false, approved: false, done_at: null },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+        [`PUT ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, after),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const form = await screen.findByRole("form", { name: "算定項目" });
+    expect(within(form).getByText(/承認済みの項目と作業の項目を外す・種類を変えるのも同じ/)).toBeInTheDocument();
+    const rows = within(within(form).getByRole("table", { name: "算定項目の一覧" })).getAllByRole("row");
+    // 承認済みの項目（1 行目）と作業項目（2 行目）：種類は読むだけ、外すボタンは無い。名前・完了は変えられる
+    for (const [n, label] of [
+      [1, "成果物"],
+      [2, "作業"],
+    ] as const) {
+      expect(within(form).queryByLabelText(`${n} 行目の種類`)).toBeNull();
+      expect(within(form).queryByRole("button", { name: `${n} 行目を外す` })).toBeNull();
+      expect(within(rows[n]!).getByText(label)).toBeInTheDocument();
+      expect(within(form).getByLabelText(`${n} 行目の名前`)).toBeEnabled();
+      expect(within(form).getByLabelText(`${n} 行目の完了`)).toBeEnabled();
+    }
+    // 未承認で作業でない項目（3・4 行目）は外せ、種類を変えられる。作業に変えても保存するまでは外せる（保存済みの値で決める）
+    fireEvent.change(within(form).getByLabelText("3 行目の種類"), { target: { value: "WORK" } });
+    expect(within(form).getByLabelText("3 行目の種類")).toHaveValue("WORK");
+    expect(within(form).getByRole("button", { name: "3 行目を外す" })).toBeInTheDocument();
+    fireEvent.click(within(form).getByRole("button", { name: "4 行目を外す" }));
+    fireEvent.change(within(form).getByLabelText("1 行目の名前"), { target: { value: "設計書（改）" } });
+    fireEvent.click(within(form).getByLabelText("2 行目の完了"));
+    // 足した項目は外せ、種類を変えられる
+    fireEvent.click(within(form).getByRole("button", { name: "項目を足す" }));
+    expect(within(form).getByLabelText("4 行目の種類")).toBeEnabled();
+    expect(within(form).getByRole("button", { name: "4 行目を外す" })).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText("4 行目の名前"), { target: { value: "移行手順書" } });
+    fireEvent.click(within(form).getByRole("button", { name: "算定項目を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)[0]!.body).toEqual({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書（改）", weight: 1, done: false, approved: true },
+        { id: 91, item_type: "WORK", title: "作業", weight: 1, done: true, approved: false },
+        { id: 92, item_type: "WORK", title: "試験仕様書", weight: 1, done: false, approved: false },
+        { item_type: "DELIVERABLE", title: "移行手順書", weight: 1, done: false, approved: false },
+      ],
+    });
+    // 保存の応答で作業項目になった 3 行目は、外せず種類を変えられない。足した 4 行目（未承認の成果物）は今どおり
+    await waitFor(() => expect(within(form).queryByLabelText("3 行目の種類")).toBeNull());
+    expect(within(form).queryByRole("button", { name: "3 行目を外す" })).toBeNull();
+    expect(within(form).getByLabelText("4 行目の種類")).toHaveValue("DELIVERABLE");
+    expect(within(form).getByRole("button", { name: "4 行目を外す" })).toBeInTheDocument();
+  });
+
+  it("progress.enter_all を持つ人は、承認済みの項目と作業項目も外し、種類を変えられる（API-PRG-004。CR-014）", async () => {
+    const current = makeProgressItems({
+      items: [
+        { id: 90, item_type: "DELIVERABLE", title: "設計書", weight: 1, done: false, approved: true, done_at: null },
+        { id: 91, item_type: "WORK", title: "作業", weight: 1, done: false, approved: true, done_at: null },
+      ],
+    });
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own", "progress.enter_all"]), {
+        [`GET ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+        [`PUT ${BASE}/activities/22/progress-items`]: () => jsonResponse(200, current),
+      }),
+    );
+    renderAt();
+    await table();
+
+    fireEvent.click(await screen.findByRole("button", { name: "関係者調整 を入力する" }));
+    const form = await screen.findByRole("form", { name: "算定項目" });
+    expect(within(form).getByLabelText("1 行目の種類")).toBeEnabled();
+    expect(within(form).getByLabelText("2 行目の種類")).toBeEnabled();
+    fireEvent.click(within(form).getByRole("button", { name: "1 行目を外す" }));
+    fireEvent.change(within(form).getByLabelText("1 行目の種類"), { target: { value: "CHECK" } });
+    fireEvent.click(within(form).getByRole("button", { name: "算定項目を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/activities/22/progress-items`)[0]!.body).toEqual({
+      items: [{ id: 91, item_type: "CHECK", title: "作業", weight: 1, done: false, approved: true }],
+    });
+  });
+
   it("今の算定項目が読めなければ、算定項目の編集を出さずに理由を出す（空から置き換えない）", async () => {
     const { calls } = mockApi(
       routes(meWith(["project.view", "progress.enter_own"]), {
@@ -732,6 +833,18 @@ describe("進捗の入力欄の値の組み立て", () => {
         7,
       ),
     ).toEqual([{ key: 7, id: 90, itemType: "CHECK", title: "試験", weight: "1.5", done: true, approved: true }]);
+  });
+
+  it("承認済みの項目と作業項目を、enter_own だけの人が外せず種類を変えられない項目にする（CR-014）", () => {
+    const item = { title: "x", weight: 1, done: false, done_at: null };
+    expect(
+      guardedItemIds([
+        { ...item, id: 1, item_type: "WORK", approved: false },
+        { ...item, id: 2, item_type: "CHECK", approved: true },
+        { ...item, id: 3, item_type: "CHECK", approved: false },
+        { ...item, id: 4, item_type: "DELIVERABLE", approved: false },
+      ]),
+    ).toEqual(new Set([1, 2]));
   });
 
   it("残工数の表示は自動か入力かを区別する（EFF-06）", () => {

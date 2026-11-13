@@ -49,7 +49,7 @@ from app.domain.lightning import (
     overlay_lightning_lines,
     restore_lightning_line,
 )
-from app.domain.progress import ProgressError, ProgressMethod, exact_percent_complete, round_percent
+from app.domain.progress import ProgressError, ProgressItemType, ProgressMethod, exact_percent_complete, round_percent
 from app.domain.progress import ProgressItem as RuleProgressItem
 from app.domain.scheduling import ScheduleActivity, ScheduleCycleError
 from app.domain.snapshot import (
@@ -312,6 +312,11 @@ def _items_of(session: Session, activity_ids: Iterable[int]) -> dict[int, list[P
     for item in session.scalars(select(ProgressItem).where(ProgressItem.activity_id.in_(ids)).order_by(ProgressItem.id)):
         grouped[item.activity_id].append(item)
     return grouped
+
+
+def _guarded_item(item: ProgressItem) -> bool:
+    """progress.enter_own だけの人が消せず種類を変えられない項目か（承認済みか作業項目。6.2 の API-PRG-004・CR-014）。"""
+    return bool(item.approved) or item.item_type == ProgressItemType.WORK
 
 
 def _rule_items(items: Iterable[ProgressItem]) -> list[RuleProgressItem]:
@@ -666,6 +671,8 @@ def replace_progress_items(
     ``approved`` を変えるのは progress.enter_all を持つ人だけ（6.2 の API-PRG-004）。enter_own だけの人が変えると 403
     ``FORBIDDEN``（何も書かない）。「変える」は、``id`` を載せた項目では保存済みの値と違うこと、足す項目では真にすること
     （省いた ``approved`` は偽）。保存済みと同じ値を送るのは変えたことにしない。
+    enter_own だけの人は、承認済みの項目と作業項目（保存済みの値で判定する）を消せず、種類を変えられない（承認済み作業割合を
+    承認なしで変えないため。CR-014）。違えば同じ 403 で、``details`` に変えた欄の ``loc``、消した項目は ``progress_item_id`` を載せる。
     置き換えた後、OPEN の報告日の入力の進捗率を求め直す。
     """
     permission = _check_entry_permission(session, access, actor, project_id)
@@ -683,16 +690,22 @@ def replace_progress_items(
             raise _invalid(["body", "items", index, "id"], "同じ算定項目が 2 回あります")
         seen.add(item_id)
     if ENTER_ALL not in permission.granted:
-        approving = [
-            index for index, item in enumerate(items)
-            if bool(item.get("approved", False))
-            != (existing[item["id"]].approved if item.get("id") is not None else False)
-        ]
-        if approving:
-            raise AppError(403, "FORBIDDEN", "算定項目の承認済みを変えられるのは progress.enter_all を持つ人だけです",
-                           details=[{"loc": ["body", "items", index, "approved"],
-                                     "message": "承認済みは progress.enter_all を持つ人だけが変えられます"}
-                                    for index in approving])
+        denied: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            old = existing[item["id"]] if item.get("id") is not None else None
+            if bool(item.get("approved", False)) != (old.approved if old is not None else False):
+                denied.append({"loc": ["body", "items", index, "approved"],
+                               "message": "承認済みは progress.enter_all を持つ人だけが変えられます"})
+            if old is not None and _guarded_item(old) and item["item_type"] != old.item_type:
+                denied.append({"loc": ["body", "items", index, "item_type"],
+                               "message": "承認済みの項目と作業項目の種類は progress.enter_all を持つ人だけが変えられます"})
+        denied += [{"loc": ["body", "items"], "progress_item_id": item_id,
+                    "message": "承認済みの項目と作業項目は progress.enter_all を持つ人だけが消せます"}
+                   for item_id, old in existing.items() if item_id not in seen and _guarded_item(old)]
+        if denied:
+            raise AppError(403, "FORBIDDEN",
+                           "算定項目の承認済みの変更と、承認済みの項目・作業項目の削除・種類の変更は "
+                           "progress.enter_all を持つ人だけができます", details=denied)
 
     for item in items:
         done = bool(item.get("done", False))
