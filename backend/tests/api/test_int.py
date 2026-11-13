@@ -267,6 +267,27 @@ def test_export_permission_is_data_export(world: World) -> None:
     assert response.status_code == 401
 
 
+def test_export_time_entries_also_requires_effort_view(world: World, db_session: Session) -> None:
+    """API-INT-001：実績工数（``time-entries``）の出力は data.export に加えて effort.view も要る（設計書 1.3・CR-015）。
+
+    VIEWER は data.export を持ち effort.view を持たない（9.2）ので、WBS・活動は出せるが実績工数は 403。
+    effort.view を足せば出せる。両方を持つ PLANNER は今どおり出せる。
+    """
+    db_session.add(TimeEntry(user_id=world.users["planner"].id, activity_id=world.a, work_date=date(2026, 12, 2),
+                             hours=Decimal(3), note="他人の実績"))
+    db_session.commit()
+    world.export("wbs", who="viewer")
+    world.export("activities", who="viewer")
+    for fmt in ("csv", "xlsx"):
+        refused = world.export("time-entries", fmt, who="viewer", expect=403)
+        assert refused.json()["error"]["code"] == "FORBIDDEN"
+        assert "他人の実績" not in refused.text
+    assert world.grid("time-entries")[1:] == [[lid("planner"), str(world.a), "2026-12-02", "3.00", "他人の実績"]]
+    world.grant("VIEWER", "effort.view")
+    assert world.grid("time-entries", who="viewer")[1:] == [
+        [lid("planner"), str(world.a), "2026-12-02", "3.00", "他人の実績"]]
+
+
 def test_export_rejects_unknown_target_and_format(world: World) -> None:
     """API-INT-001：``target``・``format`` が 6.2 の値でなければ 400。"""
     response = world.client.get(world.url("/export"), params={"target": "users"}, headers=world.h["planner"])
@@ -278,13 +299,18 @@ def test_export_rejects_unknown_target_and_format(world: World) -> None:
 
 
 def test_export_for_contractor_is_limited_to_own_assignments(world: World, db_session: Session) -> None:
-    """API-INT-001：委託先だけで読む利用者は、自分の割当の活動とその WBS の経路だけ（RULE-AUTH-001・9.2 の注記）。"""
+    """API-INT-001：委託先だけで読む利用者は、自分の割当の活動とその WBS の経路だけ（RULE-AUTH-001・9.2 の注記）。
+
+    実績工数は effort.view も要る（CR-015）ので、data.export だけでは 403。effort.view を足しても自分の割当の範囲だけ。
+    """
     world.grant("CONTRACTOR", "data.export")
     db_session.add(TimeEntry(user_id=world.users["planner"].id, activity_id=world.a, work_date=date(2026, 12, 2),
                              hours=Decimal(1)))
     db_session.commit()
     assert [r[0] for r in world.grid("wbs", who="contractor")[1:]] == ["2.0", "2.1"]
     assert [r[0] for r in world.grid("activities", who="contractor")[1:]] == [str(world.c)]
+    world.export("time-entries", who="contractor", expect=403)
+    world.grant("CONTRACTOR", "effort.view")
     assert world.grid("time-entries", who="contractor")[1:] == []
 
 

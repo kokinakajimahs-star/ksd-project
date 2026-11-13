@@ -1,6 +1,6 @@
 """表形式の入出力（INT）のユースケース（設計書 6.2 の API-INT-001・002、6.3、9 章。要求仕様書 INT-01・BR-02）。
 
-- 権限（RULE-AUTH-001）：出力は data.export、取込は data.import と対象の書く権限（``wbs`` は wbs.edit、``activities`` は
+- 権限（RULE-AUTH-001）：出力は data.export（``time-entries`` は effort.view も。設計書 1.3・CR-015）、取込は data.import と対象の書く権限（``wbs`` は wbs.edit、``activities`` は
   schedule.edit。どちらも見積の列を変える行があれば estimate.edit も。``time-entries`` は data.import だけ。設計書 1.1・CR-006）。
   委託先だけで読む利用者（9.2 の注記）の出力は、
   自分の割当の活動とその WBS の経路に絞る（見えない活動の先行・実績は出さない）
@@ -88,6 +88,7 @@ from app.services.wbs import (
 
 DATA_EXPORT: Final = "data.export"
 DATA_IMPORT: Final = "data.import"
+EFFORT_VIEW: Final = "effort.view"
 WBS_EDIT: Final = "wbs.edit"
 SCHEDULE_EDIT: Final = "schedule.edit"
 ESTIMATE_EDIT: Final = "estimate.edit"
@@ -347,8 +348,12 @@ def export_data(
 
     行の順：``wbs`` は WBS の並び（先行順・兄弟は表示順）、``activities`` は WBS の並び → WP の中の表示順、
     ``time-entries`` は作業日 → ログインID → 活動ID。委託先だけで読む利用者は自分の割当の範囲だけ（RULE-AUTH-001）。
+    実績工数（``time-entries``）は data.export に加えて effort.view も要る（無ければ 403。API-EFF-004 で他人の実績を読めない人に
+    出させない。設計書 1.3 の API-INT-001・CR-015）。
     """
     table = authorize_project(session, access, actor, project_id, DATA_EXPORT)
+    if target is TabularTarget.TIME_ENTRIES:
+        authorize_project(session, access, actor, project_id, EFFORT_VIEW)
     plan = load_plan(session, project_id)
     visible = visible_scope(session, access, actor, project_id, table, plan.elements, plan.activities)
     rows: list[WbsRow] | list[ActivityRow] | list[TimeEntryRow]

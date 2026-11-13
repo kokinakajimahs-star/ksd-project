@@ -40,7 +40,7 @@ def export_file(
 ) -> Response:
     """API-INT-001 出力する（`target`＝wbs/activities/time-entries、`format`＝csv/xlsx）。
 
-    権限は data.export。6.3 の列（この順）で、1 行目が見出し。CSV は UTF-8（BOM 付き）・カンマ区切り、xlsx は 1 枚目のシートに
+    権限は data.export（``time-entries`` は effort.view も。無ければ 403。CR-015）。6.3 の列（この順）で、1 行目が見出し。CSV は UTF-8（BOM 付き）・カンマ区切り、xlsx は 1 枚目のシートに
     同じ表を置く。委託先だけで読む利用者は自分の割当の範囲だけ（RULE-AUTH-001）。``target``・``format`` の誤りは 400。
     """
     exported = io_service.export_data(session, access, user, links, project_id, target, file_format)
