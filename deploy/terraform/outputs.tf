@@ -46,6 +46,10 @@ output "run_service_account" {
   value = google_service_account.run.email
 }
 
+output "verify_service_account" {
+  value = google_service_account.verify.email
+}
+
 output "sql_instance" {
   value = google_sql_database_instance.main.name
 }

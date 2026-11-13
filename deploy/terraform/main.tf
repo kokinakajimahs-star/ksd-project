@@ -64,6 +64,19 @@ resource "google_project_iam_member" "run_cloudsql_client" {
   member  = google_service_account.run.member
 }
 
+# PostgreSQL での検証のジョブ（pgverify）の身元。本番の秘密（DB の URL・最初の管理者のパスワード）を読めない
+resource "google_service_account" "verify" {
+  account_id   = "${local.name}-verify"
+  display_name = "PMT の PostgreSQL での検証（pgverify）"
+  depends_on   = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "verify_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = google_service_account.verify.member
+}
+
 resource "google_project_iam_member" "build_log_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
