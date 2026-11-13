@@ -26,6 +26,11 @@
 ``backend/tests/api/test_wbs.py`` の ``test_*_wired_once_*`` が落とす。
 
 第 1 階層の順番の数えは ``wbs_numbering_rules.top_last_child_seq``（設計書 1.1 の 4.1・5.2。CR-003）に置く。新規・移動・改番で進め、減らさない。
+採番規則の行はプロジェクトを作るとき（API-PRJ-001）に作り、読むだけの操作では作らない（無ければ既定の値で読む。A-49 の 3）。
+
+**同時実行**（A-49 の 3）：WBS の状態（``projects.wbs_status``）・レビュー・要素を変える操作と承認の判断は、``projects`` の行を
+``SELECT … FOR UPDATE``（``app.infra.db.lock_row``）で読み直してから判定する。承認の判断は、申請の対象の行（WBS は ``projects``、
+変更要求は ``change_requests``）を先に、申請の行を後にロックする（変更要求の提出・取り下げと同じ順。デッドロックを避ける）。
 """
 
 from __future__ import annotations
@@ -88,6 +93,7 @@ from app.domain.workflow import (
     transition_wbs,
 )
 from app.errors import AppError
+from app.infra.db import lock_row, lock_rows
 from app.models.chg import ChangeRequest, CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import TimeEntry, VarianceNote
@@ -96,8 +102,12 @@ from app.models.prj import Project, ProjectMember, ScopeItem
 from app.models.sch import Activity
 from app.models.wbs import (  # API 層は as を付けた型をここから取る（1.3：API はモデルを直接 import しない）
     COMMENT_STATUS_INITIAL,
+    MIN_DIGITS_DEFAULT,
+    PAD_FIRST_LEVEL_DEFAULT,
+    PREFIX_DEFAULT,
     REVIEW_STATUS_CLOSED,
     REVIEW_STATUS_INITIAL,
+    SEPARATOR_DEFAULT,
     ApprovalRequest,
     ScopeBaseline as ScopeBaseline,
     ScopeBaselineElement,
@@ -342,24 +352,37 @@ class WbsContext:
         )
 
 
-def numbering_rule_row(session: Session, project_id: int) -> WbsNumberingRule:
-    row = session.scalar(select(WbsNumberingRule).where(WbsNumberingRule.project_id == project_id))
-    if row is None:
-        # API-PRJ-001 を通らずに作られたプロジェクト。4.1 の既定の行を作る（同じトランザクション）。
-        # 第 1 階層の数えは、既にある第 1 階層の順番の最大から始める（移行 0009 の埋め方と同じ）
-        top = session.scalar(
-            select(func.max(WbsElement.sibling_seq)).where(
-                WbsElement.project_id == project_id, WbsElement.parent_id.is_(None)
-            )
-        )
-        row = WbsNumberingRule(project_id=project_id, top_last_child_seq=top or 0)
+def numbering_rule_row(session: Session, project_id: int, *, for_update: bool = False) -> WbsNumberingRule:
+    """プロジェクトの採番規則の行（DB-WBS-002）。行はプロジェクトを作るとき（API-PRJ-001）に作る。
+
+    行が無い（API-PRJ-001 を通らずに作られ、移行でもまだ埋めていない）ときは、4.1 の既定の値と、第 1 階層の数えを
+    今ある第 1 階層の順番の最大から始めた行（移行 0009 の埋め方と同じ値）を使う。
+
+    - 読むだけ（既定）：行が無ければ**書かずに**、その値の行をセッションに載せずに返す（GET で行を作らない。A-49 の 3）
+    - 書く（``for_update``）：行を ``SELECT … FOR UPDATE`` で読み直す。無ければその値で作る（flush）。同時に 2 つ作られると
+      一意制約（``project_id``）の違反になり、409 ``CONFLICT``（``app.main``）
+    """
+    query = select(WbsNumberingRule).where(WbsNumberingRule.project_id == project_id)
+    row = session.scalar(lock_rows(query) if for_update else query)
+    if row is not None:
+        return row
+    top = session.scalar(
+        select(func.max(WbsElement.sibling_seq)).where(WbsElement.project_id == project_id, WbsElement.parent_id.is_(None))
+    )
+    row = WbsNumberingRule(project_id=project_id, separator=SEPARATOR_DEFAULT, min_digits=MIN_DIGITS_DEFAULT,
+                           prefix=PREFIX_DEFAULT, pad_first_level=PAD_FIRST_LEVEL_DEFAULT, top_last_child_seq=top or 0)
+    if for_update:
         session.add(row)
         session.flush()
     return row
 
 
-def load_wbs_context(session: Session, project_id: int, activities: ActivitiesReader) -> WbsContext:
-    project = session.get(Project, project_id)
+def load_wbs_context(
+    session: Session, project_id: int, activities: ActivitiesReader, *, for_update: bool = False
+) -> WbsContext:
+    """WBS の全体を読む。書く操作は ``for_update``：プロジェクトの行をロックして読み直し（状態の判定はその値で行う）、
+    その後に要素を読み、採番規則の行もロックする（無ければ作る）。読むだけの操作は何も書かない。"""
+    project = lock_row(session, Project, project_id) if for_update else session.get(Project, project_id)
     if project is None:  # authorize_project が先に 404 を返すので、ここへは来ない
         raise AppError(404, "NOT_FOUND", "プロジェクトが見つかりません", details=[{"project_id": project_id}])
     elements = list(session.scalars(select(WbsElement).where(WbsElement.project_id == project_id).order_by(WbsElement.id)))
@@ -367,7 +390,7 @@ def load_wbs_context(session: Session, project_id: int, activities: ActivitiesRe
         project=project,
         elements=elements,
         activities=activities.activities(session, project_id),
-        rule_row=numbering_rule_row(session, project_id),
+        rule_row=numbering_rule_row(session, project_id, for_update=for_update),
     )
 
 
@@ -603,7 +626,6 @@ def get_tree(
     rows = preorder_elements(context.elements)
     if visible is not None:
         rows = [(element, depth) for element, depth in rows if element.id in visible]
-    session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return TreeView(context=context, rows=rows, rollup=_rollup(context), validation=validation,
                     restricted=visible is not None)
 
@@ -625,7 +647,8 @@ def _editing(
     session: Session, access: ProjectAccess, actor: User, activities: ActivitiesReader, project_id: int
 ) -> WbsContext:
     authorize_project(session, access, actor, project_id, "wbs.edit")
-    return load_wbs_context(session, project_id, activities)
+    # WBS の状態（RULE-WBS-006 の EDIT）と親の数えはプロジェクトの行をロックした後の値で判定・採番する（A-49 の 3）
+    return load_wbs_context(session, project_id, activities, for_update=True)
 
 
 def add_element(
@@ -849,7 +872,7 @@ def replace_numbering_rule(
             errors.append({"loc": ["body", name], "message": "「/」は使えません（WBS ID を URL のパスに入れるため）"})
     if errors:
         raise _validation_error(errors)
-    row = numbering_rule_row(session, project_id)
+    row = numbering_rule_row(session, project_id, for_update=True)
     row.separator, row.min_digits, row.prefix, row.pad_first_level = separator, min_digits, prefix, pad_first_level
     session.commit()
     return row
@@ -1017,8 +1040,8 @@ def replace_scope_links(
 # ---------------------------------------------------------------------------
 
 
-def _review_of(session: Session, project_id: int, review_id: int) -> WbsReview:
-    review = session.get(WbsReview, review_id)
+def _review_of(session: Session, project_id: int, review_id: int, *, for_update: bool = False) -> WbsReview:
+    review = lock_row(session, WbsReview, review_id) if for_update else session.get(WbsReview, review_id)
     if review is None or review.project_id != project_id:
         raise AppError(404, "NOT_FOUND", "レビューが見つかりません", details=[{"review_id": review_id}])
     return review
@@ -1045,7 +1068,7 @@ def start_review(
     ]
     if errors:
         raise _validation_error(errors)
-    project = session.get(Project, project_id)
+    project = lock_row(session, Project, project_id)  # 状態はロックして読み直した値で判定する（A-49 の 3）
     assert project is not None
     try:
         transition = transition_wbs(project.wbs_status, WbsAction.START_REVIEW)
@@ -1080,12 +1103,13 @@ def close_review(
     閉じたレビュー、WBS が IN_REVIEW でないときは 409 ``INVALID_STATE``。無いレビューは 404。
     """
     authorize_project(session, access, actor, project_id, "wbs.edit")
-    review = _review_of(session, project_id, review_id)
+    # プロジェクトの行を先にロックし、レビューと WBS の状態はその後に読み直した値で判定する（A-49 の 3）
+    project = lock_row(session, Project, project_id)
+    assert project is not None
+    review = _review_of(session, project_id, review_id, for_update=True)
     if review.status != REVIEW_STATUS_INITIAL:
         raise AppError(409, "INVALID_STATE", "閉じたレビューは閉じられません",
                        details=[{"review_id": review.id, "status": review.status}])
-    project = session.get(Project, project_id)
-    assert project is not None
     try:
         transition = transition_wbs(project.wbs_status, WbsAction.CLOSE_REVIEW)
     except WorkflowError as exc:
@@ -1110,7 +1134,6 @@ def get_review(
     visible = _visible_element_ids(session, access, actor, load_wbs_context(session, project_id, activities), table)
     if visible is not None:
         comments = [c for c in comments if c.element_id is not None and c.element_id in visible]
-    session.commit()
     return review, comments
 
 
@@ -1127,7 +1150,9 @@ def add_comment(
 ) -> WbsReviewComment:
     """指摘を書く（wbs.review）。閉じたレビューは 409、このプロジェクトに無い要素は 400。書いた人が ``author_id``。"""
     authorize_project(session, access, actor, project_id, "wbs.review")
-    review = _review_of(session, project_id, review_id)
+    # レビューを閉じる・申請（開いているレビューを閉じる）と競わせない。開いているかはロックの後に読み直して判定する（A-49 の 3）
+    lock_row(session, Project, project_id)
+    review = _review_of(session, project_id, review_id, for_update=True)
     _ensure_review_open(review)
     if element_id is not None:
         element = session.get(WbsElement, element_id)
@@ -1150,6 +1175,8 @@ def update_comment(
     閉じた後に対応できないと申請が塞がる（設計書 1.1・CR-004。A-48 (7)）。新しい指摘を書くのは開いているレビューだけ。
     """
     authorize_project(session, access, actor, project_id, "wbs.edit")
+    # 指摘の状態は申請の前提（未対応の指摘）に数えるので、申請と競わせない（A-49 の 3）
+    lock_row(session, Project, project_id)
     review = _review_of(session, project_id, review_id)
     comment = session.get(WbsReviewComment, comment_id)
     if comment is None or comment.review_id != review_id:
@@ -1195,7 +1222,6 @@ def list_baselines(
         .where(ScopeBaseline.project_id == project_id)
         .order_by(ScopeBaseline.version).limit(limit).offset(offset)
     ).all()
-    session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return [(baseline, int(n)) for baseline, n in rows], int(total or 0)
 
 
@@ -1214,7 +1240,6 @@ def get_baseline(
     visible = _visible_element_ids(session, access, actor, load_wbs_context(session, project_id, activities), table)
     if visible is not None:
         elements = [e for e in elements if e.element_id in visible]
-    session.commit()
     return baseline, elements, visible is not None
 
 
@@ -1280,7 +1305,6 @@ def responsibility_matrix(
     users = {
         user.id: user for user in session.scalars(select(User).where(User.id.in_(matrix.user_ids)))
     } if matrix.user_ids else {}
-    session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return MatrixView(matrix=matrix, elements=context.by_id, users=users, restricted=visible is not None)
 
 
@@ -1361,7 +1385,6 @@ def trace_code(
     if visible is not None:
         trace = replace(trace, element_ids=tuple(i for i in trace.element_ids if i in visible))
     in_scope = set(trace.element_ids)
-    session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return TraceView(
         trace=trace,
         elements=[element for element, _ in preorder_elements(context.elements) if element.id in in_scope],
@@ -1418,7 +1441,8 @@ def submit_wbs(
       レビューが開いたまま残らないように。OQ-18 (2)・A-18）
     """
     authorize_project(session, access, actor, project_id, "wbs.edit")
-    context = load_wbs_context(session, project_id, activities)
+    # 二重の申請を防ぐ：状態と前提はプロジェクトの行をロックして読み直した後の値で判定する（A-49 の 3）
+    context = load_wbs_context(session, project_id, activities, for_update=True)
     project = context.project
     readiness = readiness_of(session, context)
     try:
@@ -1488,11 +1512,24 @@ def decide(
       あれば次の版・RE_APPROVAL）にその時点の WBS と辞書を写す。差戻しは DRAFT へ戻す
     - 変更要求の申請は ``change_requests``（RULE-CHG-003。CHG の群）へ判断を渡す
     - 申請に判断した人・日時・コメントを残す（WBS-21）
+    - 同時の判断・取り下げは行のロックで 1 つずつ流す：待っている間に判断された申請は 409、取り下げで消えた申請は 404（A-49 の 3）
     """
     approval = session.get(ApprovalRequest, approval_id)
     if approval is None:
         raise AppError(404, "NOT_FOUND", "承認申請が見つかりません", details=[{"approval_id": approval_id}])
     authorize_project(session, access, actor, approval.project_id, _DECIDE_PERMISSION[approval.target_type])
+    # 同時の判断・取り下げと競わせない（A-49 の 3）：申請の対象の行（WBS は projects、変更要求は change_requests）を先に、
+    # 申請の行を後にロックし（提出・取り下げと同じ順）、どちらもロックして読み直した値で判定する。
+    # 対象・プロジェクト・申請者は申請の行で変わらない値なので、ロックの前に読んだ値で権限とロックする行を決めてよい
+    context: WbsContext | None = None
+    if approval.target_type == TARGET_WBS:
+        context = load_wbs_context(session, approval.project_id, activities, for_update=True)
+    else:
+        lock_row(session, ChangeRequest, approval.target_id)
+    locked = lock_row(session, ApprovalRequest, approval_id)
+    if locked is None:  # 待っている間に取り下げられた（変更要求の取り下げは申請の行を消す。5.10）
+        raise AppError(404, "NOT_FOUND", "承認申請が見つかりません", details=[{"approval_id": approval_id}])
+    approval = locked
     try:
         status = decide_approval(approval.status, decision, requested_by=approval.requested_by, decided_by=actor.id)
     except WorkflowError as exc:
@@ -1501,8 +1538,7 @@ def decide(
     wbs_status: str | None = None
     baseline: ScopeBaseline | None = None
     count = 0
-    if approval.target_type == TARGET_WBS:
-        context = load_wbs_context(session, approval.project_id, activities)
+    if context is not None:
         project = context.project
         latest = session.scalar(select(func.max(ScopeBaseline.version)).where(ScopeBaseline.project_id == project.id))
         action = WbsAction.APPROVE if ApprovalDecision(decision) is ApprovalDecision.APPROVE else WbsAction.SEND_BACK

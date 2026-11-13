@@ -11,6 +11,8 @@
   FINALIZED の報告日ならスナップショットの写しだけから描く（BR-13）
 - 確定（RULE-PRG-007）は全ての活動をガントの行の順（RULE-SCH-005）でスナップショットに写し、報告日を FINALIZED にする。
   確定した報告日への入力は 409 ``INVALID_STATE``
+- 同時実行（A-49 の 3）：入力・確定は ``status_reports`` の行を ``SELECT … FOR UPDATE``（``app.infra.db.lock_row``）で読み直して
+  から OPEN かを判定する。算定項目・算定方式を変えたときの求め直しは、OPEN の報告日の行をロックした上で入力を変える
 
 **別の群の表を読む口**（``app.state.progress_links``。A-14・A-17・A-21 と同じ形）：
 
@@ -59,6 +61,7 @@ from app.domain.snapshot import (
     finalize_status_report,
 )
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.cmn import User
 from app.models.eff import TimeEntry
 from app.models.prg import ProgressEntry, ProgressItem, ProgressSnapshot, ProgressSnapshotItem, StatusReport
@@ -219,8 +222,9 @@ def effective_method(project: Project, activity: Activity) -> ProgressMethod:
     return ProgressMethod(activity.progress_method or project_settings(project)["progress_method_default"])
 
 
-def _report_of(session: Session, project_id: int, report_id: int) -> StatusReport:
-    report = session.get(StatusReport, report_id)
+def _report_of(session: Session, project_id: int, report_id: int, *, for_update: bool = False) -> StatusReport:
+    """報告日（無い・他のプロジェクトのものは 404）。入力・確定は ``for_update``（行をロックして読み直す。A-49 の 3）。"""
+    report = lock_row(session, StatusReport, report_id) if for_update else session.get(StatusReport, report_id)
     if report is None or report.project_id != project_id:
         raise AppError(404, "NOT_FOUND", "報告日が見つかりません", details=[{"status_report_id": report_id}])
     return report
@@ -403,12 +407,17 @@ def entries_of_report(session: Session, report_id: int) -> dict[int, ProgressEnt
 
 
 def _refresh_open_entries(session: Session, project: Project, activity: Activity) -> None:
-    """算定項目・算定方式を変えた活動の、OPEN の報告日の入力の進捗率を求め直す（確定済みの入力は変えない。BR-13）。"""
+    """算定項目・算定方式を変えた活動の、OPEN の報告日の入力の進捗率を求め直す（確定済みの入力は変えない。BR-13）。
+
+    確定と競わせない：入力のある報告日の行を（ID の順に）ロックし、ロックの後の状態で OPEN のものだけを変える（A-49 の 3）。
+    """
     items = _items_of(session, [activity.id])[activity.id]
     entries = session.scalars(
         select(ProgressEntry)
         .join(StatusReport, StatusReport.id == ProgressEntry.status_report_id)
         .where(ProgressEntry.activity_id == activity.id, StatusReport.status == StatusReportStatus.OPEN.value)
+        .order_by(StatusReport.id)
+        .with_for_update(of=StatusReport)
     ).all()
     for entry in entries:
         entry.percent_complete = _entry_percent(project, activity, entry, items)
@@ -564,7 +573,8 @@ def put_progress(
     保存する進捗率は RULE-PRG-001 の算定値（直接入力は入力値。実績終了日があれば 100）。
     """
     permission = _check_entry_permission(session, access, actor, project_id)
-    report = _report_of(session, project_id, report_id)
+    # 確定と競わせない：報告日の行をロックし、読み直した状態で OPEN かを判定する（A-49 の 3）
+    report = _report_of(session, project_id, report_id, for_update=True)
     activity = _activity_of(session, project_id, activity_id)
     _check_own_activity(actor, permission, activity_id)
     try:
@@ -962,7 +972,8 @@ def finalize(
     許容幅・抽出の閾値は今の ``projects.settings`` を写す。
     """
     authorize_project(session, access, actor, project_id, "status_report.manage")
-    report = _report_of(session, project_id, report_id)
+    # 二重の確定・入力と競わせない：報告日の行をロックし、読み直した状態で判定してから入力を読む（A-49 の 3）
+    report = _report_of(session, project_id, report_id, for_update=True)
     if report.status != StatusReportStatus.OPEN.value:
         raise _invalid_state("確定済みの報告日は確定できません（確定は戻さない）",
                              details=[{"status_report_id": report.id, "status": report.status}])

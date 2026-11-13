@@ -500,7 +500,9 @@ def _import_wbs(
     file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.WBS
-    context = load_wbs_context(session, project_id, activities)
+    # 書く取込は WBS の状態の判定と採番を、プロジェクト・採番規則の行をロックした後の値で行う（API-WBS-002〜004 と同じ。A-49 の 3）。
+    # 確かめるだけ（dry_run）は何も書かない
+    context = load_wbs_context(session, project_id, activities, for_update=not dry_run)
     dictionaries = _dictionaries(session, (e.id for e in context.elements))
     current = _wbs_rows(session, context.elements, dictionaries)
     assignable = _assignable(session, project_id)
