@@ -37,3 +37,7 @@ frontend/dist/
 /.claude/workflows
 # 端末ごとの MCP の設定（絶対パスを含む。各自の端末で生成する）
 /.mcp.json
+# Terraform（deploy/terraform。.terraform.lock.hcl はコミットする。状態・計画は秘密の値を含むので置かない）
+.terraform/
+*.tfstate*
+*.tfplan

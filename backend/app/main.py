@@ -1,9 +1,12 @@
 """FastAPI のアプリの生成とルータの登録（設計書 1.2・2.1・6.1）。
 
 開発時の起動：``.venv/bin/uvicorn app.main:app --app-dir backend --reload``
+（API の説明 ``/docs`` を使うときは ``PMT_API_DOCS=true`` を渡す。既定は出さない。CR-019）
 
 ``app`` は最初に参照されたときに作る（モジュールを import しただけでは環境変数を読まず、DB のエンジンも作らない）。
 試験は ``create_app(settings)`` で接続先を差し替えて作る。
+
+``PMT_STATIC_DIR`` を指定すると、画面のビルド（``frontend/dist``）を同じオリジンで配る（設計書 1.2・CR-020）。
 """
 
 from __future__ import annotations
@@ -11,14 +14,18 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.routing import APIRoute
 from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match
+from starlette.types import Scope
 
 from app.config import Settings, get_settings
 from app.errors import AppError
@@ -41,6 +48,17 @@ from app.services.wbs import (
 )
 
 API_PREFIX = "/api/v1"
+# API の説明の口（設計書 6.1。PMT_API_DOCS が真のときだけ出す。CR-019）
+OPENAPI_URL = f"{API_PREFIX}/openapi.json"
+DOCS_URL = "/docs"
+REDOC_URL = "/redoc"
+# 画面を配るときも画面に渡さないパスの最初の区切り（/api と API の説明。ルータの 404・405 を 2.4 の形のまま返す）
+_NOT_SCREEN_SEGMENTS = frozenset({"api", DOCS_URL.lstrip("/"), REDOC_URL.lstrip("/")})
+# 画面のビルドのキャッシュ（CR-020）。assets/ のファイルは名前に内容のハッシュを含むので長く持たせる。
+# ほか（index.html など名前の変わらないもの）は毎回サーバに確かめさせる
+SCREEN_ASSETS_DIR = "assets"
+SCREEN_ASSETS_CACHE = "public, max-age=31536000, immutable"
+SCREEN_DEFAULT_CACHE = "no-cache"
 
 # HTTP の状態コード → エラーのコード・文言（設計書 2.4・6.1。文言は日本語）
 _HTTP_ERRORS: dict[int, tuple[str, str]] = {
@@ -137,6 +155,53 @@ def register_routers(api: APIRouter) -> None:
     api.include_router(report.router)
 
 
+class _ScreenRoute(APIRoute):
+    """画面のビルドを配るルート（``/{path:path}``）。``/api``・API の説明のパスには一致しない。
+
+    一致しないので、それらのパスはルータの 404（無いパス）・405（メソッドだけが違う）を今どおり 2.4 の形で返す。
+    """
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        match, child_scope = super().matches(scope)
+        if match is not Match.NONE and child_scope["path_params"]["path"].split("/", 1)[0] in _NOT_SCREEN_SEGMENTS:
+            return Match.NONE, {}
+        return match, child_scope
+
+
+def _screen_file(root: Path, relative: str) -> Path | None:
+    """``root`` の中のファイルの実体のパス。無い・``root`` の外（``..``・絶対パス・外を指すシンボリックリンク）なら None。"""
+    try:
+        candidate = (root / relative).resolve()
+        if candidate.is_relative_to(root) and candidate.is_file():
+            return candidate
+    except (OSError, ValueError):  # 長すぎる名前・NUL を含む名前
+        pass
+    return None
+
+
+def _add_screen_route(app: FastAPI, static_dir: Path) -> None:
+    """画面のビルド（``PMT_STATIC_DIR``）を同じオリジンで配る（設計書 1.2・CR-020）。
+
+    ``/api`` で始まらない GET で、ファイルがあればそれを返し、無ければ ``index.html`` を返す（画面のルートの深いリンク）。
+    ルータの最後に置くので、API のルートが先に一致する。``index.html`` が無ければ起動しない（fail fast）。
+    """
+    root = static_dir.resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        raise RuntimeError(f"PMT_STATIC_DIR に index.html がありません: {root}")
+    assets = root / SCREEN_ASSETS_DIR
+
+    def serve_screen(path: str) -> FileResponse:
+        found = _screen_file(root, path)
+        if found is None:
+            return FileResponse(index, headers={"Cache-Control": SCREEN_DEFAULT_CACHE})
+        cache = SCREEN_ASSETS_CACHE if found.is_relative_to(assets) else SCREEN_DEFAULT_CACHE
+        return FileResponse(found, headers={"Cache-Control": cache})
+
+    app.router.add_api_route("/{path:path}", serve_screen, methods=["GET", "HEAD"], include_in_schema=False,
+                             route_class_override=_ScreenRoute)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 最初のシステム管理者（NFR-10）。両方とも未指定なら何もしない。片方だけ・パスワードが方針（NFR-04）に反するなら
@@ -158,7 +223,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     engine = create_db_engine(settings.database_url)
 
-    app = FastAPI(title="PMT", version="0.1.0", openapi_url=f"{API_PREFIX}/openapi.json", lifespan=_lifespan)
+    # API の説明（/docs・/redoc・/api/v1/openapi.json）は PMT_API_DOCS が真のときだけ出す（6.1・CR-019）
+    docs = settings.api_docs
+    app = FastAPI(title="PMT", version="0.1.0", openapi_url=OPENAPI_URL if docs else None,
+                  docs_url=DOCS_URL if docs else None, redoc_url=REDOC_URL if docs else None, lifespan=_lifespan)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
@@ -203,6 +271,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api = APIRouter(prefix=API_PREFIX)
     register_routers(api)
     app.include_router(api)
+    # 画面のビルドを配る（1.2・CR-020）。API のルートより後に置く。指定が無ければ配らない
+    if settings.static_dir is not None:
+        _add_screen_route(app, settings.static_dir)
     return app
 
 
