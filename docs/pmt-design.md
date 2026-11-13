@@ -43,7 +43,7 @@ WBS・工数・進捗管理システム（PMT）設計書
 |---|---|---|---|
 | 1.0 | 2026-11-10 | 初版（設計ID 187 件） | — |
 | 1.1 | 2026-11-12 | 下の CR-001〜009 を反映した（設計ID 193 件。API を 6 件足した） | `docs/instruction-change-requests.md` の CR-001〜009（2026-11-12 に推奨案で承認） |
-| 1.2 | 2026-11-13 | 下の CR-010〜013 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-010〜013（2026-11-13 に推奨案で承認。未確定事項 OQ-08・09・10・42 を決めた） |
+| 1.2 | 2026-11-13 | 下の CR-010〜014 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-010〜014（2026-11-13 に推奨案で承認。未確定事項 OQ-08・09・10・42 を決め、その実装の独立レビューの指摘を直した） |
 
 1.1 の変更の内訳：
 
@@ -71,6 +71,7 @@ WBS・工数・進捗管理システム（PMT）設計書
 | CR-011 | 6.2 API-PRG-004・9.2 | 委託先に返す集計値・件数・依存の相手を見える範囲から求めること、見えないものは 404、算定項目の `approved` は progress.enter_all だけが変えること |
 | CR-012 | 4.2・5.10 | 全てのテーブルの内部キーを再利用しないこと、閉じたレビューの指摘も更新できること |
 | CR-013 | 7.4 | 会議レポートの計画の値は最新計画から、進捗の値は確定済みなら写しから求めること |
+| CR-014 | 6.2 API-PRG-004・API-PRJ-001 | enter_own だけの人は承認済みの項目と作業項目を消せず種類を変えられないこと、システム管理者でない人が作ったプロジェクトでは作った人を PM のメンバーにすること |
 
 # 1. 方式設計
 
@@ -531,7 +532,7 @@ stateDiagram-v2
 
 | 設計ID | メソッドとパス | 名称 | 権限 | 関連要求 |
 |---|---|---|---|---|
-| API-PRJ-001 | `POST /api/v1/projects` | プロジェクトを作成する（カレンダー・採番規則・既定の権限も作る） | project.create | PRJ-01 |
+| API-PRJ-001 | `POST /api/v1/projects` | プロジェクトを作成する（カレンダー・採番規則・既定の権限も作る。システム管理者でない人が作ると、作った人をメンバー（ロール PM）にする） | project.create | PRJ-01 |
 | API-PRJ-002 | `GET /api/v1/projects` | 自分が見られるプロジェクトの一覧 | project.view | PRJ-01 |
 | API-PRJ-003 | `GET /api/v1/projects/{project_id}` | プロジェクトの詳細 | project.view | PRJ-01 |
 | API-PRJ-004 | `PATCH /api/v1/projects/{project_id}` | 基本情報・設定を更新する | project.manage | PRJ-01 |
@@ -587,7 +588,7 @@ stateDiagram-v2
 | API-PRG-001 | `POST /api/v1/projects/{project_id}/status-reports` | 報告日を作る | status_report.manage | PRG-01 |
 | API-PRG-002 | `GET /api/v1/projects/{project_id}/status-reports` | 報告日の一覧 | project.view | PRG-01 |
 | API-PRG-003 | `PUT /api/v1/projects/{project_id}/status-reports/{report_id}/progress/{activity_id}` | 進捗率・実績日付・残工数・遅延理由・完了見込みを書く | progress.enter_own か progress.enter_all | PRG-02, PRG-03, EFF-06 |
-| API-PRG-004 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-items` | 進捗の算定項目を置き換える（`approved` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人が変えると 403） | progress.enter_own か progress.enter_all | PRG-05 |
+| API-PRG-004 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-items` | 進捗の算定項目を置き換える（`approved` を変えるのは progress.enter_all を持つ人だけ。enter_own だけの人は `approved` を変えられず、承認済みの項目と作業項目（WORK）を消せず種類を変えられない。違えば 403） | progress.enter_own か progress.enter_all | PRG-05 |
 | API-PRG-005 | `PUT /api/v1/projects/{project_id}/activities/{activity_id}/progress-method` | 活動の進捗率の算定方式を変える | schedule.edit | PRG-05 |
 | API-PRG-006 | `GET /api/v1/projects/{project_id}/status-reports/{report_id}/lightning-line` | 報告日のイナズマ線（報告日線・ポイント・判定） | project.view | PRG-08, PRG-09, PRG-10, PRG-11, PRG-12, PRG-13 |
 | API-PRG-007 | `POST /api/v1/projects/{project_id}/status-reports/{report_id}/finalize` | 報告日を確定してスナップショットを作る | status_report.manage | PRG-17 |
@@ -953,7 +954,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | D-07 | 基準化の後も WBS を直接編集でき、編集で DRAFT に戻る | 小さな直しのたびに変更要求を通す負担を避ける。正式の変更は変更要求（CHG-04）で版を作る | 2026-11-10 |
 | D-08 | ガントの描画は自前の SVG | イナズマ線を描ける部品は商用のみ | 2026-11-10 |
 | D-09 | 実装の中で見つかった設計書の欠け・食い違い（CR-001〜009）を、本書を直す側で解き、版 1.1 にした（0.4） | 記載どおりでは成り立たない・両立しない・権限を迂回できる箇所で、実装の側では直せないため（`docs/instruction-change-requests.md`） | 2026-11-12 |
-| D-10 | 未確定事項 OQ-08・09・10・42 のうち本書の変更が要るもの（CR-010〜013）を推奨案で決め、版 1.2 にした（0.4） | 保存先が無い・セキュリティの方針が無い・見える範囲と出どころが両立しない箇所で、実装の側では決められないため | 2026-11-13 |
+| D-10 | 未確定事項 OQ-08・09・10・42 のうち本書の変更が要るもの（CR-010〜013）と、その実装の独立レビューの指摘（CR-014）を推奨案で決め、版 1.2 にした（0.4） | 保存先が無い・セキュリティの方針が無い・見える範囲と出どころが両立しない箇所で、実装の側では決められないため | 2026-11-13 |
 
 未確定事項は要求仕様書11章を正とする（写さない）。
 
