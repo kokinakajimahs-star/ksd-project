@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_project_access
+from app.api.deps import get_business_zone, get_current_user, get_project_access, get_today
 from app.schemas.change import (
     AppliedOut,
     AuditLogList,
@@ -37,11 +37,6 @@ from app.services.clock import get_now
 from app.services.project_access import ProjectAccess
 
 router = APIRouter(tags=["change"])
-
-
-def get_today(now: datetime = Depends(get_now)) -> date:
-    """是正措置の期限超過（RULE-CHG-005）の「今日」。``now``（UTC）の日付（docs/open-questions.md OQ-33 (1)）。"""
-    return now.date()
 
 
 def _change_request_out(view: ChangeRequestView) -> ChangeRequestOut:
@@ -276,15 +271,18 @@ def search_audit_logs(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
+    zone: tzinfo = Depends(get_business_zone),
 ) -> AuditLogList:
     """API-CHG-010 変更履歴の検索（期間・変更者・対象・WBS ID）。
 
-    権限は audit.view。期間（``date_from``〜``date_to``。UTC の日付で両端を含む）・変更者（``user_id``）・対象（``entity_type``・
-    ``entity_id``）・WBS ID（記録した時点の ID）で絞る。新しい順。履歴は追記だけで、更新・削除の API は無い（4.2・NFR-05）。
+    権限は audit.view。期間（``date_from``〜``date_to``。業務の時間帯の日付で両端を含む。設計書 1.3・CR-019）・変更者（``user_id``）・
+    対象（``entity_type``・``entity_id``）・WBS ID（記録した時点の ID）で絞る。新しい順。履歴は追記だけで、更新・削除の API は無い
+    （4.2・NFR-05）。
     """
     rows, total = change_service.search_audit_logs(session, access, user, project_id, date_from=date_from,
                                                    date_to=date_to, user_id=user_id, entity_type=entity_type,
-                                                   entity_id=entity_id, wbs_code=wbs_code, limit=limit, offset=offset)
+                                                   entity_id=entity_id, wbs_code=wbs_code, limit=limit, offset=offset,
+                                                   zone=zone)
     items = [
         AuditLogOut(id=r.id, occurred_at=r.occurred_at, user_id=r.user_id, project_id=r.project_id,
                     entity_type=r.entity_type, entity_id=r.entity_id, wbs_code=r.wbs_code,

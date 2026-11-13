@@ -1,4 +1,4 @@
-"""API の共通の依存（設計書 6.1）：Bearer の認証・「今」・プロジェクトを読む口・別の群の表に書く口・設定。
+"""API の共通の依存（設計書 6.1）：Bearer の認証・「今」と業務の「今日」・プロジェクトを読む口・別の群の表に書く口・設定。
 
 認証（``get_current_user``）が通らなければ 401（``WWW-Authenticate: Bearer`` を付ける）。
 権限の判定は各ルートが呼ぶサービスが行う（RULE-AUTH-001）。
@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, tzinfo
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.services import get_session
 from app.services.auth import LoginLockPolicy, User, authenticate, bind_actor
-from app.services.clock import get_now
+from app.services.clock import business_date, get_now
 from app.services.project_access import ProjectAccess
 from app.services.projects import NumberingRulesStore, ScheduleRecalculator
 
@@ -44,6 +44,17 @@ def get_current_user(
     # この要求で書く変更を、変更者と時刻つきで変更履歴に残す（6.1・NFR-05。記録は infra のイベント。A-37）
     bind_actor(session, user.id, now)
     return user
+
+
+def get_business_zone(request: Request) -> tzinfo:
+    """業務の時間帯（設定の ``PMT_BUSINESS_TIMEZONE``。既定 ``Asia/Tokyo``。設計書 1.3・CR-019）。"""
+    zone: tzinfo = request.app.state.settings.business_zone
+    return zone
+
+
+def get_today(now: datetime = Depends(get_now), zone: tzinfo = Depends(get_business_zone)) -> date:
+    """業務の「今日」：``get_now``（UTC）の時刻の、業務の時間帯での暦の日付（設計書 1.3・CR-019）。"""
+    return business_date(now, zone)
 
 
 def get_project_access(request: Request) -> ProjectAccess:

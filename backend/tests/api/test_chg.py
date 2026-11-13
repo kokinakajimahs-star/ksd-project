@@ -757,6 +757,70 @@ def test_audit_logs_record_writes_and_search(world: World) -> None:
     assert world.count(AuditLog) == count
 
 
+# ---------------------------------------------------------------------------
+# 業務の時間帯（設計書 1.3・CR-019）：「今日」と日付で指定する期間は PMT_BUSINESS_TIMEZONE（既定 Asia/Tokyo）の暦の日付。
+# 日本の 0〜9 時は UTC の暦ではまだ前の日
+# ---------------------------------------------------------------------------
+
+JST_DEC_10 = datetime(2026, 12, 9, 15, 0, tzinfo=UTC)  # 2026-12-10 00:00 JST（UTC の日付は 12/09）
+
+
+def test_corrective_action_overdue_uses_business_date(app: FastAPI, world: World) -> None:
+    """RULE-CHG-005 の「今日」は業務の時間帯の日付：期限 12/09 の措置は、日本の 12/10 0 時（UTC の 12/09 15:00）から期限超過。
+    登録（API-CHG-007）・一覧（008）・更新（009）の ``overdue`` が同じ「今日」で決まり、設定の時間帯に従う。"""
+    url = world.url("/corrective-actions")
+
+    def overdue_ids() -> list[int]:
+        body = world.client.get(url, params={"overdue": "true"}, headers=world.h["viewer"]).json()
+        return [i["id"] for i in body["items"]]
+
+    app.dependency_overrides[get_now] = lambda: JST_DEC_10 - timedelta(seconds=1)  # 12/09 23:59:59 JST
+    due = world.action(element_id=world.wp1, due_date="2026-12-09")
+    assert due["overdue"] is False and overdue_ids() == []
+
+    app.dependency_overrides[get_now] = lambda: JST_DEC_10  # 12/10 00:00 JST
+    assert overdue_ids() == [due["id"]]
+    patched = world.client.patch(world.url(f"/corrective-actions/{due['id']}"), json={"effect": "様子見"},
+                                 headers=world.h["progress"])
+    assert patched.status_code == 200 and patched.json()["overdue"] is True
+    assert world.action(element_id=world.wp2, due_date="2026-12-09")["overdue"] is True
+
+    # 業務の時間帯を UTC にすると、同じ時刻はまだ 12/09（期限ちょうどは期限超過でない）
+    app.state.settings = app.state.settings.model_copy(update={"business_timezone": "UTC"})
+    assert overdue_ids() == []
+
+
+def test_audit_log_period_uses_business_dates(app: FastAPI, world: World) -> None:
+    """API-CHG-010 の ``date_from``・``date_to`` は業務の時間帯の日付で両端を含む（その日の 0 時〜翌日の 0 時の前を UTC の時刻の
+    範囲に直して探す）。日本の 0 時ちょうどの書き込みはその日に、23:59:59 の書き込みは前の日に入る。"""
+    moments = {
+        "12/09 23:59:59": JST_DEC_10 - timedelta(seconds=1),
+        "12/10 00:00:00": JST_DEC_10,
+        "12/10 23:59:59": JST_DEC_10 + timedelta(days=1, seconds=-1),
+        "12/11 00:00:00": JST_DEC_10 + timedelta(days=1),
+    }
+    for title, moment in moments.items():
+        app.dependency_overrides[get_now] = lambda moment=moment: moment
+        world.create(title=title)
+    app.dependency_overrides[get_now] = lambda: NOW
+
+    def titles(**params: str) -> list[str]:
+        response = world.client.get(world.url("/audit-logs"), params={"entity_type": "change_requests", **params},
+                                    headers=world.h["pm"])
+        assert response.status_code == 200, response.text
+        return sorted(row["after"]["title"] for row in response.json()["items"])
+
+    assert titles(date_from="2026-12-10", date_to="2026-12-10") == ["12/10 00:00:00", "12/10 23:59:59"]
+    assert titles(date_to="2026-12-09") == ["12/09 23:59:59"]
+    assert titles(date_from="2026-12-11") == ["12/11 00:00:00"]
+    # 表せる日付の端でも探せる（端の側は限らない）
+    assert len(titles(date_from="0001-01-01", date_to="9999-12-31")) == 4
+
+    # 業務の時間帯を UTC にすると、UTC の暦の日付で区切る
+    app.state.settings = app.state.settings.model_copy(update={"business_timezone": "UTC"})
+    assert titles(date_from="2026-12-10", date_to="2026-12-10") == ["12/10 23:59:59", "12/11 00:00:00"]
+
+
 
 # ---------------------------------------------------------------------------
 # 同時実行（A-49 の 3。OQ-42 (3)・(24)）
