@@ -65,6 +65,7 @@ from app.domain.scheduling import (
 from app.domain.wbs_code import CodedElement, display_preorder
 from app.domain.wbs_rules import ActivityRef, AssignmentRef, WbsRuleError, ensure_hierarchy
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.chg import CorrectiveAction
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
@@ -553,6 +554,8 @@ def add_activity(
     表示順は WP の中の末尾。次の稼働日へ寄せた希望開始日がプロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     plan = load_plan(session, project_id)
     if work_package_id not in plan.element_by_id:
         raise _invalid("work_package_id", "このプロジェクトの WBS 要素ではありません")
@@ -593,6 +596,8 @@ def update_activity(
     求めた希望開始日が今と違い、プロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（CR-018）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     activity = _activity_of(session, project_id, activity_id)
     unknown = set(changes) - UPDATABLE_FIELDS
     if unknown:
@@ -661,6 +666,8 @@ def bulk_update_activities(
     通れば 1 回で保存し、日程を計算し直す。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
+    # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
+    lock_row(session, Project, project_id)
     plan = load_plan(session, project_id)
     preds: dict[int, set[int]] = {a.id: set() for a in plan.activities}
     for p, s in plan.pairs:

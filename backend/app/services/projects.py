@@ -339,6 +339,9 @@ def update_project(
     if nulls:
         raise _validation_error([{"loc": loc, "message": "空にできません"} for loc in nulls])
 
+    if "start_date" in changes:
+        # 開始日より前の希望開始日の活動の判定を、活動の書き込み（API-SCH-002〜004・取込・変更要求の反映）と同時にしない（CR-018・A-49 の 3）
+        lock_row(session, Project, project_id)
     project = _project(session, project_id)
     start_date: date = changes.get("start_date", project.start_date)
     target_finish_date: date | None = changes.get("target_finish_date", project.target_finish_date)

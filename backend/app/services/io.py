@@ -59,9 +59,9 @@ from app.domain.tabular import (
     WbsChange,
     WbsRow,
     cell_text,
-    decode_csv,
     encode_csv,
     export_grid,
+    iter_csv,
     plan_activity_import,
     plan_time_entry_import,
     plan_wbs_import,
@@ -70,11 +70,12 @@ from app.domain.wbs_code import CodeHistoryEntry, WbsCodeError, move_element, ne
 from app.domain.wbs_rules import ActivityRef
 from app.domain.workflow import WbsAction, WorkflowError, transition_wbs
 from app.errors import AppError
+from app.infra.db import lock_row
 from app.models.cmn import User
 from app.models.eff import Assignment, TimeEntry
 from app.models.est import EstimateRecord
 from app.models.prg import StatusReport
-from app.models.prj import ProjectMember
+from app.models.prj import Project, ProjectMember
 from app.models.sch import Activity, ActivityDependency
 from app.models.wbs import WbsCodeHistory, WbsDictionaryEntry, WbsElement
 from app.services.auth import authorize_project
@@ -174,10 +175,30 @@ def _too_many_rows(max_rows: int) -> AppError:
                     details=[{"loc": ["body"], "message": f"データの行は {max_rows} 行までです（見出しを除く。PMT_IMPORT_MAX_ROWS）"}])
 
 
+# xlsx の 1 行で持つ列の数の上限（6.3 のどの表の列よりも十分に多い）。これより右は右端の値だけを残す（TOO_MANY_COLUMNS は出る）
+XLSX_MAX_COLUMNS: Final = 64
+
+
+def _xlsx_row(values: Sequence[object]) -> list[object]:
+    """xlsx の 1 行のセルの値。末尾の空のセルを除き、``XLSX_MAX_COLUMNS`` 列より右は右端の値だけを残す。
+
+    右端の列（XFD など）にセルを置いた行で、数 KB のファイルからメモリを膨らませない（6.3・CR-019）。
+    見出しより右に値があることは残るので、``TOO_MANY_COLUMNS``（行の誤り）は今どおり出る。
+    """
+    end = len(values)
+    while end and values[end - 1] is None:
+        end -= 1
+    kept = list(values[: min(end, XLSX_MAX_COLUMNS)])
+    if end > XLSX_MAX_COLUMNS:
+        kept.append(values[end - 1])
+    return [_xlsx_value(v) for v in kept]
+
+
 def _xlsx_grid(data: bytes, max_rows: int) -> list[list[object]]:
     """xlsx の 1 枚目のシートの格子（1 行目が見出し）。xlsx として読めなければ ``TabularFileError``。
 
     見出しと ``max_rows`` 行を超える行があれば、そこで読むのを止めて 400（行の多いシートを全て読まない。CR-019）。
+    シートが宣言する範囲（dimension）では行を右へ埋めない（範囲を偽ったファイルでメモリを膨らませない）。
     """
     try:
         workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
@@ -187,10 +208,11 @@ def _xlsx_grid(data: bytes, max_rows: int) -> list[list[object]]:
         if not workbook.worksheets:
             raise _unreadable("xlsx にシートが無い")
         sheet = workbook.worksheets[0]
-        rows = list(islice(sheet.iter_rows(values_only=True), HEADER_ROW + max_rows + 1))
-        if len(rows) > HEADER_ROW + max_rows:
+        sheet.reset_dimensions()
+        grid = [_xlsx_row(row) for row in islice(sheet.iter_rows(values_only=True), HEADER_ROW + max_rows + 1)]
+        if len(grid) > HEADER_ROW + max_rows:
             raise _too_many_rows(max_rows)
-        return [[_xlsx_value(v) for v in row] for row in rows]
+        return grid
     except (TabularFileError, AppError):
         raise
     except Exception as exc:  # シートの XML が壊れている
@@ -205,7 +227,8 @@ def read_grid(file_format: FileFormat, data: bytes, *, max_rows: int) -> list[li
     見出しを除く行が ``max_rows`` を超えれば 400 ``VALIDATION_ERROR``（``PMT_IMPORT_MAX_ROWS``。6.3・CR-019）。
     """
     if file_format is FileFormat.CSV:
-        grid: list[list[object]] = [list(row) for row in decode_csv(data)]
+        # 上限を 1 行超えたところで読むのを止める（空の行ばかりの大きなファイルで全ての行を持たない）
+        grid: list[list[object]] = [list(row) for row in islice(iter_csv(data), HEADER_ROW + max_rows + 1)]
         if len(grid) > HEADER_ROW + max_rows:
             raise _too_many_rows(max_rows)
         return grid
@@ -727,6 +750,9 @@ def _import_activities(
     file_format: FileFormat, *, dry_run: bool, now: datetime, require_estimate_edit: Callable[[], None],
 ) -> ImportResult:
     target = TabularTarget.ACTIVITIES
+    if not dry_run:
+        # 書く取込は、プロジェクトの開始日（希望開始日の下限。CR-018）をロックした後の値で判定する（API-SCH-002〜004 と同じ。A-49 の 3）
+        lock_row(session, Project, project_id)
     plan = load_plan(session, project_id)
     predecessors = _predecessors(plan.dependencies)
     assignees = _assignees(links, session, project_id)
