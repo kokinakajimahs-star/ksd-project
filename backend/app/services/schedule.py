@@ -29,7 +29,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.authz import ViewLevel, project_view_level
@@ -386,12 +386,18 @@ class ActivityView:
     assignees: tuple[AssigneeView, ...]
 
 
-def _views(session: Session, links: ScheduleLinks, plan: Plan, activities: Sequence[Activity]) -> list[ActivityView]:
+def _views(
+    session: Session, links: ScheduleLinks, plan: Plan, activities: Sequence[Activity],
+    visible: frozenset[int] | None = None,
+) -> list[ActivityView]:
+    """活動の出力の元。``visible`` を渡したら、先行・後続の相手は読める活動だけ（9.2 の注記）。"""
     elements = plan.element_by_id
     assignees = _assignees_by_activity(session, links, plan.project.id)
     preds: dict[int, list[int]] = {}
     succs: dict[int, list[int]] = {}
     for p, s in plan.pairs:
+        if visible is not None and (p not in visible or s not in visible):
+            continue
         preds.setdefault(s, []).append(p)
         succs.setdefault(p, []).append(s)
     return [
@@ -469,7 +475,7 @@ def list_activities(
     session: Session, access: ProjectAccess, actor: User, links: ScheduleLinks, project_id: int, *, limit: int,
     offset: int,
 ) -> ActivityListView:
-    """活動の一覧（project.view）。行の順は RULE-SCH-005 と同じ。依存は読める活動どうしのもの。"""
+    """活動の一覧（project.view）。行の順は RULE-SCH-005 と同じ。依存・先行と後続の相手は読める活動どうしのもの。"""
     table = authorize_project(session, access, actor, project_id, "project.view")
     plan = load_plan(session, project_id)
     visible = _visible_activity_ids(session, access, actor, project_id, table, plan.activities)
@@ -479,8 +485,8 @@ def list_activities(
         d for d in plan.dependencies
         if visible is None or (d.predecessor_id in visible and d.successor_id in visible)
     ]
-    return ActivityListView(items=_views(session, links, plan, page), total=len(ordered), dependencies=dependencies,
-                            restricted=visible is not None)
+    return ActivityListView(items=_views(session, links, plan, page, visible), total=len(ordered),
+                            dependencies=dependencies, restricted=visible is not None)
 
 
 def _ensure_on_work_package(plan: Plan, activity_refs: Sequence[ActivityRef]) -> None:
@@ -996,17 +1002,30 @@ def save_baseline(
 def list_baselines(
     session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
 ) -> tuple[list[BaselineView], int]:
-    """スケジュールベースラインの版の一覧（project.view。版の順。SCH-17）。"""
-    authorize_project(session, access, actor, project_id, "project.view")
+    """スケジュールベースラインの版の一覧（project.view。版の順。SCH-17）。
+
+    委託先だけで読む利用者には、版の項目の数を読める活動の項目とその WP の項目だけで数える（9.2 の注記）。
+    """
+    table = authorize_project(session, access, actor, project_id, "project.view")
     baselines = _baselines_of(session, project_id)
     page = baselines[offset:offset + limit]
+    activities = list(session.scalars(select(Activity).where(Activity.project_id == project_id)))
+    visible = _visible_activity_ids(session, access, actor, project_id, table, activities)
     counts: dict[int, int] = {}
     if page:
+        counted = (
+            select(ScheduleBaselineItem.schedule_baseline_id, func.count(ScheduleBaselineItem.id))
+            .where(ScheduleBaselineItem.schedule_baseline_id.in_([b.id for b in page]))
+        )
+        if visible is not None:
+            work_packages = {a.work_package_id for a in activities if a.id in visible}
+            counted = counted.where(or_(
+                and_(ScheduleBaselineItem.item_type == "ACTIVITY", ScheduleBaselineItem.activity_id.in_(visible)),
+                and_(ScheduleBaselineItem.item_type == "WORK_PACKAGE", ScheduleBaselineItem.element_id.in_(work_packages)),
+            ))
         counts = dict(
             session.execute(  # type: ignore[arg-type]
-                select(ScheduleBaselineItem.schedule_baseline_id, func.count(ScheduleBaselineItem.id))
-                .where(ScheduleBaselineItem.schedule_baseline_id.in_([b.id for b in page]))
-                .group_by(ScheduleBaselineItem.schedule_baseline_id)
+                counted.group_by(ScheduleBaselineItem.schedule_baseline_id)
             ).all()
         )
     return [BaselineView(baseline=b, item_count=counts.get(b.id, 0)) for b in page], len(baselines)

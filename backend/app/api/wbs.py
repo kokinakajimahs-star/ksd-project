@@ -582,12 +582,14 @@ def list_scope_baselines(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     access: ProjectAccess = Depends(get_project_access),
+    activities: ActivitiesReader = Depends(get_wbs_activities),
 ) -> BaselineList:
     """API-WBS-021 スコープベースラインの版の一覧。
 
     権限は project.view。版の順。版は上書きされず増える（WBS-22）。``limit``・``offset``（6.1）。
+    委託先には今見える要素の写しだけを数える（9.2 の注記）。
     """
-    rows, total = wbs_service.list_baselines(session, access, user, project_id, limit=limit, offset=offset)
+    rows, total = wbs_service.list_baselines(session, access, user, activities, project_id, limit=limit, offset=offset)
     return BaselineList(
         project_id=project_id,
         items=[BaselineSummary.model_validate(_baseline_summary(b, n)) for b, n in rows],

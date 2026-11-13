@@ -39,7 +39,7 @@ from typing import Any, Protocol
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
-from app.domain.authz import ViewLevel, authorize, own_assignment_scope, project_view_level
+from app.domain.authz import ViewLevel, VisibleScope, authorize, own_assignment_scope, project_view_level
 from app.domain.estimate import ActivityEstimate, EstimateError, EstimateRollup, WbsNode, rollup_estimates
 from app.domain.wbs_code import (
     CodedElement,
@@ -438,22 +438,41 @@ def _element_of(context: WbsContext, element_id: int) -> WbsElement:
     return element
 
 
-def _visible_element_ids(
+def _visible_scope(
     session: Session, access: ProjectAccess, actor: User, context: WbsContext, table: Mapping[str, frozenset[str]]
-) -> frozenset[int] | None:
-    """project.view で読める要素。全て読めるなら ``None``。委託先は自分の割当の活動とその WBS の経路（9.2 の注記）。"""
+) -> VisibleScope | None:
+    """project.view で読める活動と要素。全て読めるなら ``None``。委託先は自分の割当の活動とその WBS の経路（9.2 の注記）。"""
     membership = access.membership(session, context.project.id, actor.id)
     level = project_view_level(principal_of(actor), role_permissions=table, membership=membership)
     if level is ViewLevel.ALL:
         return None
     assigned = membership.assigned_activity_ids if membership is not None else frozenset()
     activity_elements = {a.id: a.work_package_id for a in context.activities}
-    scope = own_assignment_scope(
+    return own_assignment_scope(
         [a for a in assigned if a in activity_elements],
         activity_elements=activity_elements,
         element_parents={element.id: element.parent_id for element in context.elements},
     )
-    return scope.element_ids
+
+
+def _visible_element_ids(
+    session: Session, access: ProjectAccess, actor: User, context: WbsContext, table: Mapping[str, frozenset[str]]
+) -> frozenset[int] | None:
+    """project.view で読める要素。全て読めるなら ``None``。委託先は自分の割当の活動とその WBS の経路（9.2 の注記）。"""
+    scope = _visible_scope(session, access, actor, context, table)
+    return None if scope is None else scope.element_ids
+
+
+def _visible_context(context: WbsContext, scope: VisibleScope) -> WbsContext:
+    """見える要素・活動だけの文脈（9.2 の注記：委託先に返す集計値・件数は見える要素・活動だけから求める）。
+
+    見える要素は親について閉じ、見える活動の WP は見える要素なので、絞った後も木として集計できる。
+    """
+    return replace(
+        context,
+        elements=[e for e in context.elements if e.id in scope.element_ids],
+        activities=[a for a in context.activities if a.id in scope.activity_ids],
+    )
 
 
 def _preorder(elements: Sequence[WbsElement]) -> list[tuple[WbsElement, int]]:
@@ -538,10 +557,17 @@ def validate(session: Session, context: WbsContext) -> ValidationResult:
 def get_validation(
     session: Session, access: ProjectAccess, actor: User, activities: ActivitiesReader, project_id: int
 ) -> tuple[WbsContext, ValidationResult, frozenset[int] | None]:
-    """100% ルールと完了条件の検査の結果（project.view）。委託先には見える要素の結果だけを返す。"""
+    """100% ルールと完了条件の検査の結果（project.view）。
+
+    委託先には見える要素・活動だけで検査し（子の集計も見えるものだけ。9.2 の注記）、見える要素の結果だけを返す。
+    返す文脈も見える要素・活動だけに絞る（木の集計値に使う）。
+    """
     table = authorize_project(session, access, actor, project_id, "project.view")
     context = _load(session, project_id, activities)
-    visible = _visible_element_ids(session, access, actor, context, table)
+    scope = _visible_scope(session, access, actor, context, table)
+    visible = None if scope is None else scope.element_ids
+    if scope is not None:
+        context = _visible_context(context, scope)
     result = validate(session, context)
     if visible is not None:
         result = ValidationResult(
@@ -569,7 +595,10 @@ class TreeView:
 def get_tree(
     session: Session, access: ProjectAccess, actor: User, activities: ActivitiesReader, project_id: int
 ) -> TreeView:
-    """WBS の木（先行順）と集計値・改番待ち・検査の件数（project.view）。"""
+    """WBS の木（先行順）と集計値・改番待ち・検査の件数（project.view）。
+
+    委託先には見える要素の行だけを返し、集計値・件数も見える要素・活動だけから求める（9.2 の注記）。
+    """
     context, validation, visible = get_validation(session, access, actor, activities, project_id)
     rows = _preorder(context.elements)
     if visible is not None:
@@ -1140,21 +1169,33 @@ def update_comment(
 
 
 def list_baselines(
-    session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
+    session: Session,
+    access: ProjectAccess,
+    actor: User,
+    activities: ActivitiesReader,
+    project_id: int,
+    *,
+    limit: int,
+    offset: int,
 ) -> tuple[list[tuple[ScopeBaseline, int]], int]:
-    """スコープベースラインの版（版の順）と、版ごとの要素の数（project.view）。"""
-    authorize_project(session, access, actor, project_id, "project.view")
+    """スコープベースラインの版（版の順）と、版ごとの要素の数（project.view）。
+
+    委託先には今見える要素の写しだけを数える（API-WBS-022 で返す写しと同じ範囲。9.2 の注記）。
+    """
+    table = authorize_project(session, access, actor, project_id, "project.view")
+    visible = _visible_element_ids(session, access, actor, _load(session, project_id, activities), table)
     total = session.scalar(select(func.count()).select_from(ScopeBaseline).where(ScopeBaseline.project_id == project_id))
-    counts = (
-        select(ScopeBaselineElement.scope_baseline_id, func.count().label("n"))
-        .group_by(ScopeBaselineElement.scope_baseline_id).subquery()
-    )
+    counted = select(ScopeBaselineElement.scope_baseline_id, func.count().label("n"))
+    if visible is not None:
+        counted = counted.where(ScopeBaselineElement.element_id.in_(visible))
+    counts = counted.group_by(ScopeBaselineElement.scope_baseline_id).subquery()
     rows = session.execute(
         select(ScopeBaseline, func.coalesce(counts.c.n, 0))
         .outerjoin(counts, counts.c.scope_baseline_id == ScopeBaseline.id)
         .where(ScopeBaseline.project_id == project_id)
         .order_by(ScopeBaseline.version).limit(limit).offset(offset)
     ).all()
+    session.commit()  # 採番規則の既定の行を作ったときだけ書く
     return [(baseline, int(n)) for baseline, n in rows], int(total or 0)
 
 
@@ -1202,11 +1243,17 @@ def responsibility_matrix(
 ) -> MatrixView:
     """WP × メンバーの責任分担表と責任者の無い WP（project.view。RULE-WBS-007）。
 
-    行は WP を木の先行順（兄弟は表示順）、列はメンバー（加えた順）。委託先には見える WP の行だけを返す。
+    行は WP を木の先行順（兄弟は表示順）、列はメンバー（加えた順）。委託先には見える WP の行だけを返し、
+    担当・割当工数・列も見える要素・活動とその割当だけから求める（9.2 の注記）。
     """
     table = authorize_project(session, access, actor, project_id, "project.view")
     context = _load(session, project_id, activities)
-    visible = _visible_element_ids(session, access, actor, context, table)
+    scope = _visible_scope(session, access, actor, context, table)
+    visible = None if scope is None else scope.element_ids
+    assignments = readers.assignments(session, project_id)
+    if scope is not None:
+        context = _visible_context(context, scope)
+        assignments = [a for a in assignments if a.activity_id in scope.activity_ids]
     member_ids = list(session.scalars(
         select(ProjectMember.user_id).where(ProjectMember.project_id == project_id).order_by(ProjectMember.id)
     ))
@@ -1219,7 +1266,7 @@ def responsibility_matrix(
                 for e in ordered
             ],
             [ActivityRef(id=a.id, work_package_id=a.work_package_id) for a in context.activities],
-            readers.assignments(session, project_id),
+            assignments,
             member_ids,
         )
     except WbsRuleError as exc:  # 保存した木・割当が壊れている。推し量らずに止める

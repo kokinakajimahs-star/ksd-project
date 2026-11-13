@@ -471,6 +471,27 @@ def test_contractor_sees_only_assigned_rows(app: FastAPI, world: World) -> None:
     assert [r["activity_id"] for r in world.line(report, who="viewer")["rows"]] == [a, b]
 
 
+def test_contractor_entry_count_counts_only_assigned_rows(app: FastAPI, world: World, client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先には報告日の ``entry_count`` を自分の割当の活動の行だけで数える
+    （API-PRG-002 の一覧、API-PRG-006・009 の ``report``）。全て読める利用者は全ての行を数える。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    world.progress(report, a, who="pm", percent_complete=10)
+    world.progress(report, b, who="pm", percent_complete=20)
+    delays = world.url(f"/status-reports/{report}/delays")
+    listed = client.get(world.url("/status-reports"), headers=world.h["viewer"]).json()
+    assert [r["entry_count"] for r in listed["items"]] == [2]
+    assert world.line(report)["report"]["entry_count"] == 2
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b}}))
+    restricted = client.get(world.url("/status-reports"), headers=world.h["contractor"]).json()
+    assert [r["entry_count"] for r in restricted["items"]] == [1] and restricted["total"] == 1
+    assert world.line(report, who="contractor")["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["contractor"]).json()["report"]["entry_count"] == 1
+    assert client.get(delays, headers=world.h["viewer"]).json()["report"]["entry_count"] == 2
+
+
 # ---------------------------------------------------------------------------
 # API-PRG-007 確定とスナップショット（PRG-17・BR-13）
 # ---------------------------------------------------------------------------

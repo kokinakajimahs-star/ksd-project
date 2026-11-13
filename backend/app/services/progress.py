@@ -435,18 +435,23 @@ class ReportView:
     snapshot_id: int | None
 
 
-def _report_views(session: Session, reports: Sequence[StatusReport]) -> list[ReportView]:
+def _report_views(
+    session: Session, reports: Sequence[StatusReport], visible: frozenset[int] | None = None
+) -> list[ReportView]:
+    """報告日の出力の元。``visible`` を渡したら、入力の行の数は読める活動の行だけで数える（9.2 の注記）。"""
     ids = [r.id for r in reports]
     counts: dict[int, int] = {}
     snapshots: dict[int, int] = {}
     if ids:
+        counted = (
+            select(ProgressEntry.status_report_id, func.count(ProgressEntry.id))
+            .where(ProgressEntry.status_report_id.in_(ids))
+        )
+        if visible is not None:
+            counted = counted.where(ProgressEntry.activity_id.in_(visible))
         counts = {
             report_id: count
-            for report_id, count in session.execute(
-                select(ProgressEntry.status_report_id, func.count(ProgressEntry.id))
-                .where(ProgressEntry.status_report_id.in_(ids))
-                .group_by(ProgressEntry.status_report_id)
-            ).tuples()
+            for report_id, count in session.execute(counted.group_by(ProgressEntry.status_report_id)).tuples()
         }
         snapshots = {
             report_id: snapshot_id
@@ -498,12 +503,14 @@ def create_status_report(
 def list_status_reports(
     session: Session, access: ProjectAccess, actor: User, project_id: int, *, limit: int, offset: int
 ) -> tuple[list[ReportView], int]:
-    """報告日の一覧（project.view。報告日の古い順）。"""
-    authorize_project(session, access, actor, project_id, "project.view")
+    """報告日の一覧（project.view。報告日の古い順）。委託先には入力の行の数を自分の割当の活動の行だけで数える。"""
+    table = authorize_project(session, access, actor, project_id, "project.view")
     reports = list(
         session.scalars(select(StatusReport).where(StatusReport.project_id == project_id).order_by(StatusReport.report_date))
     )
-    return _report_views(session, reports[offset:offset + limit]), len(reports)
+    activities = session.scalars(select(Activity).where(Activity.project_id == project_id))
+    visible = _visible_activity_ids(session, access, actor, project_id, table, activities)
+    return _report_views(session, reports[offset:offset + limit], visible), len(reports)
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +853,7 @@ def lightning_line(session: Session, access: ProjectAccess, actor: User, project
                     actual_finish=entry.actual_finish if entry is not None else None, entry=entry,
                 )
             )
-    return LightningView(report=_report_views(session, [report])[0], source=source,
+    return LightningView(report=_report_views(session, [report], visible)[0], source=source,
                          project_start=plan.project.start_date, line=line, rows=rows, restricted=visible is not None)
 
 
@@ -1054,5 +1061,5 @@ def delays(session: Session, access: ProjectAccess, actor: User, project_id: int
         )
     except ScheduleCycleError as exc:  # 依存の追加が循環を拒むので起きないが、起きたら日程計算と同じエラーにする
         raise AppError(422, "SCHEDULE_CYCLE", "依存が循環しています", details=[{"activity_ids": list(exc.activity_ids)}]) from exc
-    return DelaysView(report=_report_views(session, [report])[0], source=source, analysis=analysis, plan=plan,
+    return DelaysView(report=_report_views(session, [report], visible)[0], source=source, analysis=analysis, plan=plan,
                       entries=entries, visible=visible)

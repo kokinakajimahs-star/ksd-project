@@ -48,7 +48,6 @@ from app.services.wbs import _mark_edited, _preorder
 
 ESTIMATE_EDIT = "estimate.edit"
 PROJECT_VIEW = "project.view"
-_ZERO = Decimal(0)
 
 
 # ---------------------------------------------------------------------------
@@ -306,26 +305,22 @@ class RollupView:
 def estimate_rollup(session: Session, access: ProjectAccess, actor: User, project_id: int) -> RollupView:
     """活動→WP→上位→プロジェクトへの見積の集計（project.view。RULE-EST-001・EST-02）。
 
-    委託先だけで読む利用者は、見える要素・自分の割当の活動だけを返す（``restricted`` が真）。そのときのプロジェクトの値は
-    見える最上位の要素の値の合計（API-WBS-001 の ``project_estimate_hours`` と同じ求め方）。
+    委託先だけで読む利用者は、見える要素・自分の割当の活動だけを返し（``restricted`` が真）、集計値も見える要素・活動だけから
+    求める（9.2 の注記。API-WBS-001 の ``rollup_hours``・``project_estimate_hours`` と同じ求め方）。
     """
     table = authorize_project(session, access, actor, project_id, PROJECT_VIEW)
     elements = _elements(session, project_id)
     activities = _activities(session, project_id)
-    rollup = _rollup(project_id, elements, activities)
     visible = _visible(session, access, actor, project_id, table, elements, activities)
-    rows = _preorder(elements)
     if visible is not None:
-        rows = [(e, depth) for e, depth in rows if e.id in visible.element_ids]
+        elements = [e for e in elements if e.id in visible.element_ids]
         activities = [a for a in activities if a.id in visible.activity_ids]
+    rollup = _rollup(project_id, elements, activities)
+    rows = _preorder(elements)
     order = {e.id: index for index, (e, _) in enumerate(rows)}
     ordered = sorted((a for a in activities if a.work_package_id in order),
                      key=lambda a: (order[a.work_package_id], a.sort_order, a.id))
-    if visible is None:
-        project_hours = rollup.project_hours
-    else:
-        project_hours = sum((rollup.hours_of(e.id) for e, _ in rows if e.parent_id is None), _ZERO)
-    return RollupView(rollup=rollup, elements=rows, activities=ordered, project_hours=project_hours,
+    return RollupView(rollup=rollup, elements=rows, activities=ordered, project_hours=rollup.project_hours,
                       restricted=visible is not None)
 
 

@@ -109,7 +109,7 @@ def list_status_reports(
 ) -> StatusReportList:
     """API-PRG-002 報告日の一覧。
 
-    権限は project.view。報告日の古い順。``limit``・``offset``（6.1）。
+    権限は project.view。報告日の古い順。``limit``・``offset``（6.1）。委託先には ``entry_count`` を自分の割当の活動の行だけで数える。
     """
     views, total = progress_service.list_status_reports(session, access, user, project_id, limit=limit, offset=offset)
     return StatusReportList(items=[_report_out(v) for v in views], total=total, limit=limit, offset=offset)

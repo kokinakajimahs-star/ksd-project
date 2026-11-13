@@ -409,6 +409,29 @@ def test_rollup_for_contractor_is_restricted(world: World) -> None:
     assert tree["project_estimate_hours"] == rollup["project_estimate_hours"]
 
 
+def test_rollup_for_contractor_sums_only_visible_activities(world: World) -> None:
+    """API-EST-003・API-WBS-001（9.2 の注記。CR-011）：委託先の集計値は見える要素・活動だけから求める。
+
+    WP3 には委託先の割当の無い活動 D（6 時間）もある。委託先の WP3・管理・プロジェクトの値は C（3 時間）だけ。
+    全て読める利用者の値は D を含む。
+    """
+    d = world.add(world.wp3, "D", 1)
+    world.put("ACTIVITY", world.c, {"input_value": "3", "input_unit": "HOUR"})
+    world.put("ACTIVITY", d, {"input_value": "6", "input_unit": "HOUR"})
+    full = world.rollup()
+    assert {e["element_id"]: e["hours"] for e in full["elements"]}[world.wp3] == 9.0
+    assert full["project_estimate_hours"] == 9.0
+
+    rollup = world.rollup(who="contractor")
+    assert [(e["element_id"], e["hours"], e["lower_hours"]) for e in rollup["elements"]] == [
+        (world.m, 3.0, 3.0), (world.wp3, 3.0, 3.0)]
+    assert [a["activity_id"] for a in rollup["activities"]] == [world.c]
+    assert rollup["project_estimate_hours"] == 3.0
+    tree = world.client.get(world.url("/wbs"), headers=world.h["contractor"]).json()
+    assert [(e["id"], e["rollup_hours"]) for e in tree["elements"]] == [(world.m, 3.0), (world.wp3, 3.0)]
+    assert tree["project_estimate_hours"] == 3.0
+
+
 def test_rollup_requires_project_view(world: World, client: TestClient) -> None:
     """API-EST-003 ボトムアップの集計：メンバーでない利用者は 403、無いプロジェクトは 404、トークンが無ければ 401。"""
     assert world.rollup(who="outsider", expect=403)["error"]["code"] == "FORBIDDEN"

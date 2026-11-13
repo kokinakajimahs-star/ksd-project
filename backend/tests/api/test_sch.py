@@ -263,6 +263,30 @@ def test_contractor_sees_only_assigned_activities(app: FastAPI, world: World) ->
     assert [r["activity_id"] for r in gantt["rows"]] == [b] and gantt["links"] == [] and gantt["restricted"] is True
 
 
+def test_contractor_dependency_ids_and_baseline_counts_use_only_visible_activities(
+    app: FastAPI, world: World, client: TestClient
+) -> None:
+    """9.2 の注記（CR-011）：委託先には先行・後続の相手を読める活動だけ返し（API-SCH-001）、
+    スケジュールベースラインの項目の数も読める活動とその WP の分だけで数える（API-SCH-012）。全て読める利用者は変わらない。"""
+    a, b, m, c = chain(world)
+    full = world.activities()
+    assert (full[b]["predecessor_ids"], full[b]["successor_ids"]) == ([a], [m])
+    saved = client.post(world.url("/schedule-baselines"), json={"name": "当初"}, headers=world.h["pm"])
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["item_count"] == 6  # 活動 A・B・M・C と WP1・WP2
+
+    app.state.project_access = ProjectMembersTable(FakeAssigned({world.users["contractor"].id: {b, m}}))
+    seen = world.activities("contractor")
+    assert sorted(seen) == sorted([b, m])
+    assert (seen[b]["predecessor_ids"], seen[b]["successor_ids"]) == ([], [m])
+    assert (seen[m]["predecessor_ids"], seen[m]["successor_ids"]) == ([b], [])
+    listed = client.get(world.url("/schedule-baselines"), headers=world.h["contractor"]).json()
+    assert [x["item_count"] for x in listed["items"]] == [3]  # 活動 B・M と、その WP1
+    assert [x["item_count"] for x in client.get(world.url("/schedule-baselines"),
+                                               headers=world.h["viewer"]).json()["items"]] == [6]
+    assert world.activities()[b]["predecessor_ids"] == [a]
+
+
 # ---------------------------------------------------------------------------
 # API-SCH-003 活動を変える
 # ---------------------------------------------------------------------------
