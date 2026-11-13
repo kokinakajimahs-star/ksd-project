@@ -17,14 +17,16 @@ output "pgverify_job" {
   value = "${local.name}-pgverify"
 }
 
+# 今のイメージは、サービス・検証のジョブが実際に指しているものを出す（deploy.sh がビルドせずに apply するときに渡し直す）。
+# 移行のジョブだけを新しいイメージにした後（移行の失敗で止まったとき）も、サービスのイメージは前のままを指す
 output "app_image" {
-  description = "今のサーバのイメージ（deploy.sh がビルドせずに apply するときに渡し直す）"
-  value       = var.image
+  description = "今サービスが動かしているサーバのイメージ（無ければ空）"
+  value       = local.deploy_app ? google_cloud_run_v2_service.app[0].template[0].containers[0].image : ""
 }
 
 output "test_image" {
-  description = "今の試験のイメージ"
-  value       = var.test_image
+  description = "今の検証のジョブの試験のイメージ（無ければ空）"
+  value       = local.deploy_test ? google_cloud_run_v2_job.pgverify[0].template[0].template[0].containers[0].image : ""
 }
 
 output "image_repo" {

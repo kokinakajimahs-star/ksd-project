@@ -1,0 +1,18 @@
+# gcloud builds submit が Cloud Build へ上げるもの（deploy/deploy.sh が --ignore-file で指す。書き方は .gitignore と同じ）。
+# コンテナのビルドに要るのは backend/・frontend/・Dockerfile・.dockerignore だけ。根の他のもの（.git・.env・docs など）は上げない
+/*
+!/backend/
+!/frontend/
+!/Dockerfile
+!/.dockerignore
+
+# 上げる中からも除く：開発環境・依存の実体・生成物・DB のファイル・秘密の値
+.venv
+node_modules
+__pycache__
+*.pyc
+.pytest_cache
+*.db
+*.db-journal
+.env*
+/frontend/dist
