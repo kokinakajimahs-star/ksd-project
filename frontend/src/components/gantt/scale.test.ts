@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ReportLightning } from "../../api/rpt";
 import {
+  makeBar,
   makeGanttRow,
   makeLightningLine,
   makeLightningRow,
@@ -10,6 +11,7 @@ import {
 } from "../../test/schFixtures";
 import {
   addDays,
+  barInRange,
   chartExtraDates,
   chartRange,
   countedAs,
@@ -22,6 +24,7 @@ import {
   rangeContains,
   rangeToRefetch,
   rangeWidth,
+  rowInRange,
   ticks,
   unplacedVertexCounts,
   vertexMark,
@@ -165,6 +168,49 @@ describe("描く範囲を広げる日付と、非稼働日を受け取り直す�
 
   it("描く活動（バー）が無ければ読み直さない", () => {
     expect(rangeToRefetch({ range_start: null, range_end: null }, ["2026-12-10"], null)).toBeNull();
+  });
+});
+
+describe("バー・行が表示の範囲に掛かるか（会議レポートの上段に描く行。7.4）", () => {
+  // 報告日 12/10 の前後 4 週
+  const range = { start: "2026-11-12", end: "2027-01-07" };
+
+  it("バーは長さのある重なりが要り、範囲の端（始まりの日の 0 時・終わりの日の翌日の 0 時）に触れるだけなら掛からない", () => {
+    // 11/11 の終業（＝11/12 の 0 時）で終わる：左端に触れるだけ
+    expect(barInRange(makeBar("PLANNED", "2026-10-01", "2026-11-11"), range)).toBe(false);
+    expect(barInRange(makeBar("PLANNED", "2026-10-01", "2026-11-12"), range)).toBe(true);
+    // 範囲より長く、両端をまたぐ
+    expect(barInRange(makeBar("PLANNED", "2026-10-01", "2027-03-31"), range)).toBe(true);
+    expect(barInRange(makeBar("PLANNED", "2027-01-07", "2027-02-01"), range)).toBe(true);
+    // 1/8 の 0 時（＝1/7 の終わり）から始まる：右端に触れるだけ
+    expect(barInRange(makeBar("PLANNED", "2027-01-08", "2027-02-01"), range)).toBe(false);
+    // 範囲の内で終わる半端な点（実績の未完了のバーは報告日線まで）
+    expect(
+      barInRange(makeBar("ACTUAL", "2026-09-01", "2026-11-12", { end: point("2026-11-12", 0.25) }), range),
+    ).toBe(true);
+  });
+
+  it("マイルストーンは菱形の点（終わり）が範囲の内なら掛かる（両端を含む）", () => {
+    const milestone = (date: string, fraction: number) =>
+      makeBar("PLANNED", date, date, { is_milestone: true, start: point(date, fraction), end: point(date, fraction) });
+    expect(barInRange(milestone("2026-11-12", 0), range)).toBe(true);
+    expect(barInRange(milestone("2027-01-07", 1), range)).toBe(true);
+    expect(barInRange(milestone("2026-11-11", 0.5), range)).toBe(false);
+    expect(barInRange(milestone("2027-01-08", 0.5), range)).toBe(false);
+  });
+
+  it("行は予定か実績のバーが掛かれば残す。基準のバーだけが掛かる行・バーの無い行は残さない", () => {
+    const before = makeBar("PLANNED", "2026-10-01", "2026-10-20");
+    expect(rowInRange(makeGanttRow({ planned: makeBar("PLANNED", "2026-12-01", "2026-12-21") }), range)).toBe(true);
+    // 予定は範囲の前に終わったが、実績（未完了で報告日まで）が範囲に掛かる
+    const openActual = makeBar("ACTUAL", "2026-10-01", "2026-12-10", { open_ended: true });
+    expect(rowInRange(makeGanttRow({ planned: before, actual: openActual }), range)).toBe(true);
+    const doneBefore = makeBar("ACTUAL", "2026-10-01", "2026-10-20");
+    expect(rowInRange(makeGanttRow({ planned: before, actual: doneBefore }), range)).toBe(false);
+    expect(
+      rowInRange(makeGanttRow({ planned: before, baseline: makeBar("BASELINE", "2026-12-01", "2026-12-21") }), range),
+    ).toBe(false);
+    expect(rowInRange(makeGanttRow({ planned: null, actual: null }), range)).toBe(false);
   });
 });
 

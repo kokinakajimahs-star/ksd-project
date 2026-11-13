@@ -2,7 +2,7 @@
 // サーバが返す暦日上の座標（日付＋その日の中の割合）をそのまま x にする（画面で稼働日を数え直さない）
 import type { Judgement, LightningLine, OverlaidLine } from "../../api/prg";
 import type { ReportLightning } from "../../api/rpt";
-import type { CalendarPoint, Gantt, GanttRow } from "../../api/sch";
+import type { CalendarPoint, Gantt, GanttBar, GanttRow } from "../../api/sch";
 
 /** 表示の単位。単位は 1 日あたりの横幅だけを変える（7.3） */
 export type GanttUnit = "day" | "week" | "month";
@@ -178,6 +178,26 @@ export function rangeToRefetch(
 /** 範囲を描く幅（最後の日を含む） */
 export function rangeWidth(range: DateRange, dayWidth: number): number {
   return (daysBetween(range.start, range.end) + 1) * dayWidth;
+}
+
+/**
+ * バーが範囲に掛かるか（描く x で見る。範囲は start の 0 時から end の翌日の 0 時まで）。バーは長さのある重なりが要り、
+ * 範囲の端に触れるだけなら掛からない。マイルストーン（終わりの点に菱形を描く）は、その点が範囲の内（両端を含む）なら掛かる
+ */
+export function barInRange(bar: Pick<GanttBar, "is_milestone" | "start" | "end">, range: DateRange): boolean {
+  const days = daysBetween(range.start, range.end) + 1;
+  const start = xOfPoint(range.start, bar.start.calendar, 1);
+  const end = xOfPoint(range.start, bar.end.calendar, 1);
+  if (bar.is_milestone || end <= start) {
+    const at = bar.is_milestone ? end : start;
+    return at >= 0 && at <= days;
+  }
+  return start < days && end > 0;
+}
+
+/** 行の予定のバーか実績のバーが範囲に掛かるか（基準のバーは見ない） */
+export function rowInRange(row: Pick<GanttRow, "planned" | "actual">, range: DateRange): boolean {
+  return [row.planned, row.actual].some((bar) => bar !== null && barInRange(bar, range));
 }
 
 export interface RowWindow {
