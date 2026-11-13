@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.numeric import numeric_column
 
 PROJECT_CODE_MAX = 50
 NAME_MAX = 200
@@ -53,6 +55,8 @@ class ProjectSettingsPatch(BaseModel):
 
     - ``delay_tolerance_days``：遅れ・前倒しの判定の許容幅（稼働日。BR-09）
     - ``delay_extract_days``：大きく遅れた活動の抽出の閾値（稼働日。BR-09）
+    - この 2 つは報告日の確定でスナップショットの ``Numeric(6,2)`` の列へ写すので、その列に収まる値（9999.99 まで・小数 2 桁まで）だけを受ける
+      （超えれば 400。丸めない。A-49 の 4。``schemas.numeric``）
     - ``variance_rate``・``variance_hours``：差異の判定の閾値（割合・人時。BR-11）
     - ``hundred_percent_tolerance``：100% ルールの合計の差異の許容幅（割合。BR-03）
     """
@@ -60,8 +64,8 @@ class ProjectSettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     progress_method_default: ProgressMethod | None = None
-    delay_tolerance_days: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    delay_extract_days: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    delay_tolerance_days: Annotated[float | None, numeric_column(6, 2)] = Field(default=None, ge=0, allow_inf_nan=False)
+    delay_extract_days: Annotated[float | None, numeric_column(6, 2)] = Field(default=None, ge=0, allow_inf_nan=False)
     variance_rate: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     variance_hours: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     hundred_percent_tolerance: float | None = Field(default=None, ge=0, allow_inf_nan=False)

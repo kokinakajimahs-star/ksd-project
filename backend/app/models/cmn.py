@@ -1,6 +1,7 @@
 """共通（CMN）の群のテーブル（設計書 4.1・4.2・9 章）：ユーザー・ロールの権限・共有リンク・認証セッション。
 
-- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）
+- 主キーは整数の ``id``。外部キーは ``<テーブルの単数形>_id`` で、DB の外部キー制約を張る（4.2）。
+  内部キーは再利用しない（設計書 1.2 の 4.2。SQLite は ``AUTOINCREMENT``。CR-012）
 - トークン（共有リンク・認証セッション）は SHA-256 のハッシュ（16 進 64 文字）だけを保存する（4.2・NFR-04）
 - 時刻は UTC で保存する（2.4。``UTCDateTime``）
 
@@ -35,7 +36,7 @@ class User(Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("failed_login_count >= 0", name="failed_login_count"),)
+    __table_args__ = (CheckConstraint("failed_login_count >= 0", name="failed_login_count"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     login_id: Mapped[str] = mapped_column(String(100), unique=True)
@@ -60,7 +61,7 @@ class RolePermission(Base):
     """
 
     __tablename__ = "role_permissions"
-    __table_args__ = (UniqueConstraint("project_id", "role", "permission"),)
+    __table_args__ = (UniqueConstraint("project_id", "role", "permission"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
@@ -75,6 +76,7 @@ class ShareLink(Base):
     __tablename__ = "share_links"
     __table_args__ = (
         CheckConstraint("scope IN (" + ", ".join(f"'{scope}'" for scope in SHARE_LINK_SCOPES) + ")", name="scope"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -92,6 +94,7 @@ class AuthSession(Base):
     """ログインで発行した認証トークンの記録（有効期間は設定の ``token_ttl_hours``）。ログアウトで ``revoked_at`` が入る。"""
 
     __tablename__ = "auth_sessions"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
