@@ -257,11 +257,46 @@ def test_put_progress_permissions_follow_own_assignment(app: FastAPI, world: Wor
     assert world.progress(report, a, who="executor", percent_complete=10)["percent_complete"] == 10.0
     assert world.progress(report, b, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
     assert world.progress(report, b, who="contractor", percent_complete=20)["percent_complete"] == 20.0
-    assert world.progress(report, a, who="contractor", expect=403)["error"]["code"] == "FORBIDDEN"
+    # 委託先に見えない活動（自分の割当でない a）は、無い活動と同じ 404（9.2 の注記。CR-011。403 より先）
+    hidden = world.progress(report, a, who="contractor", expect=404)["error"]
+    missing = world.progress(report, MISSING, who="contractor", expect=404)["error"]
+    assert hidden == {**missing, "details": [{"activity_id": a}]} and missing["details"] == [{"activity_id": MISSING}]
     # progress.enter_all（PM・進捗管理担当者）は割当に関わらず書ける
     assert world.progress(report, b, who="pm", percent_complete=30)["percent_complete"] == 30.0
     # 権限の無い利用者には活動の有無を見せない（404 より先に 403）
     assert world.progress(report, MISSING, who="viewer", expect=403)["error"]["code"] == "FORBIDDEN"
+
+
+def test_contractor_gets_same_404_for_hidden_and_missing_activities(app: FastAPI, world: World,
+                                                                      client: TestClient) -> None:
+    """9.2 の注記（CR-011）：委託先に見えない活動は、無い活動と同じ 404（``code``・``message``・``details`` が同じ形）。
+    自分の割当かの 403 より先に判定しない。API-PRG-003・004・010 で確かめる。全て読める利用者の 403 は変わらない。"""
+    a = world.add("A", duration_days=5)
+    b = world.add("B", duration_days=5)
+    report = world.report("2026-12-03")["id"]
+    app.state.project_access = ProjectMembersTable(FakeAssigned({
+        world.users["contractor"].id: {b}, world.users["executor"].id: {b}}))
+
+    def put_items(activity_id: int, who: str) -> Any:
+        return client.put(world.url(f"/activities/{activity_id}/progress-items"), json={"items": []}, headers=world.h[who])
+
+    def get_items(activity_id: int, who: str) -> Any:
+        return client.get(world.url(f"/activities/{activity_id}/progress-items"), headers=world.h[who])
+
+    for call in (lambda x: client.put(world.url(f"/status-reports/{report}/progress/{x}"), json={"percent_complete": 10},
+                                      headers=world.h["contractor"]),
+                 lambda x: put_items(x, "contractor"), lambda x: get_items(x, "contractor")):
+        hidden, missing = call(a), call(MISSING)
+        assert (hidden.status_code, missing.status_code) == (404, 404)
+        assert hidden.json()["error"] == {**missing.json()["error"], "details": [{"activity_id": a}]}
+        assert missing.json()["error"] == {"code": "NOT_FOUND", "message": "活動が見つかりません",
+                                           "details": [{"activity_id": MISSING}]}
+    assert put_items(b, "contractor").status_code == 200
+
+    # 全て読める利用者（実行担当者）の自分の割当でない活動は 403 のまま、無い活動は 404
+    assert world.progress(report, a, who="executor", expect=403)["error"]["code"] == "FORBIDDEN"
+    assert error_code(put_items(a, "executor")) == "FORBIDDEN"
+    assert put_items(MISSING, "executor").status_code == 404
 
 
 # ---------------------------------------------------------------------------
