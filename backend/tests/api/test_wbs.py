@@ -936,7 +936,7 @@ def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activiti
     ])
     app.state.project_access = ProjectMembersTable(assignments=FakeAssigned({contractor: frozenset({101})}))
 
-    # API-WBS-001：全て読める利用者は全ての活動から、委託先は見える活動（101）だけから
+    # 木（API-WBS-001）：全て読める利用者は全ての活動から、委託先は見える活動（101）だけから
     full = world.tree("viewer")
     assert full["restricted"] is False
     assert [(e["wbs_code"], e["rollup_hours"]) for e in full["elements"]] == [
@@ -950,7 +950,7 @@ def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activiti
     assert seen["project_estimate_hours"] == 8.0
     assert seen["validation"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
 
-    # API-WBS-012：子の集計も見える活動だけ（1.1 は 8 = 8 で差異なし、1.0 の子の集計は 8）
+    # 検査（API-WBS-012）：子の集計も見える活動だけ（1.1 は 8 = 8 で差異なし、1.0 の子の集計は 8）
     validation = world.client.get(world.url("/validation"), headers=world.headers["contractor"]).json()
     assert validation["counts"] == {"errors": 0, "warnings": 1, "missing_completion": 1}
     assert [(f["code"], f["element_id"], f["own_estimate_hours"], f["lower_hours"]) for f in validation["findings"]] == [
@@ -959,7 +959,7 @@ def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activiti
     assert [(f["element_id"], f["lower_hours"]) for f in full_validation["findings"]] == [
         (design["id"], 28.0), (a["id"], 12.0), (b["id"], 16.0)]
 
-    # API-WBS-011：割当工数・担当・列も見える活動の割当だけ（見えない活動だけにいるメンバー外の人は列に出ない）
+    # 責任分担表（API-WBS-011）：割当工数・担当・列も見える活動の割当だけ（見えない活動だけにいるメンバー外の人は列に出ない）
     url = f"/api/v1/projects/{world.pid}/wbs/responsibility-matrix"
     matrix = world.client.get(url, headers=world.headers["viewer"]).json()
     assert [(r["wbs_code"], r["planned_hours"]) for r in matrix["rows"]] == [("1.1", 12.0), ("1.2", 5.0), ("2.0", 3.0)]
@@ -970,7 +970,7 @@ def test_contractor_aggregates_and_counts_use_only_visible_elements_and_activiti
     cells = {cell["user_id"]: (cell["is_assigned"], cell["planned_hours"]) for cell in restricted["rows"][0]["cells"]}
     assert cells[contractor] == (True, 8.0) and cells[planner] == (False, 0.0)
 
-    # API-WBS-021：版の要素の数は今見える要素の写しだけ（API-WBS-022 と同じ範囲）
+    # 版の一覧（API-WBS-021）：要素の数は今見える要素の写しだけ（API-WBS-022 と同じ範囲）
     baseline = ScopeBaseline(project_id=world.pid, version=1, reason="INITIAL_APPROVAL", created_by=world.admin.id,
                              created_at=NOW)
     db_session.add(baseline)
