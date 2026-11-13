@@ -225,8 +225,11 @@ def create_project(
     - 稼働カレンダーは 4.1 の既定（``1111100``・8 時間・休日なし）。設定は 4.2 の既定。WBS の状態は DRAFT
     - ロール×権限の表は 9.2 の既定を ``role_permissions`` へ写す
     - 終了予定日が開始日より前・責任者が無い／無効は 400。コードが既にあれば 409 ``DUPLICATE_PROJECT_CODE``
+    - システム管理者でない人（``users.can_create_project``）が作ると、作った人をメンバー（ロール PM・所属は空）にする。
+      システム管理者は全てのプロジェクトで全ての権限を持つので作らない（6.2 の API-PRJ-001・9.2。CR-014）
     """
-    if not authorize(principal_of(actor), "project.create").allowed:
+    principal = principal_of(actor)
+    if not authorize(principal, "project.create").allowed:
         raise forbidden()
     _check_date_range(start_date, target_finish_date)
     owner = _check_owner(session, owner_user_id)
@@ -253,6 +256,8 @@ def create_project(
         for role, permission in default_role_permission_rows():
             session.add(RolePermission(project_id=project.id, role=role, permission=permission))
         numbering_rules.create_default(session, project.id)
+        if not principal.is_system_admin:
+            session.add(ProjectMember(project_id=project.id, user_id=actor.id, roles=["PM"]))
         session.commit()
     except IntegrityError as exc:  # 同時に同じコードで作られた
         session.rollback()

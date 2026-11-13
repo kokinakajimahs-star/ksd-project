@@ -235,7 +235,7 @@ def test_admin_creates_project_with_calendar_permissions_and_defaults(
         select(RolePermission.role, RolePermission.permission).where(RolePermission.project_id == pid)
     ).all()
     assert sorted(rows) == sorted(default_role_permission_rows())
-    # 作った直後はメンバーがいない（4.1 に無いものは作らない）
+    # システム管理者が作るとメンバーは作らない（システム管理者は全ての権限を持つ。9.2・CR-014）
     assert db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == pid)).all() == []
 
     # 詳細・既定のカレンダー・権限の表が API から読める
@@ -296,6 +296,42 @@ def test_create_project_allowed_by_can_create_project(client: TestClient, world:
     response = client.post("/api/v1/projects", json={**body, "code": "PRJ-302"}, headers=world.outsider_h)
     assert response.status_code == 403
     assert error_code(response) == "FORBIDDEN"
+
+
+def test_creator_who_is_not_system_admin_becomes_pm_member(
+    client: TestClient, db_session: Session, world: World
+) -> None:
+    # API-PRJ-001（設計書 6.2・CR-014）：システム管理者でない人が作ると、同じトランザクションで作った人をメンバー（ロール PM・
+    # 所属は空）にする。作った直後から読め（API-PRJ-002・003・009）、API-CMN-008 の projects に載る
+    granted = client.patch(f"/api/v1/users/{world.outsider.id}", json={"can_create_project": True}, headers=world.admin_h)
+    assert granted.status_code == 200, granted.text
+    body = {"code": "PRJ-303", "name": "X", "start_date": "2026-12-01", "owner_user_id": world.pm.id}
+    created = client.post("/api/v1/projects", json=body, headers=world.outsider_h)
+    assert created.status_code == 201, created.text
+    pid = created.json()["id"]
+
+    db_session.expire_all()
+    members = db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == pid)).all()
+    assert [(m.user_id, m.roles, m.organization, m.team) for m in members] == [(world.outsider.id, ["PM"], None, None)]
+
+    assert client.get(f"/api/v1/projects/{pid}", headers=world.outsider_h).json() == created.json()
+    listed = client.get("/api/v1/projects", headers=world.outsider_h).json()
+    assert [p["id"] for p in listed["items"]] == [pid]
+    member_list = client.get(f"/api/v1/projects/{pid}/members", headers=world.outsider_h).json()
+    assert [(m["user_id"], m["roles"], m["organization"], m["team"]) for m in member_list["items"]] == [
+        (world.outsider.id, ["PM"], None, None)]
+    me = client.get("/api/v1/me", headers=world.outsider_h).json()
+    mine = [p for p in me["projects"] if p["project_id"] == pid]
+    assert len(mine) == 1 and mine[0]["roles"] == ["PM"] and mine[0]["view_level"] == "ALL"
+    assert {"project.manage", "member.manage", "permission.manage"} <= set(mine[0]["permissions"])
+    # PM として基本情報を変えられる（9.2 の既定の表）。責任者（owner）はメンバーにしない
+    assert client.patch(f"/api/v1/projects/{pid}", json={"name": "Y"}, headers=world.outsider_h).status_code == 200
+    assert client.get(f"/api/v1/projects/{pid}", headers=world.pm_h).status_code == 403
+
+    # システム管理者が作ってもメンバーは増えない
+    by_admin = world.create_project(code="PRJ-304")
+    db_session.expire_all()
+    assert db_session.scalars(select(ProjectMember).where(ProjectMember.project_id == by_admin["id"])).all() == []
 
 
 def test_create_project_duplicate_code_is_409(client: TestClient, world: World) -> None:

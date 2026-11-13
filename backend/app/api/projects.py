@@ -93,6 +93,7 @@ def create_project(
     """API-PRJ-001 プロジェクトを作成する（カレンダー・採番規則・既定の権限も作る）。
 
     権限は project.create。稼働カレンダーは既定（土日休み・8 時間）、ロール×権限の表は 9.2 の既定を写す。
+    システム管理者でない人が作ると、作った人をメンバー（ロール PM）にする（CR-014）。
     コードが既にあれば 409 ``DUPLICATE_PROJECT_CODE``。終了予定日が開始日より前・責任者が無い／無効は 400。
     """
     view = projects_service.create_project(
