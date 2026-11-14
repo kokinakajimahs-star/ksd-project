@@ -2,7 +2,8 @@
 // ①非稼働日の帯 ②ベースラインのバー ③予定のバー（クリティカルは赤い枠）と要約のバー ④実績のバー ⑤依存の矢印
 // ⑥報告日線 ⑦イナズマ線 ⑧過去の線。活動の行の順はサーバが返す順（RULE-SCH-005）。見えている行だけを描く（NFR-02）。
 // outline を渡すと WBS の要素の行を差し込んで描く（7.3 の「WBS の要素の行」。CR-024）。edit を渡すと編集の操作
-// （行を選ぶ・名前を変える・バーのドラッグ・依存の矢印を引く・選ぶ）を受け、呼び手（GanttPage）へ渡す（7.3 の「編集」）
+// （行を選ぶ・行の中の入力・バーのドラッグ・依存の矢印を引く・選ぶ・右クリックのメニュー）を受け、呼び手（GanttPage）へ渡す
+// （7.3 の「編集」。CR-024・CR-025）
 import {
   Fragment,
   useEffect,
@@ -50,26 +51,51 @@ export type SelectHow = "only" | "toggle" | "range";
 /** バーのドラッグ：本体＝開始を動かす、右端＝終わりを動かす */
 export type BarDrag = "move" | "resize";
 
+/** 右クリック（Shift+F10）のメニューを開いた所：行・依存の矢印・図の空いた所（CR-025） */
+export type MenuTarget = { kind: "row"; key: string } | { kind: "link"; key: string } | { kind: "empty" };
+
+/**
+ * 行の中の入力（CR-025）：名前・希望開始日・期間は行の見出しの上に、足す行・まとめる先の名前は差し込んだ入力の行
+ * （表示の位置 index に、字下げの深さ depth で）に置く。Enter で確かめ、Esc で取り消す。外へ出たら確かめる
+ */
+export interface InlineField {
+  at: { kind: "row"; key: string } | { kind: "draft"; index: number; depth: number };
+  input: "text" | "date" | "number";
+  /** 入力の名前（読み上げ） */
+  label: string;
+  initial: string;
+  placeholder?: string;
+}
+
+/** 差し込んだ入力の行の鍵 */
+export const DRAFT_ROW_KEY = "draft";
+
 /** 編集の状態と操作（GanttPage が持つ。7.3 の「編集」） */
 export interface GanttChartEdit {
   /** 選んだ行の鍵（outline の key） */
   selected: ReadonlySet<string>;
   /** 矢印・操作の対象の行 */
   cursor: string | null;
-  /** 名前を変えている行 */
-  renaming: string | null;
+  /** 行の中の入力（名前・日付・期間・足す行・まとめる先の名前） */
+  field: InlineField | null;
   /** 選んだ依存の矢印（linkKey） */
   selectedLink: string | null;
   /** 希望開始日のある活動（活動 → 希望開始日）。行に印を付ける */
   requestedStart: ReadonlyMap<number, string>;
   /** 活動のバーと依存を動かせる（schedule.edit） */
   canEditSchedule: boolean;
+  /** 後続・移す先を選んでいる元の活動（その行に印を付け、行・バーのクリックを選ぶ先にする） */
+  pickingFrom: number | null;
+  /** 変わるたびに入力の的を描画域へ戻す（メニュー・確かめを閉じた後） */
+  focusRequest: number;
   onSelectRow(key: string, how: SelectHow): void;
   onStartRename(key: string): void;
-  onRename(key: string, name: string): void;
-  onCancelRename(): void;
+  onFieldCommit(value: string): void;
+  onFieldCancel(): void;
   onSelectLink(link: string | null): void;
   onKeyDown(event: KeyboardEvent<HTMLDivElement>): void;
+  /** メニューを開く（画面の座標） */
+  onContextMenu(target: MenuTarget, point: { x: number; y: number }): void;
   /** 日の単位に丸めたずれ（暦日。0 では呼ばない） */
   onBarDrop(activityId: number, how: BarDrag, days: number): void;
   onLinkDrop(predecessorId: number, successorId: number): void;
@@ -132,9 +158,54 @@ interface MainLine {
   vertices: { position: number; point: AxisPoint; judgement: Judgement; title: string }[];
 }
 
+/** 差し込んだ入力の行（描く行の 1 つ） */
+interface DraftRow {
+  kind: "draft";
+  key: string;
+  depth: number;
+}
+
+type ChartRow = OutlineRow | DraftRow;
+
+/**
+ * ドラッグ：バーの本体・右端は日付を、右の丸は依存を引く。本体を縦に別の行へ引いている間は依存の線にする
+ * （linking。CR-025）。from・to は図の中の座標
+ */
 type DragState =
-  | { kind: "bar"; how: BarDrag; activityId: number; originX: number; days: number; moved: boolean }
+  | {
+      kind: "bar";
+      how: BarDrag;
+      activityId: number;
+      originX: number;
+      originY: number;
+      days: number;
+      moved: boolean;
+      linking: boolean;
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+    }
   | { kind: "link"; activityId: number; fromX: number; fromY: number; toX: number; toY: number };
+
+/** 画面の座標を図の中の座標に */
+function pointIn(svg: SVGSVGElement | null, clientX: number, clientY: number): { x: number; y: number } {
+  const rect = svg?.getBoundingClientRect();
+  return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
+}
+
+/** 図の中の y が当たる行の位置（目盛りの帯の下から 0, 1, …） */
+function rowAt(y: number): number {
+  return Math.floor((y - HEADER_HEIGHT) / ROW_HEIGHT);
+}
+
+/** 本体を縦に別の行へ（半行より大きく）引いている間は、日付ではなく依存を引く（7.3。元の行へ戻せば日付に戻る） */
+function isLinking(how: BarDrag, fromY: number, y: number): boolean {
+  return how === "move" && Math.abs(y - fromY) > ROW_HEIGHT / 2 && rowAt(y) !== rowAt(fromY);
+}
+
+/** キーボード（Shift+F10・メニューキー）でメニューを開いた後に、ブラウザが続けて出す右クリックの事象を無視する間（ミリ秒） */
+const KEYBOARD_MENU_WINDOW_MS = 1000;
 
 function percentText(value: number | null): string {
   return value === null ? "" : `${Math.round(value * 10) / 10}%`;
@@ -187,7 +258,19 @@ export default function GanttChart({
   const editing = edit !== undefined;
   const indent = outline === undefined ? INDENT.activities : INDENT.outline;
 
-  const rows = useMemo(() => outline ?? activityOutline(gantt.rows), [outline, gantt.rows]);
+  // 足す行・まとめる先の名前の入力の行を差し込む（CR-025）
+  const field = edit?.field ?? null;
+  const draftAt = field !== null && field.at.kind === "draft" ? field.at : null;
+  const draftIndex = draftAt?.index ?? -1;
+  const draftDepth = draftAt?.depth ?? 0;
+  const rows = useMemo((): ChartRow[] => {
+    const base: ChartRow[] = outline ?? activityOutline(gantt.rows);
+    if (draftIndex < 0) {
+      return base;
+    }
+    const at = Math.min(draftIndex, base.length);
+    return [...base.slice(0, at), { kind: "draft", key: DRAFT_ROW_KEY, depth: draftDepth }, ...base.slice(at)];
+  }, [outline, gantt.rows, draftIndex, draftDepth]);
 
   // 行の番号（row_index）→ 描く位置、活動 → 描く位置、行の番号 → 活動の行
   const { positionOfRow, positionOfActivity, ganttRowOf } = useMemo(() => {
@@ -256,6 +339,8 @@ export default function GanttChart({
     latest.current = { edit, rows, range, scrollTop };
   });
   const dragRef = useRef<DragState | null>(null);
+  // キーボードでメニューを開いた時刻（続けて来る右クリックの事象を無視する）
+  const keyboardMenuAt = useRef(Number.NEGATIVE_INFINITY);
   function startDrag(next: DragState | null) {
     dragRef.current = next;
     setDrag(next);
@@ -265,10 +350,7 @@ export default function GanttChart({
     if (!dragging) {
       return;
     }
-    const svgPoint = (event: MouseEvent) => {
-      const rect = svgRef.current?.getBoundingClientRect();
-      return { x: event.clientX - (rect?.left ?? 0), y: event.clientY - (rect?.top ?? 0) };
-    };
+    const svgPoint = (event: MouseEvent) => pointIn(svgRef.current, event.clientX, event.clientY);
     const update = (next: DragState | null) => {
       dragRef.current = next;
       setDrag(next);
@@ -280,7 +362,16 @@ export default function GanttChart({
       }
       if (d.kind === "bar") {
         const dx = event.clientX - d.originX;
-        update({ ...d, days: daysOf(dx, dayWidth), moved: d.moved || Math.abs(dx) >= DRAG_THRESHOLD });
+        const dy = event.clientY - d.originY;
+        const p = svgPoint(event);
+        update({
+          ...d,
+          days: daysOf(dx, dayWidth),
+          moved: d.moved || Math.abs(dx) >= DRAG_THRESHOLD || Math.abs(dy) >= DRAG_THRESHOLD,
+          linking: isLinking(d.how, d.fromY, p.y),
+          toX: p.x,
+          toY: p.y,
+        });
       } else {
         const p = svgPoint(event);
         update({ ...d, toX: p.x, toY: p.y });
@@ -293,7 +384,8 @@ export default function GanttChart({
       if (d === null || current === undefined) {
         return;
       }
-      if (d.kind === "bar") {
+      const p = svgPoint(event);
+      if (d.kind === "bar" && !isLinking(d.how, d.fromY, p.y)) {
         const dx = event.clientX - d.originX;
         const days = daysOf(dx, dayWidth);
         if ((d.moved || Math.abs(dx) >= DRAG_THRESHOLD) && days !== 0) {
@@ -301,16 +393,22 @@ export default function GanttChart({
         }
         return;
       }
-      // 落とした先は別の活動の予定のバー（7.3）。目盛りの帯（縦に送っても上に残る）の上は行に当てない
-      const p = svgPoint(event);
+      // 落とした先は別の活動の行の見出しか予定のバー（7.3）。目盛りの帯（縦に送っても上に残る）の上は行に当てない
       if (currentRange === null || p.y - currentScroll < HEADER_HEIGHT) {
         return;
       }
-      const target = currentRows[Math.floor((p.y - HEADER_HEIGHT) / ROW_HEIGHT)];
-      if (target?.kind !== "activity" || target.row.activity_id === d.activityId || target.row.planned === null) {
+      const target = currentRows[rowAt(p.y)];
+      if (target?.kind !== "activity" || target.row.activity_id === d.activityId) {
+        return;
+      }
+      if (p.x < LABEL_WIDTH) {
+        current.onLinkDrop(d.activityId, target.row.activity_id);
         return;
       }
       const planned = target.row.planned;
+      if (planned === null) {
+        return;
+      }
       const slack = planned.is_milestone ? 10 : 4;
       const x1 = LABEL_WIDTH + xOfPoint(currentRange.start, planned.start.calendar, dayWidth) - slack;
       const x2 = LABEL_WIDTH + xOfPoint(currentRange.start, planned.end.calendar, dayWidth) + slack;
@@ -335,8 +433,8 @@ export default function GanttChart({
     };
   }, [dragging, dayWidth]);
 
-  // 上下の矢印などで選んだ行が見えていなければ、図を縦に送る（描画の済んでいない画面では何もしない）
-  const cursorKey = edit?.cursor ?? null;
+  // 上下の矢印などで選んだ行（入力の行を差し込んだらその行）が見えていなければ、図を縦に送る（描画の済んでいない画面では何もしない）
+  const cursorKey = draftIndex >= 0 ? DRAFT_ROW_KEY : (edit?.cursor ?? null);
   useEffect(() => {
     const viewport = viewportRef.current;
     const position = cursorKey === null ? -1 : latest.current.rows.findIndex((r) => r.key === cursorKey);
@@ -350,7 +448,15 @@ export default function GanttChart({
     } else if (rowTopY + ROW_HEIGHT > viewport.scrollTop + shownHeight) {
       viewport.scrollTop = rowTopY + ROW_HEIGHT - shownHeight;
     }
-  }, [cursorKey]);
+  }, [cursorKey, draftIndex]);
+
+  // メニュー・確かめを閉じたら入力の的を図へ戻す（行の中の入力を開いたときはその入力が受ける）
+  const focusRequest = edit?.focusRequest ?? 0;
+  useEffect(() => {
+    if (focusRequest > 0 && latest.current.edit?.field === null) {
+      viewportRef.current?.focus({ preventScroll: true });
+    }
+  }, [focusRequest]);
 
   if (range === null || (rows.length === 0 && !editing)) {
     return <p className="gantt-empty">描く活動がありません</p>;
@@ -363,6 +469,7 @@ export default function GanttChart({
   const shown = visibleRows(scrollTop, viewportHeight - HEADER_HEIGHT, rowCount, ROW_HEIGHT);
   const visible = rows.slice(shown.first, shown.last + 1).map((r, i) => ({ r, position: shown.first + i }));
   const visibleActivities = visible.flatMap(({ r, position }) => (r.kind === "activity" ? [{ row: r.row, key: r.key, position }] : []));
+  const picking = edit?.pickingFrom ?? null;
   const visibleElements = visible.flatMap(({ r, position }) => (r.kind === "element" ? [{ r, position }] : []));
 
   const x = (point: AxisPoint) => LABEL_WIDTH + xOfPoint(range.start, point.calendar, dayWidth);
@@ -407,12 +514,89 @@ export default function GanttChart({
     event.preventDefault();
     focusViewport();
     const choose = selectHow(event);
+    // 後続・移す先を選んでいる間は、バーのクリックも行を選ぶだけ（動かさない）
+    if (picking !== null) {
+      edit.onSelectRow(key, "only");
+      return;
+    }
     if (choose !== "only" || !edit.selected.has(key) || edit.selected.size !== 1) {
       edit.onSelectRow(key, choose);
     }
     if (choose === "only") {
-      startDrag({ kind: "bar", how, activityId: row.activity_id, originX: event.clientX, days: 0, moved: false });
+      const from = pointIn(svgRef.current, event.clientX, event.clientY);
+      startDrag({
+        kind: "bar",
+        how,
+        activityId: row.activity_id,
+        originX: event.clientX,
+        originY: event.clientY,
+        days: 0,
+        moved: false,
+        linking: false,
+        fromX: from.x,
+        fromY: from.y,
+        toX: from.x,
+        toY: from.y,
+      });
     }
+  }
+
+  /** Shift+F10・メニューキー：矢印の行（無ければ図の左上）にメニューを開く */
+  function openMenuForCursor() {
+    const viewport = viewportRef.current;
+    if (edit === undefined || viewport === null) {
+      return;
+    }
+    const rect = viewport.getBoundingClientRect();
+    const position = edit.cursor === null ? -1 : rows.findIndex((r) => r.key === edit.cursor);
+    if (edit.cursor === null || position < 0) {
+      edit.onContextMenu({ kind: "empty" }, { x: rect.left + 16, y: rect.top + HEADER_HEIGHT });
+      return;
+    }
+    const y = rect.top + rowTop(position) + ROW_HEIGHT - viewport.scrollTop;
+    edit.onContextMenu({ kind: "row", key: edit.cursor }, { x: rect.left + 24 - viewport.scrollLeft, y });
+  }
+
+  function onViewportKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (edit === undefined) {
+      return;
+    }
+    if (event.target === event.currentTarget && ((event.key === "F10" && event.shiftKey) || event.key === "ContextMenu")) {
+      event.preventDefault();
+      keyboardMenuAt.current = event.timeStamp;
+      openMenuForCursor();
+      return;
+    }
+    edit.onKeyDown(event);
+  }
+
+  /**
+   * 右クリック：押した所の行（見出し・バー・掴み・空いた所のどこでも、縦の位置で決める）・矢印・空いた所のメニュー。
+   * 行の中の入力の上ではブラウザのメニュー（貼り付けなど）に任せる。キーボードで開いたメニューは keydown で開いている
+   */
+  function onViewportContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (edit === undefined) {
+      return;
+    }
+    const element = event.target instanceof Element ? event.target : null;
+    if (element?.closest("input") != null) {
+      return;
+    }
+    event.preventDefault();
+    if (drag !== null || event.timeStamp - keyboardMenuAt.current < KEYBOARD_MENU_WINDOW_MS) {
+      return;
+    }
+    focusViewport();
+    const point = { x: event.clientX, y: event.clientY };
+    const link = element?.closest("[data-link-hit]")?.getAttribute("data-link-hit");
+    if (link !== undefined && link !== null) {
+      edit.onContextMenu({ kind: "link", key: link }, point);
+      return;
+    }
+    // 目盛りの帯（縦に送っても上に残る）と行の無い所は空いた所
+    const p = pointIn(svgRef.current, event.clientX, event.clientY);
+    const row = p.y - scrollTop < HEADER_HEIGHT ? undefined : rows[rowAt(p.y)];
+    edit.onContextMenu(row === undefined || row.kind === "draft" ? { kind: "empty" } : { kind: "row", key: row.key }, point);
   }
 
   function onLinkHandleMouseDown(activityId: number, fromX: number, fromY: number, event: ReactMouseEvent) {
@@ -502,7 +686,7 @@ export default function GanttChart({
     if (drag === null) {
       return null;
     }
-    if (drag.kind === "link") {
+    if (drag.kind === "link" || drag.linking) {
       return (
         <line
           data-ghost="link"
@@ -552,8 +736,10 @@ export default function GanttChart({
     );
   }
 
-  const renamingPosition = edit === undefined || edit.renaming === null ? -1 : rows.findIndex((r) => r.key === edit.renaming);
-  const renamingRow = renamingPosition < 0 ? undefined : rows[renamingPosition];
+  const fieldAt = field?.at ?? null;
+  const fieldPosition =
+    fieldAt === null ? -1 : rows.findIndex((r) => (fieldAt.kind === "draft" ? r.kind === "draft" : r.key === fieldAt.key));
+  const fieldRow = fieldPosition < 0 ? undefined : rows[fieldPosition];
 
   return (
     <div
@@ -564,8 +750,11 @@ export default function GanttChart({
       onScroll={onScroll}
       data-testid="gantt-viewport"
       tabIndex={editing ? 0 : undefined}
-      aria-label={editing ? "ガントの編集（上下の矢印で行を選ぶ。F2 で名前・Insert で行を足す・Delete で消す）" : undefined}
-      onKeyDown={edit?.onKeyDown}
+      aria-label={
+        editing ? "ガントの編集（上下の矢印で行を選ぶ。Enter で下に行を足す・F2 で名前・Delete で消す・Shift+F10 で操作のメニュー）" : undefined
+      }
+      onKeyDown={editing ? onViewportKeyDown : undefined}
+      onContextMenu={editing ? onViewportContextMenu : undefined}
     >
       <svg
         ref={svgRef}
@@ -576,7 +765,11 @@ export default function GanttChart({
         viewBox={`0 0 ${width} ${height}`}
         data-row-count={rowCount}
         data-unit={unit}
-        style={drag !== null ? { cursor: drag.kind === "link" ? "crosshair" : drag.how === "move" ? "grabbing" : "ew-resize" } : undefined}
+        style={
+          drag !== null
+            ? { cursor: drag.kind === "link" || drag.linking ? "crosshair" : drag.how === "move" ? "grabbing" : "ew-resize" }
+            : undefined
+        }
       >
         <defs>
           <marker id={ARROW_ID} viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -607,7 +800,7 @@ export default function GanttChart({
         {/* 編集：選んだ行の地と、行を選ぶ受け手 */}
         {edit !== undefined && (
           <g data-layer="edit-rows">
-            {visible.map(({ r, position }) => (
+            {visible.map(({ r, position }) => r.kind === "draft" ? null : (
               <rect
                 key={r.key}
                 data-row-key={r.key}
@@ -861,7 +1054,7 @@ export default function GanttChart({
                       style={{ cursor: "grab" }}
                       onMouseDown={(e) => onBarMouseDown(row, key, "move", e)}
                     >
-                      <title>{`${row.name}：ドラッグで日付を動かす`}</title>
+                      <title>{`${row.name}：横へドラッグで日付を動かす。別の行へドラッグで依存をつなぐ`}</title>
                     </rect>
                   );
                 }
@@ -879,7 +1072,7 @@ export default function GanttChart({
                       style={{ cursor: "grab" }}
                       onMouseDown={(e) => onBarMouseDown(row, key, "move", e)}
                     >
-                      <title>{`${row.name}：ドラッグで開始を動かす`}</title>
+                      <title>{`${row.name}：横へドラッグで開始を動かす。別の行へドラッグで依存をつなぐ`}</title>
                     </rect>
                     <rect
                       data-handle="resize"
@@ -897,7 +1090,7 @@ export default function GanttChart({
                   </Fragment>
                 );
               })}
-            {canDrag && cursorActivity !== undefined && cursorActivity.row.planned !== null && (
+            {canDrag && picking === null && cursorActivity !== undefined && cursorActivity.row.planned !== null && (
               <circle
                 data-handle="link"
                 data-activity-id={cursorActivity.row.activity_id}
@@ -915,7 +1108,7 @@ export default function GanttChart({
                   )
                 }
               >
-                <title>後続の活動のバーへドラッグして依存をつなぐ</title>
+                <title>後続の活動のバー・行へドラッグして依存をつなぐ</title>
               </circle>
             )}
             {dragGhost()}
@@ -925,8 +1118,16 @@ export default function GanttChart({
         {/* 行の見出し（WBS ID・名前。活動はフロートも。要素の行は太字） */}
         <g data-layer="row-labels">
           {visible.map(({ r, position }) => {
+            if (r.kind === "draft") {
+              return (
+                <g key={r.key} data-draft="true">
+                  <rect x={0} y={rowTop(position)} width={LABEL_WIDTH} height={ROW_HEIGHT} style={{ fill: SELECTED_FILL }} />
+                </g>
+              );
+            }
             const chosen = edit?.selected.has(r.key) ?? false;
             const isCursor = edit?.cursor === r.key;
+            const isSource = r.kind === "activity" && picking === r.row.activity_id;
             const common = {
               onMouseDown: (e: ReactMouseEvent) => onRowMouseDown(r.key, e),
               onDoubleClick: edit === undefined ? undefined : () => edit.onStartRename(r.key),
@@ -937,7 +1138,8 @@ export default function GanttChart({
                 y={rowTop(position)}
                 width={LABEL_WIDTH}
                 height={ROW_HEIGHT}
-                style={{ fill: chosen ? SELECTED_FILL : SURFACE, stroke: isCursor ? ACCENT : "none" }}
+                strokeDasharray={isSource ? "4 2" : undefined}
+                style={{ fill: chosen ? SELECTED_FILL : SURFACE, stroke: isCursor || isSource ? ACCENT : "none" }}
               />
             );
             if (r.kind === "element") {
@@ -958,7 +1160,14 @@ export default function GanttChart({
             }
             const row = r.row;
             return (
-              <g key={r.key} data-row={row.row_index} data-activity-id={row.activity_id} data-row-key={r.key} {...common}>
+              <g
+                key={r.key}
+                data-row={row.row_index}
+                data-activity-id={row.activity_id}
+                data-row-key={r.key}
+                data-picking={isSource ? "source" : undefined}
+                {...common}
+              >
                 {background}
                 <text
                   x={labelX(r.depth, indent)}
@@ -1004,27 +1213,27 @@ export default function GanttChart({
           })}
         </g>
       </svg>
-      {edit !== undefined && renamingRow !== undefined && (
-        <RenameInput
-          key={renamingRow.key}
-          initial={renamingRow.kind === "element" ? renamingRow.element.name : renamingRow.row.name}
+      {edit !== undefined && field !== null && fieldRow !== undefined && (
+        <RowInput
+          key={`${field.input}:${field.label}:${fieldRow.key}`}
+          field={field}
           style={{
             position: "absolute",
-            top: rowTop(renamingPosition) + 2,
-            left: labelX(renamingRow.depth, indent) - 4,
-            width: LABEL_WIDTH - labelX(renamingRow.depth, indent),
+            top: rowTop(fieldPosition) + 2,
+            left: labelX(fieldRow.depth, indent) - 4,
+            width: Math.max(field.input === "text" ? 0 : 160, LABEL_WIDTH - labelX(fieldRow.depth, indent)),
             height: ROW_HEIGHT - 4,
             boxSizing: "border-box",
             fontSize: 12,
           }}
-          onCommit={(name, keepFocus) => {
-            edit.onRename(renamingRow.key, name);
+          onCommit={(value, keepFocus) => {
+            edit.onFieldCommit(value);
             if (keepFocus) {
               focusViewport();
             }
           }}
           onCancel={() => {
-            edit.onCancelRename();
+            edit.onFieldCancel();
             focusViewport();
           }}
         />
@@ -1033,26 +1242,34 @@ export default function GanttChart({
   );
 }
 
-/** 名前を変える入力（Enter で保存、Esc で取り消す。外へ出たら保存する） */
-function RenameInput({
-  initial,
+/** 行の中の入力（名前・日付・期間。Enter で確かめ、Esc で取り消す。外へ出たら確かめる） */
+function RowInput({
+  field,
   style,
   onCommit,
   onCancel,
 }: {
-  initial: string;
+  field: InlineField;
   style: CSSProperties;
-  onCommit: (name: string, keepFocus: boolean) => void;
+  onCommit: (value: string, keepFocus: boolean) => void;
   onCancel: () => void;
 }) {
   const done = useRef(false);
   return (
     <input
-      aria-label="名前"
-      defaultValue={initial}
+      type={field.input}
+      aria-label={field.label}
+      placeholder={field.placeholder}
+      defaultValue={field.initial}
+      min={field.input === "number" ? 1 : undefined}
+      step={field.input === "number" ? 1 : undefined}
       autoFocus
       style={style}
-      onFocus={(e) => e.currentTarget.select()}
+      onFocus={(e) => {
+        if (field.input === "text") {
+          e.currentTarget.select();
+        }
+      }}
       onKeyDown={(e) => {
         e.stopPropagation();
         // IME の確定の Enter は保存にしない（Safari は確定の後に keyCode 229 の keydown を出すことがある）
@@ -1067,6 +1284,10 @@ function RenameInput({
         }
       }}
       onBlur={(e) => {
+        // 別のウィンドウへ移っただけ（的は入力に残る）なら確かめない。戻れば続きを打てる
+        if (document.activeElement === e.currentTarget) {
+          return;
+        }
         if (!done.current) {
           done.current = true;
           onCommit(e.currentTarget.value, false);

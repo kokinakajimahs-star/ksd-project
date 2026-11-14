@@ -138,9 +138,52 @@ const SCREENS: Screen[] = [
     routes: GANTT_ROUTES,
     act: async (page) => {
       await page.getByRole("button", { name: "編集する" }).click();
-      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').dispatchEvent("mousedown", { button: 0 });
-      await page.getByRole("region", { name: "選んだ行" }).waitFor();
+      await page.getByText(/^選んだ行：1\.1 /).waitFor();
+    },
+  },
+  {
+    // 活動のバーの右クリック：その行の操作のメニュー（CR-025）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-menu",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
+      await page.locator('[data-handle="move"][data-activity-id="21"]').click({ button: "right" });
+      await page.getByRole("menu", { name: "1.1 資料作成 の操作" }).waitFor();
+    },
+  },
+  {
+    // 行を選んで Shift+F10：選んだ行のメニュー（実ブラウザで右クリックの事象が続けて来ても開き直さない）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-menu-key",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
+      await page.locator('[data-layer="row-labels"] > g[data-row-key="a22"]').click();
+      await page.keyboard.press("Shift+F10");
+      await page.getByRole("menu", { name: "1.2 基本設計 の操作" }).waitFor();
+      await page.keyboard.press("ArrowDown");
+      await page.getByRole("menuitem", { name: "名前を変える" }).and(page.locator(":focus")).waitFor();
+    },
+  },
+  {
+    // 活動の行で Enter：次に差し込んだ入力の行に名前を入れているところ（CR-025）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-insert",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
+      await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').click();
+      await page.keyboard.press("Enter");
+      await page.getByRole("textbox", { name: "足す行の名前" }).fill("議事録");
     },
   },
   {
@@ -151,7 +194,7 @@ const SCREENS: Screen[] = [
     routes: GANTT_ROUTES,
     act: async (page) => {
       await page.getByRole("button", { name: "編集する" }).click();
-      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       const box = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
       if (box !== null) {
         await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -159,6 +202,25 @@ const SCREENS: Screen[] = [
         await page.mouse.move(box.x + box.width / 2 + 24, box.y + box.height / 2, { steps: 4 });
         await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2, { steps: 4 });
       }
+    },
+  },
+  {
+    // バーの本体を縦に別の活動のバーへ引いている途中（離さない）：依存の線の影に変わる（CR-025）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-drag-link",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
+      const from = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
+      const to = await page.locator('[data-handle="move"][data-activity-id="21"]').boundingBox();
+      if (from !== null && to !== null) {
+        await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+      }
+      await page.locator('[data-ghost="link"]').waitFor();
     },
   },
   {
@@ -172,7 +234,7 @@ const SCREENS: Screen[] = [
     },
     act: async (page) => {
       await page.getByRole("button", { name: "編集する" }).click();
-      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').click();
       const handle = await page.locator('[data-handle="link"]').boundingBox();
       const target = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();

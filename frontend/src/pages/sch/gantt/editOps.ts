@@ -1,7 +1,7 @@
 // ガントの編集（設計書 7.3 の「編集」。CR-024）で、操作をどの API の引数にするかを決める純粋な関数。
 // 位置は API-WBS-004・API-SCH-003 と同じ数え方：移す先の兄弟（自分を除く）の中の位置（0 から）
 import type { Activity } from "../../../api/sch";
-import type { WbsElement } from "../../../api/wbs";
+import type { ElementKind, WbsElement } from "../../../api/wbs";
 import { activityKey, elementKey, type OutlineRow } from "../../../components/gantt/outline";
 
 export type Planned<T> = { ok: true; value: T } | { ok: false; reason: string };
@@ -134,24 +134,106 @@ export function groupElementsPlan(elements: WbsElement[], selected: number[]): P
   return ok({ parentId: first.parent_id, position, ids: roots.map((e) => e.id) });
 }
 
-/** 行を足す先（設計書 7.3）：活動・WP の行なら、その WP に活動を。WP 以外の要素なら子の要素を。何も選んでいなければ最上位の要素を */
-export type AddTarget =
-  | { kind: "activity"; workPackage: WbsElement }
-  | { kind: "element"; parent: WbsElement | null };
+/** 表示の行の index の行と、その配下（続く深い行）の最後の位置 */
+export function subtreeEnd(outline: OutlineRow[], index: number): number {
+  const depth = outline[index]?.depth ?? 0;
+  let end = index;
+  while (end + 1 < outline.length && outline[end + 1]!.depth > depth) {
+    end += 1;
+  }
+  return end;
+}
 
-export function addTarget(elements: WbsElement[], activities: Activity[], key: string | null): AddTarget {
-  if (key !== null && key.startsWith("a")) {
-    const activity = activities.find((a) => activityKey(a.id) === key);
+/**
+ * 行を足す先（設計書 7.3。CR-025）と、名前の入力の行を差し込む表示の位置（index）・字下げの深さ（depth）。
+ * position は足した後に置く位置（API-SCH-003・API-WBS-004 の数え方。null は末尾のまま）
+ */
+export type AddPlan = (
+  | { kind: "activity"; workPackage: WbsElement; position: number | null }
+  | { kind: "element"; parent: WbsElement | null; elementKind: ElementKind; position: number | null }
+) & { index: number; depth: number };
+
+/**
+ * 選んだ行（key）に足す先：活動の行ならその活動の次（同じ WP）に活動を、WP の行ならその WP の末尾に活動を、
+ * WP 以外の要素の行なら子の要素（WP）を、何も選んでいなければ最上位の要素（WP）を。
+ * sibling なら要素の行の下に同じ階層の要素（区分は選んだ要素と同じ）を足す
+ */
+export function addPlan(
+  elements: WbsElement[],
+  activities: Activity[],
+  outline: OutlineRow[],
+  key: string | null,
+  sibling = false,
+): Planned<AddPlan> {
+  const index = key === null ? -1 : outline.findIndex((r) => r.key === key);
+  const row = index < 0 ? undefined : outline[index];
+  if (row === undefined) {
+    return ok({ kind: "element", parent: null, elementKind: "WORK_PACKAGE", position: null, index: outline.length, depth: 1 });
+  }
+  if (row.kind === "activity") {
+    const activity = activities.find((a) => a.id === row.row.activity_id);
     const wp = activity === undefined ? undefined : elements.find((e) => e.id === activity.work_package_id);
-    if (wp !== undefined) {
-      return { kind: "activity", workPackage: wp };
+    if (activity === undefined || wp === undefined) {
+      return no("活動の WP が WBS に見つかりません");
+    }
+    const siblings = activities.filter((a) => a.work_package_id === wp.id);
+    const next = siblings.findIndex((a) => a.id === activity.id) + 1;
+    return ok({ kind: "activity", workPackage: wp, position: next < siblings.length ? next : null, index: index + 1, depth: row.depth });
+  }
+  const element = row.element;
+  const end = subtreeEnd(outline, index) + 1;
+  if (sibling) {
+    const siblings = siblingsOf(elements, element.parent_id);
+    const next = siblings.findIndex((e) => e.id === element.id) + 1;
+    const parent = element.parent_id === null ? null : (elements.find((e) => e.id === element.parent_id) ?? null);
+    return ok({
+      kind: "element",
+      parent,
+      elementKind: element.kind,
+      position: next < siblings.length ? next : null,
+      index: end,
+      depth: row.depth,
+    });
+  }
+  if (element.kind === "WORK_PACKAGE") {
+    return ok({ kind: "activity", workPackage: element, position: null, index: end, depth: row.depth + 1 });
+  }
+  return ok({ kind: "element", parent: element, elementKind: "WORK_PACKAGE", position: null, index: end, depth: row.depth + 1 });
+}
+
+export interface ActivityMove {
+  workPackage: WbsElement;
+  /** 移す先の WP の中の位置（自分を除いた活動の中。API-SCH-003 の position） */
+  position: number;
+}
+
+/** 活動を移す先（設計書 7.3。CR-025）：WP の行ならその WP の末尾へ、活動の行ならその活動の次へ */
+export function moveTargetPlan(elements: WbsElement[], activities: Activity[], activityId: number, key: string): Planned<ActivityMove> {
+  if (!activities.some((a) => a.id === activityId)) {
+    return no("活動が見つかりません");
+  }
+  let wp: WbsElement | undefined;
+  let after: number | null = null;
+  if (key.startsWith("a")) {
+    const target = activities.find((a) => activityKey(a.id) === key);
+    if (target === undefined || target.id === activityId) {
+      return no("移す先に、別の活動の行か WP の行を選びます");
+    }
+    wp = elements.find((e) => e.id === target.work_package_id);
+    after = target.id;
+  } else {
+    wp = elements.find((e) => elementKey(e.id) === key);
+    if (wp !== undefined && wp.kind !== "WORK_PACKAGE") {
+      return no(`${wp.wbs_code} ${wp.name} はワークパッケージではないので、活動を置けません（RULE-WBS-003）`);
     }
   }
-  const element = key === null ? undefined : elements.find((e) => elementKey(e.id) === key);
-  if (element === undefined) {
-    return { kind: "element", parent: null };
+  if (wp === undefined) {
+    return no("移す先の WP が WBS に見つかりません");
   }
-  return element.kind === "WORK_PACKAGE" ? { kind: "activity", workPackage: element } : { kind: "element", parent: element };
+  const workPackageId = wp.id;
+  const others = activities.filter((a) => a.work_package_id === workPackageId && a.id !== activityId);
+  const position = after === null ? others.length : others.findIndex((a) => a.id === after) + 1;
+  return ok({ workPackage: wp, position });
 }
 
 /** 上下の矢印で選ぶ次の行 */

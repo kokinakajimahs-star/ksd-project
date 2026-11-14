@@ -1,5 +1,5 @@
-// ガント（UI-SCH-002）の WBS の要素の行と編集（設計書 7.3。CR-024）
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+// ガント（UI-SCH-002）の WBS の要素の行と編集（設計書 7.3。CR-024・CR-025：図の上の操作だけで編集する）
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -102,9 +102,14 @@ function barX(container: HTMLElement, activityId: number): number {
   return Number(grip.getAttribute("x")) + Number(grip.getAttribute("width")) / 2;
 }
 
+
+function strip(): HTMLElement {
+  return screen.getByRole("region", { name: "ガントの編集" });
+}
+
 /** 保存の後の読み直しが終わるまで待つ（終わるまで次の操作は受けない） */
 async function settled() {
-  await waitFor(() => expect(screen.getByRole("button", { name: "名前を変える" })).toBeEnabled());
+  await waitFor(() => expect(strip()).toHaveAttribute("aria-busy", "false"));
 }
 
 const WAIT_TEXT = "前の操作の保存・読み直しが終わっていません。終わってからもう一度操作します";
@@ -114,12 +119,36 @@ async function startEditing(permissions = PLANNER, overrides: Record<string, Rou
   const view = renderAt();
   await screen.findByRole("img", { name: "ガントチャート" });
   fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
-  await screen.findByRole("toolbar", { name: "編集の操作" });
+  await screen.findByRole("region", { name: "ガントの編集" });
+  await waitFor(() => expect(view.container.querySelector('[data-layer="edit-rows"]')).not.toBeNull());
   const viewport = screen.getByTestId("gantt-viewport");
   return { ...api, ...view, viewport };
 }
 
-describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
+/** 行の見出しを右クリックしてメニューを開く（押した所の縦の位置で行が決まる） */
+function openMenu(container: HTMLElement, key: string): HTMLElement {
+  fireEvent.contextMenu(label(container, key).querySelector("rect")!, { clientX: 40, clientY: rowY(container, key) });
+  return screen.getByRole("menu");
+}
+
+function menuNames(menu: HTMLElement): string[] {
+  return [...menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"]')].map((e) => e.textContent ?? "");
+}
+
+function choose(name: string) {
+  const menu = within(screen.getByRole("menu"));
+  fireEvent.click(menu.queryByRole("menuitem", { name }) ?? menu.getByRole("menuitemradio", { name }));
+}
+
+/** 差し込んだ入力の行に名前を入れて Enter */
+function typeDraft(label: string, value: string) {
+  const input = screen.getByRole("textbox", { name: label });
+  expect(input).toHaveFocus();
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, { key: "Enter" });
+}
+
+describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () => {
   beforeEach(() => {
     setAuthToken("t-pm");
   });
@@ -150,14 +179,38 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("編集に切り替えると活動の無い要素も出し、WBS の状態を帯に出す", async () => {
+  it("編集に切り替えると活動の無い要素も出し、WBS の状態を帯に出す。帯に入力欄と操作のボタンを置かない（CR-025）", async () => {
     const { container, calls } = await startEditing();
     expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "e102", "a23", "e103"]);
     expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
-    expect(within(screen.getByRole("toolbar", { name: "編集の操作" })).getByText("作成中")).toBeInTheDocument();
+    expect(within(strip()).getByText("作成中")).toBeInTheDocument();
+    expect(within(strip()).queryAllByRole("textbox")).toHaveLength(0);
+    expect(within(strip()).queryAllByRole("button")).toHaveLength(0);
+    expect(within(strip()).queryAllByRole("combobox")).toHaveLength(0);
+    expect(screen.queryByRole("region", { name: "選んだ行" })).toBeNull();
     // 希望開始日のある活動に印を付ける
     expect(container.querySelector('[data-requested-start="22"]')).not.toBeNull();
     expect(container.querySelector('[data-requested-start="21"]')).toBeNull();
+  });
+
+  it("選んだ行の要約を帯の 1 行に出し、保存して読み直した値に合わせる", async () => {
+    let current = ACTIVITIES;
+    const { container } = await startEditing(PLANNER, {
+      [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList(current, { dependencies: DEPENDENCIES })),
+      [`PATCH ${BASE}/activities/21`]: () => {
+        current = [{ ...ACTIVITIES[0]!, duration_days: 7 }, ...ACTIVITIES.slice(1)];
+        return jsonResponse(200, current[0]);
+      },
+    });
+    expect(within(strip()).getByText("選んだ行：なし（Enter で最上位に要素を足す）")).toBeInTheDocument();
+    fireEvent.mouseDown(label(container, "a21"));
+    expect(within(strip()).getByText(/^選んだ行：1\.1 聞き取り（予定 .+・期間 5 稼働日・余裕 0 日・先行 0 件・後続 1 件）$/)).toBeInTheDocument();
+    fireEvent.mouseDown(container.querySelector('[data-handle="resize"][data-activity-id="21"]')!, { clientX: 400 });
+    fireEvent.mouseMove(window, { clientX: 448 });
+    fireEvent.mouseUp(window, { clientX: 448 });
+    expect(await within(strip()).findByText(/期間 7 稼働日/)).toBeInTheDocument();
+    fireEvent.mouseDown(label(container, "e101"));
+    expect(within(strip()).getByText("選んだ行：1.1 業務整理（ワークパッケージ）")).toBeInTheDocument();
   });
 
   it("行を選び、F2 で名前を変える（活動は API-SCH-003、要素は API-WBS-003）。Esc で取り消す", async () => {
@@ -172,6 +225,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1));
     expect(sent(calls, "PATCH", `${BASE}/activities/21`)[0]?.body).toEqual({ name: "現行の聞き取り" });
+    expect(viewport).toHaveFocus();
 
     fireEvent.doubleClick(label(container, "e101"));
     const again = await screen.findByRole("textbox", { name: "名前" });
@@ -181,42 +235,295 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(sent(calls, "PATCH", `${BASE}/wbs/elements/101`)).toHaveLength(0);
   });
 
-  it("上下の矢印で行を選び、Insert で足す欄へ。選んだ行の WP の末尾に活動を足す（期間の既定は 1 稼働日）", async () => {
+  it("活動の行で Enter：その活動の次に入力の行を差し込み、名前を入れて Enter で足して次の位置へ置く（API-SCH-002・003）", async () => {
     const { container, calls, viewport } = await startEditing(PLANNER, {
-      [`POST ${BASE}/activities`]: () => jsonResponse(201, makeActivity({ id: 30 })),
+      [`POST ${BASE}/activities`]: () => jsonResponse(201, makeActivity({ id: 30, name: "議事録" })),
+      [`PATCH ${BASE}/activities/30`]: () => jsonResponse(200, makeActivity({ id: 30, name: "議事録" })),
     });
     fireEvent.mouseDown(label(container, "e101"));
     fireEvent.keyDown(viewport, { key: "ArrowDown" });
     expect(label(container, "a21").querySelector("rect")?.getAttribute("style")).toContain("--bgColor-accent-muted");
-    fireEvent.keyDown(viewport, { key: "Insert" });
-    const input = screen.getByRole("textbox", { name: "足す行の名前" });
-    expect(input).toHaveFocus();
-    expect(screen.getByRole("form", { name: "行を足す" })).toHaveTextContent("1.1 業務整理 に活動を足す");
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    // 名前を変えるのではなく、a21 の下に入力の行を差し込む
+    expect(screen.queryByRole("textbox", { name: "名前" })).toBeNull();
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "", "a22", "e102", "a23", "e103"]);
+    expect(screen.getByRole("textbox", { name: "足す行の名前" })).toHaveAttribute("placeholder", "活動の名前（Enter で足す・Esc でやめる）");
 
-    fireEvent.change(input, { target: { value: "議事録" } });
-    fireEvent.submit(screen.getByRole("form", { name: "行を足す" }));
-    await waitFor(() => expect(sent(calls, "POST", `${BASE}/activities`)).toHaveLength(1));
+    typeDraft("足す行の名前", "議事録");
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/30`)).toHaveLength(1));
     expect(sent(calls, "POST", `${BASE}/activities`)[0]?.body).toEqual({ work_package_id: 101, name: "議事録", duration_days: 1 });
-    // 続けて足せるように入力を空にして戻る。保存の後に読み直す
-    await waitFor(() => expect(input).toHaveValue(""));
-    expect(input).toHaveFocus();
+    expect(sent(calls, "PATCH", `${BASE}/activities/30`)[0]?.body).toEqual({ position: 1 });
+    expect(await screen.findByText("1.1 業務整理 に活動「議事録」を足した（期間 1 稼働日）")).toBeInTheDocument();
+    // 入力の行は消え、図に的が戻る（続けて Enter で次の行を足せる）
+    expect(rowKeys(container)).not.toContain("");
+    expect(viewport).toHaveFocus();
     await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`).length).toBeGreaterThanOrEqual(2));
   });
 
-  it("WP 以外の要素の行なら子の要素を足す（区分を選ぶ。既定は WP）", async () => {
-    const { container, calls } = await startEditing(PLANNER, {
+  it("WP の末尾の活動・WP の行で Enter：WP の末尾に足す（位置は動かさない）。Insert でも足す", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`POST ${BASE}/activities`]: () => jsonResponse(201, makeActivity({ id: 30 })),
+    });
+    fireEvent.mouseDown(label(container, "a22"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "", "e102", "a23", "e103"]);
+    typeDraft("足す行の名前", "まとめ");
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/activities`)).toHaveLength(1));
+    await settled();
+
+    fireEvent.mouseDown(label(container, "e102"));
+    fireEvent.keyDown(viewport, { key: "Insert" });
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "e102", "a23", "", "e103"]);
+    typeDraft("足す行の名前", "画面一覧");
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/activities`)).toHaveLength(2));
+    expect(sent(calls, "POST", `${BASE}/activities`).map((c) => c.body)).toEqual([
+      { work_package_id: 101, name: "まとめ", duration_days: 1 },
+      { work_package_id: 102, name: "画面一覧", duration_days: 1 },
+    ]);
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(0);
+  });
+
+  it("WP 以外の要素の行で Enter：子の要素（WP）を配下の行の後に足す（API-WBS-002）", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
       [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 110 })),
     });
     fireEvent.mouseDown(label(container, "e100"));
-    expect(screen.getByRole("form", { name: "行を足す" })).toHaveTextContent("1.0 要件定義 の下に要素を足す");
-    expect(screen.getByRole("combobox", { name: "足す要素の区分" })).toHaveValue("WORK_PACKAGE");
-    fireEvent.change(screen.getByRole("textbox", { name: "足す行の名前" }), { target: { value: "移行設計" } });
-    fireEvent.submit(screen.getByRole("form", { name: "行を足す" }));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "e102", "a23", "", "e103"]);
+    expect(screen.getByRole("textbox", { name: "足す行の名前" })).toHaveAttribute(
+      "placeholder",
+      "要素（ワークパッケージ）の名前（Enter で足す・Esc でやめる）",
+    );
+    typeDraft("足す行の名前", "移行設計");
     await waitFor(() => expect(sent(calls, "POST", `${BASE}/wbs/elements`)).toHaveLength(1));
     expect(sent(calls, "POST", `${BASE}/wbs/elements`)[0]?.body).toEqual({ parent_id: 100, kind: "WORK_PACKAGE", name: "移行設計" });
+    expect(await screen.findByText("1.0 要件定義 の下にワークパッケージ「移行設計」を足した")).toBeInTheDocument();
   });
 
-  it("Alt+Shift+→ で要素をインデントし（API-WBS-004）、直前が WP なら理由を示して呼ばない", async () => {
+  it("入力の行は Esc・空のまま外へ出れば何も足さない。選択を外して Enter なら最上位に足す", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 110, parent_id: null })),
+    });
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "足す行の名前" }), { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "足す行の名前" })).toBeNull();
+    expect(viewport).toHaveFocus();
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    act(() => viewport.focus());
+    expect(screen.queryByRole("textbox", { name: "足す行の名前" })).toBeNull();
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+
+    // Ctrl＋クリックで外す・Esc で外す：最上位の末尾に足す
+    fireEvent.mouseDown(label(container, "a21"), { ctrlKey: true });
+    fireEvent.mouseDown(label(container, "e100"));
+    fireEvent.keyDown(viewport, { key: "Escape" });
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "e102", "a23", "e103", ""]);
+    typeDraft("足す行の名前", "移行");
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/wbs/elements`)).toHaveLength(1));
+    expect(sent(calls, "POST", `${BASE}/wbs/elements`)[0]?.body).toEqual({ parent_id: null, kind: "WORK_PACKAGE", name: "移行" });
+  });
+
+  it("schedule.edit だけの人が要素の行で Enter を押すと、入力の行を出さずに理由を示す", async () => {
+    const { container, viewport } = await startEditing(["project.view", "schedule.edit"]);
+    fireEvent.mouseDown(label(container, "e100"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(screen.queryByRole("textbox", { name: "足す行の名前" })).toBeNull();
+    expect(screen.getByText("要素を足す権限（wbs.edit）がありません")).toBeInTheDocument();
+  });
+
+  it("活動の行の右クリックで、その行の操作のメニューを出す（Enter・F2 などのキーを添える）", async () => {
+    const { container } = await startEditing();
+    const menu = openMenu(container, "a22");
+    expect(menu).toHaveAccessibleName("1.1 整理 の操作");
+    expect(menuNames(menu)).toEqual([
+      "下に活動を足すEnter",
+      "名前を変えるF2",
+      "後続をつなぐ…",
+      "別の WP へ移す…",
+      "希望開始日を指定…",
+      "希望開始日を外す",
+      "期間を指定…",
+      "上へAlt+Shift+↑",
+      "下へAlt+Shift+↓",
+      "新しい WP にまとめる…",
+      "先行「1.1 聞き取り」との依存を外す",
+      "消すDelete",
+    ]);
+    // 右クリックした行を選ぶ。最初の項目に的を置く
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a22"]')?.getAttribute("data-selected")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: "下に活動を足す" })).toHaveFocus();
+
+    choose("下に活動を足す");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "足す行の名前" })).toHaveFocus();
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "", "e102", "a23", "e103"]);
+  });
+
+  it("Shift+F10 で選んだ行のメニューを開き、矢印で項目を選ぶ。Esc で閉じて図に的を戻す", async () => {
+    const { container, viewport } = await startEditing();
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "F10", shiftKey: true });
+    const menu = screen.getByRole("menu", { name: "1.1 聞き取り の操作" });
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "下に活動を足す" }), { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitem", { name: "名前を変える" })).toHaveFocus();
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "名前を変える" }), { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() => expect(viewport).toHaveFocus());
+
+    // メニューキーでも開き、外を押せば閉じる
+    fireEvent.keyDown(viewport, { key: "ContextMenu" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("メニューの「後続をつなぐ…」の後、後続の行をクリックすると依存を足す（API-SCH-006）。活動以外は理由を示し、Esc でやめる", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`POST ${BASE}/dependencies`]: () => jsonResponse(201, { id: 92, predecessor_id: 21, successor_id: 23, dep_type: "FS", lag_days: 0 }),
+    });
+    openMenu(container, "a21");
+    choose("後続をつなぐ…");
+    expect(screen.getByText("1.1 聞き取り の後続にする活動の行を選ぶ（クリック、または矢印で選んで Enter。Esc でやめる）")).toBeInTheDocument();
+    expect(label(container, "a21").getAttribute("data-picking")).toBe("source");
+    expect(viewport).toHaveFocus();
+
+    fireEvent.mouseDown(label(container, "e102"));
+    expect(screen.getByText("後続には別の活動の行を選びます（Esc でやめる）")).toBeInTheDocument();
+    fireEvent.keyDown(viewport, { key: "Escape" });
+    expect(label(container, "a21").getAttribute("data-picking")).toBeNull();
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a21"]')?.getAttribute("data-selected")).toBe("true");
+    expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(0);
+
+    openMenu(container, "a21");
+    choose("後続をつなぐ…");
+    fireEvent.mouseDown(label(container, "a23"));
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(1));
+    expect(sent(calls, "POST", `${BASE}/dependencies`)[0]?.body).toEqual({ predecessor_id: 21, successor_id: 23 });
+    expect(label(container, "a21").getAttribute("data-picking")).toBeNull();
+  });
+
+  it("メニューの「別の WP へ移す…」の後、矢印で移す先の行を選んで Enter（活動の行ならその次へ。API-SCH-003）", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`PATCH ${BASE}/activities/21`]: () => jsonResponse(200, ACTIVITIES[0]),
+    });
+    openMenu(container, "a21");
+    choose("別の WP へ移す…");
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a23"]')?.getAttribute("data-selected")).toBe("true");
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/21`)[0]?.body).toEqual({ work_package_id: 102, position: 1 });
+    expect(await screen.findByText("1.1 聞き取り を 1.2 画面設計 へ移した")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "足す行の名前" })).toBeNull();
+  });
+
+  it("メニューの「希望開始日を指定…」「期間を指定…」は行の中の入力で、Enter で保存する。「希望開始日を外す」", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`PATCH ${BASE}/activities/22`]: () =>
+        jsonResponse(200, makeActivity({ id: 22, requested_start: "2026-12-08", start_date: "2026-12-08", duration_days: 4 })),
+    });
+    openMenu(container, "a22");
+    choose("希望開始日を指定…");
+    const date = screen.getByLabelText("希望開始日");
+    expect(date).toHaveValue("2026-12-07");
+    expect(date).toHaveFocus();
+    fireEvent.change(date, { target: { value: "2026-12-08" } });
+    fireEvent.keyDown(date, { key: "Enter" });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: "2026-12-08" });
+    await settled();
+
+    openMenu(container, "a22");
+    choose("期間を指定…");
+    const duration = screen.getByRole("spinbutton", { name: "期間（稼働日）" });
+    expect(duration).toHaveValue(5);
+    fireEvent.change(duration, { target: { value: "0" } });
+    fireEvent.keyDown(duration, { key: "Enter" });
+    expect(screen.getByText("期間は 1 以上の整数（稼働日）で入れます")).toBeInTheDocument();
+    openMenu(container, "a22");
+    choose("期間を指定…");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "期間（稼働日）" }), { target: { value: "4" } });
+    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "期間（稼働日）" }), { key: "Enter" });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(2));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[1]?.body).toEqual({ duration_days: 4 });
+    await settled();
+
+    openMenu(container, "a22");
+    choose("希望開始日を外す");
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(3));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[2]?.body).toEqual({ requested_start: null });
+  });
+
+  it("活動の行のメニューから先行との依存を外す（API-SCH-007）", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`DELETE ${BASE}/dependencies/91`]: () => jsonResponse(204, null),
+    });
+    openMenu(container, "a22");
+    choose("先行「1.1 聞き取り」との依存を外す");
+    await waitFor(() => expect(sent(calls, "DELETE", `${BASE}/dependencies/91`)).toHaveLength(1));
+  });
+
+  it("要素の行のメニュー：区分を変える（API-WBS-003）・WBS 辞書を開く項目・WP 以外なら子の要素を足す", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`PATCH ${BASE}/wbs/elements/100`]: () => jsonResponse(200, sampleElements()[0]),
+    });
+    const menu = openMenu(container, "e100");
+    expect(menuNames(menu)).toEqual([
+      "子の要素を足すEnter",
+      "下に同じ階層の要素を足す",
+      "名前を変えるF2",
+      "○区分：成果物".replace("○", "●"),
+      "○区分：管理領域",
+      "○区分：構成要素",
+      "○区分：ワークパッケージ",
+      "インデントAlt+Shift+→",
+      "アウトデントAlt+Shift+←",
+      "上へAlt+Shift+↑",
+      "下へAlt+Shift+↓",
+      "新しい上位の要素にまとめる…",
+      "WBS 辞書・担当・見積を開く",
+      "消すDelete",
+    ]);
+    expect(within(menu).getByRole("menuitemradio", { name: "区分：成果物" })).toHaveAttribute("aria-checked", "true");
+    expect(within(menu).getByRole("menuitem", { name: "WBS 辞書・担当・見積を開く" })).toHaveAttribute("href", "/projects/3/wbs/100");
+    choose("区分：構成要素");
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/wbs/elements/100`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/wbs/elements/100`)[0]?.body).toEqual({ kind: "COMPONENT" });
+    expect(await screen.findByText("1.0 要件定義 の区分を構成要素にした")).toBeInTheDocument();
+  });
+
+  it("要素の行のメニューの「下に同じ階層の要素を足す」：同じ区分で足し、選んだ要素の次へ置く（API-WBS-002・004）", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 120, parent_id: 100, kind: "WORK_PACKAGE" })),
+      [`POST ${BASE}/wbs/elements/120/move`]: () => jsonResponse(200, makeElement({ id: 120 })),
+    });
+    openMenu(container, "e101");
+    choose("下に同じ階層の要素を足す");
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "", "e102", "a23", "e103"]);
+    typeDraft("足す行の名前", "現行調査");
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/wbs/elements/120/move`)).toHaveLength(1));
+    expect(sent(calls, "POST", `${BASE}/wbs/elements`)[0]?.body).toEqual({ parent_id: 100, kind: "WORK_PACKAGE", name: "現行調査" });
+    expect(sent(calls, "POST", `${BASE}/wbs/elements/120/move`)[0]?.body).toEqual({ parent_id: 100, position: 1 });
+  });
+
+  it("足した後に位置へ置けなければ、足したことと置けなかったことを示す", async () => {
+    const { container, viewport } = await startEditing(PLANNER, {
+      [`POST ${BASE}/activities`]: () => jsonResponse(201, makeActivity({ id: 30 })),
+      [`PATCH ${BASE}/activities/30`]: () => errorResponse(409, "CONFLICT", "他の人が変えました"),
+    });
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    typeDraft("足す行の名前", "議事録");
+    expect(
+      await screen.findByText("他の人が変えました（活動「議事録」は 1.1 業務整理 の末尾に足した。選んだ活動の次へは置けなかった）"),
+    ).toBeInTheDocument();
+  });
+
+  it("Alt+Shift+→ で要素をインデントし（API-WBS-004）、直前が WP ならメニューからでも理由を示して呼ばない", async () => {
     const { container, calls, viewport } = await startEditing(PLANNER, {
       [`POST ${BASE}/wbs/elements/103/move`]: () => jsonResponse(200, sampleElements()[3]),
     });
@@ -225,8 +532,8 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     await waitFor(() => expect(sent(calls, "POST", `${BASE}/wbs/elements/103/move`)).toHaveLength(1));
     expect(sent(calls, "POST", `${BASE}/wbs/elements/103/move`)[0]?.body).toEqual({ parent_id: 100 });
 
-    fireEvent.mouseDown(label(container, "e102"));
-    fireEvent.click(screen.getByRole("button", { name: "インデント" }));
+    openMenu(container, "e102");
+    choose("インデント");
     expect(await screen.findByText(/1\.1 業務整理）はワークパッケージなので/)).toBeInTheDocument();
   });
 
@@ -254,6 +561,54 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
     expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: "2026-12-09" });
     expect(await screen.findByText(/希望開始日を 2026-12-09 にした。計算した開始は 2026-12-10/)).toBeInTheDocument();
+  });
+
+  it("バーの本体を縦に別の活動のバーへ引くと依存の線に変わり、落とすと依存を足す（日付は動かさない。CR-025）", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`POST ${BASE}/dependencies`]: () => jsonResponse(201, { id: 92, predecessor_id: 22, successor_id: 21, dep_type: "FS", lag_days: 0 }),
+    });
+    const grip = container.querySelector('[data-handle="move"][data-activity-id="22"]')!;
+    fireEvent.mouseDown(grip, { clientX: barX(container, 22), clientY: rowY(container, "a22") });
+    fireEvent.mouseMove(window, { clientX: barX(container, 21), clientY: rowY(container, "a21") });
+    expect(container.querySelector('[data-ghost="link"]')).not.toBeNull();
+    expect(container.querySelector('[data-ghost="move"]')).toBeNull();
+    fireEvent.mouseUp(window, { clientX: barX(container, 21), clientY: rowY(container, "a21") });
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(1));
+    expect(sent(calls, "POST", `${BASE}/dependencies`)[0]?.body).toEqual({ predecessor_id: 22, successor_id: 21 });
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(0);
+    await settled();
+
+    // 行の見出しへ落としてもつなぐ
+    fireEvent.mouseDown(container.querySelector('[data-handle="move"][data-activity-id="22"]')!, {
+      clientX: barX(container, 22),
+      clientY: rowY(container, "a22"),
+    });
+    fireEvent.mouseUp(window, { clientX: 40, clientY: rowY(container, "a23") });
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(2));
+    expect(sent(calls, "POST", `${BASE}/dependencies`)[1]?.body).toEqual({ predecessor_id: 22, successor_id: 23 });
+  });
+
+  it("縦に引いた後で元の行へ戻せば日付の移動に戻る。要素の行・空いた所に落とせば何もしない", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`PATCH ${BASE}/activities/22`]: () => jsonResponse(200, makeActivity({ id: 22, requested_start: "2026-12-09", start_date: "2026-12-09" })),
+    });
+    const x0 = barX(container, 22);
+    const grip = () => container.querySelector('[data-handle="move"][data-activity-id="22"]')!;
+    fireEvent.mouseDown(grip(), { clientX: x0, clientY: rowY(container, "a22") });
+    fireEvent.mouseUp(window, { clientX: x0, clientY: rowY(container, "e102") });
+    fireEvent.mouseDown(grip(), { clientX: x0, clientY: rowY(container, "a22") });
+    fireEvent.mouseUp(window, { clientX: x0 + 600, clientY: rowY(container, "a23") });
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+
+    fireEvent.mouseDown(grip(), { clientX: x0, clientY: rowY(container, "a22") });
+    fireEvent.mouseMove(window, { clientX: x0 + 48, clientY: rowY(container, "a21") });
+    fireEvent.mouseMove(window, { clientX: x0 + 48, clientY: rowY(container, "a22") });
+    expect(container.querySelector('[data-ghost="link"]')).toBeNull();
+    expect(container.querySelector('[data-ghost="move"]')).toHaveTextContent("2026-12-09");
+    fireEvent.mouseUp(window, { clientX: x0 + 48, clientY: rowY(container, "a22") });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: "2026-12-09" });
+    expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(0);
   });
 
   it("バーの右端のドラッグは planned_finish に。Esc で取り消すと呼ばない", async () => {
@@ -300,7 +655,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(await screen.findByText("依存が循環します")).toBeInTheDocument();
   });
 
-  it("バーの外（要素の行・行の空いた所・目盛りの帯）へ落としても依存は足さない", async () => {
+  it("右の丸からバーの外（要素の行・行の空いた所・目盛りの帯）へ落としても依存は足さない", async () => {
     const { container, calls } = await startEditing();
     fireEvent.mouseDown(label(container, "a21"));
     const drop = (clientX: number, clientY: number) => {
@@ -313,7 +668,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(0);
   });
 
-  it("矢印を選んで Delete で依存を外す（API-SCH-007）", async () => {
+  it("矢印を選んで Delete、または矢印の右クリックの「依存を外す」で依存を外す（API-SCH-007）", async () => {
     const gantt = {
       ...GANTT,
       links: [{ ...GANTT.links[0]!, start: makeBar("PLANNED", "2026-12-04", "2026-12-04").end, end: makeBar("PLANNED", "2026-12-07", "2026-12-07").start }],
@@ -331,9 +686,16 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(container.querySelector('[data-link="21-22"]')?.getAttribute("data-selected")).toBe("true");
     fireEvent.keyDown(viewport, { key: "Delete" });
     await waitFor(() => expect(sent(calls, "DELETE", `${BASE}/dependencies/91`)).toHaveLength(1));
+    await settled();
+
+    fireEvent.contextMenu(container.querySelector('[data-link-hit="21-22"]')!, { clientX: 300, clientY: 120 });
+    const menu = screen.getByRole("menu", { name: "依存の操作" });
+    expect(menuNames(menu)).toEqual(["依存を外すDelete"]);
+    choose("依存を外す");
+    await waitFor(() => expect(sent(calls, "DELETE", `${BASE}/dependencies/91`)).toHaveLength(2));
   });
 
-  it("選んだ活動を新しい WP にまとめる：最初の活動の WP の次に作り、表示順に 1 件ずつ移す", async () => {
+  it("選んだ活動のメニューで新しい WP にまとめる：名前の入力の行で名前を入れ、最初の活動の WP の次に作って表示順に 1 件ずつ移す", async () => {
     const { container, calls } = await startEditing(PLANNER, {
       [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 120, parent_id: 100, kind: "WORK_PACKAGE" })),
       [`POST ${BASE}/wbs/elements/120/move`]: () => jsonResponse(200, makeElement({ id: 120 })),
@@ -342,10 +704,13 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     });
     fireEvent.mouseDown(label(container, "a23"));
     fireEvent.mouseDown(label(container, "a22"), { ctrlKey: true });
-    const form = screen.getByRole("form", { name: "まとめる" });
-    expect(form).toHaveTextContent("選んだ活動 2 件を新しい WP にまとめる");
-    fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "調整" } });
-    fireEvent.submit(form);
+    const menu = openMenu(container, "a22");
+    expect(menu).toHaveAccessibleName("選んだ行の操作");
+    expect(menuNames(menu)).toEqual(["選んだ活動 2 件を新しい WP にまとめる…", "選んだ 2 行を消すDelete"]);
+    choose("選んだ活動 2 件を新しい WP にまとめる…");
+    // 選んだ最初の行（表示順）の上に入力の行を差し込む
+    expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "", "a22", "e102", "a23", "e103"]);
+    typeDraft("まとめる先の名前", "調整");
     await screen.findByText("活動 2 件を新しい WP「調整」にまとめた");
     const writes = calls.filter((c) => c.method !== "GET");
     expect(writes.map((c) => `${c.method} ${c.path}`)).toEqual([
@@ -368,15 +733,15 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     });
     fireEvent.mouseDown(label(container, "a21"));
     fireEvent.mouseDown(label(container, "a22"), { shiftKey: true });
-    const form = screen.getByRole("form", { name: "まとめる" });
-    fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "調整" } });
-    fireEvent.submit(form);
+    openMenu(container, "a21");
+    choose("選んだ活動 2 件を新しい WP にまとめる…");
+    typeDraft("まとめる先の名前", "調整");
     expect(
       await screen.findByText("他の人が変えました（新しい WP「調整」は作った。1 件は移した。移せなかった活動：整理）"),
     ).toBeInTheDocument();
   });
 
-  it("選んだ要素を新しい上位の要素にまとめる（区分は WP 以外。既定は構成要素）", async () => {
+  it("選んだ要素を新しい上位の要素にまとめる（区分は構成要素で作る）。1 件でもまとめられる", async () => {
     const { container, calls } = await startEditing(PLANNER, {
       [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 130, parent_id: 100, kind: "COMPONENT" })),
       [`POST ${BASE}/wbs/elements/130/move`]: () => jsonResponse(200, makeElement({ id: 130 })),
@@ -385,48 +750,41 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     });
     fireEvent.mouseDown(label(container, "e101"));
     fireEvent.mouseDown(label(container, "e102"), { ctrlKey: true });
-    const form = screen.getByRole("form", { name: "まとめる" });
-    expect(within(form).getByRole("combobox", { name: "まとめる先の区分" })).toHaveValue("COMPONENT");
-    expect(within(form).queryByRole("option", { name: "ワークパッケージ" })).toBeNull();
-    fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "設計" } });
-    fireEvent.submit(form);
-    await screen.findByText("要素 2 件を新しい要素「設計」にまとめた");
-    const writes = calls.filter((c) => c.method !== "GET");
-    expect(writes.map((c) => c.body)).toEqual([
+    openMenu(container, "e102");
+    choose("選んだ要素 2 件を新しい上位の要素にまとめる…");
+    expect(screen.getByRole("textbox", { name: "まとめる先の名前" })).toHaveAttribute(
+      "placeholder",
+      "新しい上位の要素の名前（Enter でまとめる・Esc でやめる）",
+    );
+    typeDraft("まとめる先の名前", "設計");
+    await screen.findByText("要素 2 件を新しい要素「設計」（構成要素）にまとめた");
+    expect(calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
       { parent_id: 100, kind: "COMPONENT", name: "設計" },
       { parent_id: 100, position: 0 },
       { parent_id: 130 },
       { parent_id: 130 },
     ]);
-  });
+    await settled();
 
-  it("要素 1 件でも新しい上位の要素にまとめられる（その要素の位置に作る）", async () => {
-    const { container, calls } = await startEditing(PLANNER, {
-      [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 130, parent_id: 100, kind: "COMPONENT" })),
-      [`POST ${BASE}/wbs/elements/130/move`]: () => jsonResponse(200, makeElement({ id: 130 })),
-      [`POST ${BASE}/wbs/elements/102/move`]: () => jsonResponse(200, sampleElements()[2]),
-    });
-    fireEvent.mouseDown(label(container, "e102"));
-    const form = screen.getByRole("form", { name: "まとめる" });
-    expect(form).toHaveTextContent("選んだ要素 1 件を新しい上位の要素にまとめる");
-    fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "設計" } });
-    fireEvent.submit(form);
-    await screen.findByText("要素 1 件を新しい要素「設計」にまとめた");
-    expect(calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
+    openMenu(container, "e102");
+    choose("新しい上位の要素にまとめる…");
+    typeDraft("まとめる先の名前", "設計");
+    await waitFor(() => expect(calls.filter((c) => c.method !== "GET")).toHaveLength(7));
+    expect(calls.filter((c) => c.method !== "GET").slice(4).map((c) => c.body)).toEqual([
       { parent_id: 100, kind: "COMPONENT", name: "設計" },
       { parent_id: 100, position: 1 },
       { parent_id: 130 },
     ]);
   });
 
-  it("活動と要素を混ぜて選んだらまとめる欄を出さない", async () => {
+  it("活動と要素を混ぜて選んだらメニューにまとめる操作を出さない", async () => {
     const { container } = await startEditing();
     fireEvent.mouseDown(label(container, "e102"));
     fireEvent.mouseDown(label(container, "a21"), { ctrlKey: true });
-    expect(screen.queryByRole("form", { name: "まとめる" })).toBeNull();
+    expect(menuNames(openMenu(container, "a21"))).toEqual(["選んだ 2 行を消すDelete"]);
   });
 
-  it("Delete で確かめてから消す：選んだ活動を先に 1 件ずつ（API-SCH-005）、次に要素を配下ごと（API-WBS-005）", async () => {
+  it("Delete で確かめてから消す（Esc でやめる・確かめの「消す」で消す）：活動を先に 1 件ずつ（API-SCH-005）、次に要素を配下ごと（API-WBS-005）", async () => {
     const { container, calls, viewport } = await startEditing(PLANNER, {
       [`DELETE ${BASE}/activities/21`]: () => jsonResponse(204, null),
       [`DELETE ${BASE}/activities/22`]: () => jsonResponse(204, null),
@@ -437,15 +795,19 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     fireEvent.mouseDown(label(container, "a22"), { shiftKey: true });
     fireEvent.mouseDown(label(container, "a23"), { ctrlKey: true });
     fireEvent.keyDown(viewport, { key: "Delete" });
-    const confirm = screen.getByRole("group", { name: "行を消すことの確かめ" });
+    const confirm = screen.getByRole("alertdialog", { name: "行を消すことの確かめ" });
     expect(confirm).toHaveTextContent(
       "要素 1 件（1.1 業務整理。配下の要素ごと）と活動 3 件（1.1 聞き取り、1.1 整理、1.2 画面案）を消す。消した行は戻せない",
     );
-    fireEvent.click(within(confirm).getByRole("button", { name: "やめる" }));
+    expect(within(confirm).getByRole("button", { name: "消す" })).toHaveFocus();
+    fireEvent.keyDown(within(confirm).getByRole("button", { name: "消す" }), { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await waitFor(() => expect(viewport).toHaveFocus());
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "消す" }));
-    fireEvent.click(within(screen.getByRole("group", { name: "行を消すことの確かめ" })).getByRole("button", { name: "消す" }));
+    openMenu(container, "a23");
+    choose("選んだ 4 行を消す");
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "行を消すことの確かめ" })).getByRole("button", { name: "消す" }));
     await waitFor(() =>
       expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
         `${BASE}/activities/21`,
@@ -460,7 +822,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     const { container, calls, viewport } = await startEditing();
     fireEvent.mouseDown(label(container, "e100"));
     fireEvent.keyDown(viewport, { key: "Delete" });
-    expect(screen.queryByRole("group", { name: "行を消すことの確かめ" })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: "行を消すことの確かめ" })).toBeNull();
     expect(
       screen.getByText(
         "活動のある WP は消せません：1.1 業務整理、1.2 画面設計（先に活動を消すか、別の WP へ移す。活動も一緒に選べば、活動を先に消す）",
@@ -473,9 +835,9 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     const { container, calls, viewport } = await startEditing();
     fireEvent.mouseDown(label(container, "a21"));
     fireEvent.keyDown(viewport, { key: "Delete" });
-    expect(screen.getByRole("group", { name: "行を消すことの確かめ" })).toHaveTextContent("活動 1 件（1.1 聞き取り）を消す");
+    expect(screen.getByRole("alertdialog", { name: "行を消すことの確かめ" })).toHaveTextContent("活動 1 件（1.1 聞き取り）を消す");
     fireEvent.keyDown(viewport, { key: "ArrowDown" });
-    expect(screen.queryByRole("group", { name: "行を消すことの確かめ" })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: "行を消すことの確かめ" })).toBeNull();
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
   });
 
@@ -499,10 +861,13 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     down();
     await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1));
     expect(await screen.findByText("読み直しています…")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "下へ" })).toBeDisabled();
+    expect(strip()).toHaveAttribute("aria-busy", "true");
     down();
     expect(screen.getByText(WAIT_TEXT)).toBeInTheDocument();
     expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1);
+    // 読み直しの間は入力の行も出さない
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(screen.queryByRole("textbox", { name: "足す行の名前" })).toBeNull();
 
     release();
     await settled();
@@ -516,80 +881,29 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     await screen.findByRole("img", { name: "ガントチャート" });
     fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
     expect(await screen.findByText(/^活動の一覧を読めないので編集できません（.+）。編集を終えてから入り直してください$/)).toBeInTheDocument();
-    expect(screen.queryByRole("toolbar", { name: "編集の操作" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "ガントの編集" })).toBeNull();
   });
 
-  it("選択を外すと最上位に足す（Ctrl＋クリックで外す・Esc で外す）", async () => {
-    const { container, viewport } = await startEditing();
-    const form = () => screen.getByRole("form", { name: "行を足す" });
-    fireEvent.mouseDown(label(container, "e100"));
-    expect(form()).toHaveTextContent("1.0 要件定義 の下に要素を足す");
-    fireEvent.mouseDown(label(container, "e100"), { ctrlKey: true });
-    expect(form()).toHaveTextContent("最上位に要素を足す");
-    fireEvent.mouseDown(label(container, "a21"));
-    expect(form()).toHaveTextContent("1.1 業務整理 に活動を足す");
-    fireEvent.keyDown(viewport, { key: "Escape" });
-    expect(form()).toHaveTextContent("最上位に要素を足す");
-  });
-
-  it("選んだ活動の欄は、保存して読み直した値に合わせる（古い値で巻き戻さない）", async () => {
-    let current = ACTIVITIES;
-    const { container } = await startEditing(PLANNER, {
-      [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList(current, { dependencies: DEPENDENCIES })),
-      [`PATCH ${BASE}/activities/21`]: () => {
-        current = [{ ...ACTIVITIES[0]!, duration_days: 7 }, ...ACTIVITIES.slice(1)];
-        return jsonResponse(200, current[0]);
-      },
-    });
-    fireEvent.mouseDown(label(container, "a21"));
-    const duration = () => within(screen.getByRole("region", { name: "選んだ行" })).getByRole("spinbutton", { name: "期間（稼働日）" });
-    expect(duration()).toHaveValue(5);
-    fireEvent.mouseDown(container.querySelector('[data-handle="resize"][data-activity-id="21"]')!, { clientX: 400 });
-    fireEvent.mouseMove(window, { clientX: 448 });
-    fireEvent.mouseUp(window, { clientX: 448 });
-    await waitFor(() => expect(duration()).toHaveValue(7));
-  });
-
-  it("選んだ活動の欄：希望開始日を外す・別の WP へ移す・先行を外す", async () => {
-    const { container, calls } = await startEditing(PLANNER, {
-      [`PATCH ${BASE}/activities/22`]: () => jsonResponse(200, makeActivity({ id: 22, start_date: "2026-12-05" })),
-      [`DELETE ${BASE}/dependencies/91`]: () => jsonResponse(204, null),
-    });
-    fireEvent.mouseDown(label(container, "a22"));
-    const panel = screen.getByRole("region", { name: "選んだ行" });
-    fireEvent.click(within(panel).getByRole("button", { name: "希望開始日を外す" }));
-    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
-    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: null });
-    await settled();
-
-    const moveForm = within(panel).getByRole("form", { name: "移す先の WP" });
-    const options = within(moveForm).getAllByRole("option").map((o) => o.textContent);
-    expect(options).toEqual(["（選ぶ）", "1.2 画面設計"]);
-    fireEvent.change(within(moveForm).getByRole("combobox"), { target: { value: "102" } });
-    fireEvent.submit(moveForm);
-    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(2));
-    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[1]?.body).toEqual({ work_package_id: 102 });
-    await settled();
-
-    fireEvent.click(within(panel).getByRole("button", { name: "先行 1.1 聞き取り を外す" }));
-    await waitFor(() => expect(sent(calls, "DELETE", `${BASE}/dependencies/91`)).toHaveLength(1));
-  });
-
-  it("schedule.edit だけの人には要素の操作（インデント）を出さず、バーは動かせる", async () => {
+  it("schedule.edit だけの人：要素の行のメニューに要素の操作を出さず、バーは動かせる", async () => {
     const { container } = await startEditing(["project.view", "schedule.edit"]);
-    expect(screen.queryByRole("button", { name: "インデント" })).toBeNull();
     expect(container.querySelector('[data-handle="move"]')).not.toBeNull();
-    fireEvent.mouseDown(label(container, "e100"));
-    expect(screen.queryByRole("form", { name: "行を足す" })).toBeNull();
-    // Insert でも足す欄は出さず、理由を示す
-    fireEvent.keyDown(screen.getByTestId("gantt-viewport"), { key: "Insert" });
-    expect(screen.getByText("要素を足す権限（wbs.edit）がありません")).toBeInTheDocument();
+    expect(menuNames(openMenu(container, "e100"))).toEqual(["WBS 辞書・担当・見積を開く"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    // WP の行には活動を足せる
+    expect(menuNames(openMenu(container, "e101"))).toEqual(["活動を足すEnter", "WBS 辞書・担当・見積を開く"]);
   });
 
-  it("wbs.edit だけの人にはバーの掴みを出さない", async () => {
+  it("wbs.edit だけの人にはバーの掴みを出さず、活動の行のメニューは操作が無いことを示す", async () => {
     const { container } = await startEditing(["project.view", "wbs.edit"]);
     expect(container.querySelector('[data-handle="move"]')).toBeNull();
-    expect(screen.getByRole("button", { name: "インデント" })).toBeInTheDocument();
+    expect(menuNames(openMenu(container, "e100"))).toContain("インデントAlt+Shift+→");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(menuNames(openMenu(container, "a21"))).toEqual(["ここで行える操作の権限がありません"]);
+    // 行える項目が無くてもメニューが的を受け、Esc で閉じる（キーが図へ行かない）
+    expect(screen.getByRole("menu")).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a21"]')?.getAttribute("data-selected")).toBe("true");
   });
 
   it("基準化の後は、要素を変えると作成中に戻ることを示す", async () => {
@@ -597,23 +911,142 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(screen.getByText("WBS は基準化済み。要素を変えると作成中に戻る（5.10）")).toBeInTheDocument();
   });
 
-  it("空の計画でも編集では描き、最上位の要素を足せる", async () => {
+  it("空の計画でも編集では描き、Enter・図の右クリックで最上位の要素を足せる", async () => {
     const empty = makeGantt({ range_start: null, range_end: null, rows: [], links: [] });
-    mockApi(
+    const { calls } = mockApi(
       routes(PLANNER, {
         [`GET ${BASE}/gantt`]: () => jsonResponse(200, empty),
         [`GET ${BASE}/wbs`]: () => jsonResponse(200, makeTree([])),
         [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList([])),
+        [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 140, parent_id: null })),
       }),
     );
     const { container } = renderAt();
     // 編集していなければ今までどおり
     expect(await screen.findByText("描く活動がありません")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
-    await screen.findByRole("toolbar", { name: "編集の操作" });
+    await screen.findByRole("region", { name: "ガントの編集" });
+    await waitFor(() => expect(container.querySelector('[data-layer="edit-rows"]')).not.toBeNull());
     expect(container.querySelector('svg[aria-label="ガントチャート"]')?.getAttribute("data-row-count")).toBe("0");
-    expect(screen.getByText("WBS の要素がまだ無い。「行を足す」で最上位の要素を作る")).toBeInTheDocument();
-    expect(screen.getByRole("form", { name: "行を足す" })).toHaveTextContent("最上位に要素を足す");
+    expect(screen.getByText("WBS の要素がまだ無い。図の上で Enter を押す（または右クリックする）と最上位の要素を足す")).toBeInTheDocument();
+
+    fireEvent.contextMenu(container.querySelector('[data-layer="header"] rect')!, { clientX: 100, clientY: 20 });
+    expect(menuNames(screen.getByRole("menu", { name: "図の操作" }))).toEqual(["最上位に要素を足すEnter"]);
+    choose("最上位に要素を足す");
+    expect(container.querySelector('svg[aria-label="ガントチャート"]')?.getAttribute("data-row-count")).toBe("1");
+    typeDraft("足す行の名前", "要件定義");
+    await waitFor(() => expect(sent(calls, "POST", `${BASE}/wbs/elements`)).toHaveLength(1));
+    expect(sent(calls, "POST", `${BASE}/wbs/elements`)[0]?.body).toEqual({ parent_id: null, kind: "WORK_PACKAGE", name: "要件定義" });
+  });
+
+  it("バー・掴み・行の空いた所を右クリックしても、その行のメニューを出す（縦の位置で行を決める）", async () => {
+    const { container } = await startEditing();
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.contextMenu(container.querySelector('[data-handle="move"][data-activity-id="22"]')!, {
+      clientX: barX(container, 22),
+      clientY: rowY(container, "a22"),
+    });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("1.1 整理 の操作");
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a22"]')?.getAttribute("data-selected")).toBe("true");
+    expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a21"]')?.getAttribute("data-selected")).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+    // 行の右の空いた所（描画域の上）・要素の行の要約のバー
+    fireEvent.contextMenu(screen.getByTestId("gantt-viewport"), { clientX: barX(container, 22) + 600, clientY: rowY(container, "a23") });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("1.2 画面案 の操作");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.contextMenu(container.querySelector('[data-layer="planned"] [data-element-id="102"]')!, {
+      clientX: barX(container, 23),
+      clientY: rowY(container, "e102"),
+    });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("1.2 画面設計 の操作");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+    // 目盛りの帯・行の無い所は空いた所のメニュー
+    fireEvent.contextMenu(screen.getByTestId("gantt-viewport"), { clientX: 300, clientY: HEADER_HEIGHT / 2 });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("図の操作");
+  });
+
+  it("行の中の入力の上の右クリックはブラウザに任せる（打ちかけの名前で足さない・メニューを出さない）", async () => {
+    const { container, calls, viewport } = await startEditing();
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    const input = screen.getByRole("textbox", { name: "足す行の名前" });
+    fireEvent.change(input, { target: { value: "ab" } });
+    const notPrevented = fireEvent.contextMenu(input, { clientX: 100, clientY: rowY(container, "") });
+    expect(notPrevented).toBe(true);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(input).toHaveFocus();
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+  });
+
+  it("別のウィンドウへ移った（的が入力に残る）だけなら、入力を確かめない", async () => {
+    const { container, calls, viewport } = await startEditing();
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    const input = screen.getByRole("textbox", { name: "足す行の名前" });
+    fireEvent.change(input, { target: { value: "議事" } });
+    fireEvent.blur(input);
+    expect(screen.getByRole("textbox", { name: "足す行の名前" })).toHaveValue("議事");
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+  });
+
+  it("後続を選んでいる間は Delete・F2・Alt+Shift+矢印を受けない。メニューを開けば選ぶのをやめて案内を消す", async () => {
+    const { container, calls, viewport } = await startEditing();
+    openMenu(container, "a21");
+    choose("後続をつなぐ…");
+    const hint = "1.1 聞き取り の後続にする活動の行を選ぶ（クリック、または矢印で選んで Enter。Esc でやめる）";
+    expect(screen.getByText(hint)).toBeInTheDocument();
+    fireEvent.keyDown(viewport, { key: "Delete" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getByText("行を選んでいる間はほかの操作をしません（Enter で決める・Esc でやめる）")).toBeInTheDocument();
+    fireEvent.keyDown(viewport, { key: "ArrowDown", altKey: true, shiftKey: true });
+    fireEvent.keyDown(viewport, { key: "F2" });
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(label(container, "a21").getAttribute("data-picking")).toBe("source");
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+
+    openMenu(container, "a23");
+    expect(label(container, "a21").getAttribute("data-picking")).toBeNull();
+    expect(screen.queryByText(hint)).toBeNull();
+    expect(screen.queryByText(/行を選んでいる間は/)).toBeNull();
+  });
+
+  it("縦に別の行へ半行より大きく引いたときだけ依存の線（元の行の中・半行に満たない移動は日付の移動。7.3）", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`PATCH ${BASE}/activities/22`]: () => jsonResponse(200, makeActivity({ id: 22, requested_start: "2026-12-09", start_date: "2026-12-09" })),
+    });
+    const x0 = barX(container, 22);
+    const top = rowY(container, "a22") - ROW_HEIGHT / 2;
+    fireEvent.mouseDown(container.querySelector('[data-handle="move"][data-activity-id="22"]')!, { clientX: x0, clientY: top + 5 });
+    fireEvent.mouseMove(window, { clientX: x0 + 48, clientY: top + ROW_HEIGHT - 3 });
+    expect(container.querySelector('[data-ghost="link"]')).toBeNull();
+    expect(container.querySelector('[data-ghost="move"]')).toHaveTextContent("2026-12-09");
+    fireEvent.mouseUp(window, { clientX: x0 + 48, clientY: top + ROW_HEIGHT - 3 });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: "2026-12-09" });
+    await settled();
+
+    // 行の下端で掴み、下の行へ少しだけ（半行に満たず）はみ出しても日付の移動
+    fireEvent.mouseDown(container.querySelector('[data-handle="move"][data-activity-id="22"]')!, { clientX: x0, clientY: top + ROW_HEIGHT - 2 });
+    fireEvent.mouseMove(window, { clientX: x0 + 48, clientY: top + ROW_HEIGHT + 4 });
+    expect(container.querySelector('[data-ghost="link"]')).toBeNull();
+    fireEvent.mouseUp(window, { clientX: x0 + 48, clientY: top + ROW_HEIGHT + 4 });
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(2));
+    expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(0);
+  });
+
+  it("メニューは図を送ると閉じる。キーボードで開いた直後に来る右クリックの事象では開き直さない", async () => {
+    const { container, viewport } = await startEditing();
+    openMenu(container, "a21");
+    fireEvent.scroll(viewport);
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    fireEvent.mouseDown(label(container, "a22"));
+    fireEvent.keyDown(viewport, { key: "ContextMenu" });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("1.1 整理 の操作");
+    fireEvent.contextMenu(viewport, { clientX: 0, clientY: 0 });
+    expect(screen.getByRole("menu")).toHaveAccessibleName("1.1 整理 の操作");
   });
 
   it("WBS を読めなければ編集できないことを示す", async () => {
@@ -622,6 +1055,6 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     await screen.findByRole("img", { name: "ガントチャート" });
     fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
     expect(await screen.findByText("WBS を読めないので編集できません。読み直してください")).toBeInTheDocument();
-    expect(screen.queryByRole("toolbar", { name: "編集の操作" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "ガントの編集" })).toBeNull();
   });
 });

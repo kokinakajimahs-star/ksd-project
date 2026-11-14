@@ -6,7 +6,7 @@
 // 日程の再計算（API-SCH-008）のボタンは schedule.edit、報告日を作る部品（API-PRG-001。報告日が無くても出す）は
 // status_report.manage を持つ人にだけ出す（7.2。サーバでも必ず判定する）。
 // WBS の木（API-WBS-001）から要素の行を差し込み（7.3。読めなければ活動の行だけ）、schedule.edit か wbs.edit を持つ人は
-// 「編集する」で行・日付・依存をこの画面で変えられる（7.3 の「編集」。CR-024）
+// 「編集する」で行・日付・依存をこの画面の図の上で変えられる（7.3 の「編集」。CR-024・CR-025）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -48,7 +48,7 @@ import {
 } from "../../components/gantt/scale";
 import CreateReportForm from "../prg/CreateReportForm";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
-import { GanttEditBar, GanttSelectionPanel } from "./gantt/GanttEditBar";
+import { GanttEditBar } from "./gantt/GanttEditBar";
 import { useGanttEditor } from "./gantt/useGanttEditor";
 import { LIST_LIMIT_MAX } from "./limits";
 
@@ -454,7 +454,7 @@ export default function GanttPage() {
           )}
           {editor.ready && tree !== null && <GanttEditBar editor={editor} tree={tree} />}
           {editor.ready && outline !== undefined && outline.length === 0 && (
-            <p className="note">WBS の要素がまだ無い。「行を足す」で最上位の要素を作る</p>
+            <p className="note">WBS の要素がまだ無い。図の上で Enter を押す（または右クリックする）と最上位の要素を足す</p>
           )}
           <GanttChart
             gantt={gantt}
@@ -464,7 +464,6 @@ export default function GanttPage() {
             outline={outline}
             edit={editor.chartEdit}
           />
-          {editor.ready && <GanttSelectionPanel editor={editor} projectId={projectId} />}
           {unplaced !== null && unplaced.lightning > 0 && (
             <p className="note">{`今の計画に無い活動の頂点 ${unplaced.lightning} 件は描いていない`}</p>
           )}
