@@ -180,3 +180,70 @@ requires = ["trace.toml"]
 command = ["ksdx", "trace", "verify"]
 result_json = ".ksdx/verify-result.json"
 skip_note = "要求→設計の写像（GAP・ORPHAN・分母の減少）を確かめていない"
+
+# ===========================================================================
+# 実ブラウザでの評価（CR-023。kloop の雛形の [ui_runtime] どおり。A-53 の 5 の B）
+# ===========================================================================
+# 決まった判定だけを failures にする：ルートが開ける・未捕捉の例外・axe の WCAG 違反（配色のコントラストを含む）。
+# **見た目の良し悪しは判定しない**（非決定的な判定は進捗判定と振動検出を壊す。kloop の ADR-007。見た目は
+# frontend/e2e の画面写しと ui-review のレビューノードと人が見る）。
+#
+# 前提：アプリが起動していること。**この検証器はアプリを起動しない。** 起動していなければ「見ていない」になる。
+#   関門（覆いの中）ではアプリが動いていないので、いつも「見ていない」になる。判定するのは、利用者がアプリを起動して
+#   流す ui-review のグラフ（graphs/ui-review.toml）か `bash scripts/verify.sh ui` の中だけである。
+#   起動のしかた（開発用）：`.venv/bin/uvicorn` でサーバを 127.0.0.1:8000 に、`npm --prefix frontend run dev` で画面を 5173 に
+#   （vite.config.ts が /api をサーバへ渡す）
+
+[ui_runtime]
+# vite の開発サーバの既定の口。空にすると実ブラウザでの評価そのものを行わない
+base_url = "http://localhost:5173"
+# ブラウザ操作の CLI（外部依存。0.34.0 に固定して利用者が入れる。無ければ skipped_checks に数える）
+command = ["agent-browser"]
+# axe のタグ。既定は WCAG 2.1 レベル A / AA
+a11y_tags = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]
+# 共有ビュー（UI-RPT-002）は無効なトークンで開き、「リンクが無効」の表示を評価する（有効なトークンは本物の
+# データと共有リンクが要り、決まった値にならないため）
+route_params = { token = "ui-runtime-invalid-token" }
+# **ログインの要る画面は見ない。** agent-browser はログインしないので、RequireAuth がログイン画面へ送り、
+# 別の画面 ID の名でログイン画面を評価することになる（「見た」と数えると誤る）。ログインしてから開く手段が
+# 検証器に入るまでは外す。見るのは UI-CMN-001（ログイン）と UI-RPT-002（共有ビュー）の 2 画面だけ
+skip_routes = [
+  "/admin/users",
+  "/approvals",
+  "/timesheet",
+  "/projects",
+  "/projects/:projectId/settings",
+  "/projects/:projectId/wbs",
+  "/projects/:projectId/wbs/:elementId",
+  "/projects/:projectId/wbs-review",
+  "/projects/:projectId/responsibility",
+  "/projects/:projectId/activities",
+  "/projects/:projectId/gantt",
+  "/projects/:projectId/baselines",
+  "/projects/:projectId/status-reports/:reportId",
+  "/projects/:projectId/status-reports/:reportId/delays",
+  "/projects/:projectId/status-reports/:reportId/meeting",
+  "/projects/:projectId/effort",
+  "/projects/:projectId/change-requests",
+  "/projects/:projectId/corrective-actions",
+  "/projects/:projectId/audit-logs",
+  "/projects/:projectId/import-export",
+]
+# コンソールのエラーは失敗に数えない（雛形の既定。件数と例は notes に出る）。無効なトークンの共有ビューは
+# サーバの 404 をコンソールに出すことがあり、実装の欠陥と区別できないため
+console_errors_are_failures = false
+timeout_seconds = 60
+
+[[checks]]
+name = "ui-runtime"
+scopes = ["all", "ui"]
+requires = ["frontend/src"]
+probe = ["agent-browser", "--version"]
+# `kloop-internal` は kloop 同梱の実装へ解決される（kloop の ADR-012）
+command = ["kloop-internal", "check_ui_runtime.py", "--quiet"]
+# 検証器が書いた JSON を取り込む（failures / notes / skipped_checks をそのまま合流させる）
+result_json = ".kloop/ui-runtime.json"
+skip_note = "実ブラウザでの評価を実行していない。画面が実際に開くか・未捕捉例外が出ないか・WCAG 違反が無いかはこの run では見ていない"
+# **導入が任意であるため false にしてある**（雛形どおり）。外部 CLI（agent-browser）とブラウザに加え、
+# アプリが起動していることも要る。関門ではいつも「見ていない」になるので、true にしない
+required = false

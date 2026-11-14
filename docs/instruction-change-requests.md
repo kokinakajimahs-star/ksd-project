@@ -771,3 +771,42 @@ CR-020 で本番の配置先は Google Cloud に決まった
 
 ### 暫定対応
 無し
+
+## CR-023 : 実ブラウザでの評価（`[ui_runtime]` と `[[checks]] ui-runtime`）を足す（`spec-ids.toml`）
+
+- 状態：**承認**（2026-11-14。利用者が見た目の計画の推奨案を「全て推奨案通りで進めてください」と承認した。A-53 の 5 の B）。`spec-ids.toml` に反映した
+
+### 対象箇所
+`spec-ids.toml`（kloop の保護パス）の末尾。設計書・要求仕様書・`trace.toml`・`scripts/verify.sh` は変えない
+
+### 現行の記載
+`[[checks]]` はサーバの試験・DB の移行・画面の型検査・画面の試験・trace の 5 つ。画面について見ているのは、ソースに画面 ID とルートの
+文字列があること（静的な突合）と jsdom の試験だけで、画面が実際のブラウザで開くか・未捕捉の例外が出ないか・WCAG の違反が無いかは見ていない
+
+### 問題
+見た目を OpenProject（Primer）に寄せる作業（A-53）で配色・部品を入れ替えた。配色のコントラストや見出し・名札の欠けは jsdom の試験では
+見えず、画面写し（A-53 の 5 の A）も人が見るだけで決まった判定をしない
+
+### 根拠
+A-53 の 5 の B（ksd-ls の答え。kloop の雛形 `templates/bootstrap/spec-ids.toml` の `[ui_runtime]` の節と `docs/ui-verification.md` の 6 章）
+
+### 提案する変更後の記載（推奨案）
+雛形どおりに `[ui_runtime]` と `[[checks]] ui-runtime`（`required = false`）を末尾に足す。この導入先で決める値は次のとおり。
+
+| 値 | 決めたもの | 理由 |
+|---|---|---|
+| `base_url` | `http://localhost:5173` | vite の開発サーバの既定の口（`/api` はサーバの 8000 へ渡る）。関門ではアプリが動いていないので「見ていない」になる |
+| `route_params` | `token` に無効なトークン | 共有ビュー（UI-RPT-002）を「リンクが無効」の表示で評価する。有効なトークンは本物のデータが要り、決まった値にならない |
+| `skip_routes` | ログインの要る 20 のルート | agent-browser はログインしないので、`RequireAuth` がログイン画面へ送る。別の画面 ID の名でログイン画面を評価すると「見た」と誤って数える |
+| `console_errors_are_failures` | `false`（雛形の既定） | 無効なトークンでサーバの 404 がコンソールに出ることがあり、実装の欠陥と区別できない |
+
+agent-browser は 0.34.0 に固定して利用者が入れる（`docs/ui-verification.md` の実測の版）
+
+### 影響範囲
+- 設計 ID の増減は無い（193 件のまま）。`docs/spec-ids.json` の中身（ID の一覧）は変わらない
+- `required = false` なので、agent-browser が無い・アプリが動いていないときは skipped_checks に数え、合否に関わらない。関門ではいつもそうなる
+- 実際に判定するのは UI-CMN-001（ログイン）と UI-RPT-002（共有ビュー）の 2 画面だけ。ログインの要る 20 画面は、検証器にログインしてから
+  開く手段が入るまで見ない（ksd-ls に伝えた）
+
+### 暫定対応
+無し
