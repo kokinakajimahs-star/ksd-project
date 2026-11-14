@@ -10,6 +10,7 @@ import { getMe, hasProjectPermission, type Me } from "../../api/cmn";
 import { toErrorView, type ErrorView } from "../../api/errors";
 import { createElement, getWbsTree, type ElementKind, type WbsElement, type WbsTree } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
+import StatusBadge, { WBS_STATUS_TONES } from "../../components/StatusBadge";
 import { useProjectMembers } from "../chg/useProjectMembers";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
 import ElementEditor from "./ElementEditor";
@@ -227,7 +228,9 @@ export default function WbsPage() {
       {tree !== null && (
         <dl aria-label="WBS の概要" className="wbs-summary">
           <dt>状態</dt>
-          <dd>{labelOf(WBS_STATUS_LABELS, tree.wbs_status)}</dd>
+          <dd>
+            <StatusBadge tone={WBS_STATUS_TONES[tree.wbs_status]}>{labelOf(WBS_STATUS_LABELS, tree.wbs_status)}</StatusBadge>
+          </dd>
           <dt>プロジェクトの総見積</dt>
           <dd>{hoursText(tree.project_estimate_hours)}</dd>
           <dt>改番待ち</dt>

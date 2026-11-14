@@ -21,6 +21,7 @@ import { listActivities, type Activity } from "../../api/sch";
 import { getWbsTree, type WbsElement } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
+import StatusBadge, { ACTION_STATUS_TONES } from "../../components/StatusBadge";
 import { optionalText } from "../../lib/form";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
 import CorrectiveActionForm from "./CorrectiveActionForm";
@@ -339,7 +340,9 @@ export default function CorrectiveActionsPage() {
                       {a.due_date ?? "—"}
                       {a.overdue && <strong className="overdue">（期限超過）</strong>}
                     </td>
-                    <td>{ACTION_STATUS_LABELS[a.status]}</td>
+                    <td>
+                      <StatusBadge tone={ACTION_STATUS_TONES[a.status]}>{ACTION_STATUS_LABELS[a.status]}</StatusBadge>
+                    </td>
                     <td>{a.effect ?? "—"}</td>
                     {canManage && (
                       <td>
