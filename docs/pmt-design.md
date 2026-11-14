@@ -1,6 +1,6 @@
 WBS・工数・進捗管理システム（PMT）設計書
 
-作成日：2026年11月10日　改訂日：2026年11月13日　版：1.3　対象：リリース1（要求仕様書5章の64件）
+作成日：2026年11月10日　改訂日：2026年11月14日　版：1.4　対象：リリース1（要求仕様書5章の64件）
 
 # 0. 本書について
 
@@ -45,6 +45,7 @@ WBS・工数・進捗管理システム（PMT）設計書
 | 1.1 | 2026-11-12 | 下の CR-001〜009 を反映した（設計ID 193 件。API を 6 件足した） | `docs/instruction-change-requests.md` の CR-001〜009（2026-11-12 に推奨案で承認） |
 | 1.2 | 2026-11-13 | 下の CR-010〜014 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-010〜014（2026-11-13 に推奨案で承認。未確定事項 OQ-08・09・10・42 を決め、その実装の独立レビューの指摘を直した） |
 | 1.3 | 2026-11-13 | 下の CR-015〜020 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-015〜020（2026-11-13 に利用者が残りの未確定事項を推奨案で承認し、本番の配置先を Google Cloud に決めた） |
+| 1.4 | 2026-11-14 | 下の CR-024 を反映した（設計ID 193 件。ID の増減なし） | `docs/instruction-change-requests.md` の CR-024（2026-11-14 に利用者が承認。ガントを入力の中心にする。A-55） |
 
 1.1 の変更の内訳：
 
@@ -84,6 +85,12 @@ WBS・工数・進捗管理システム（PMT）設計書
 | CR-018 | 5.5・6.2 API-PRJ-004・API-SCH-002〜004・API-CHG-006・6.3 | 希望開始日はプロジェクトの開始日以降に限る（422 `BEFORE_PROJECT_START`） |
 | CR-019 | 1.3・6.1・6.2 API-PRJ-010・011・API-EFF-003・API-RPT-002・004・API-CMN-003・6.3・8 NFR-10 | API の説明の公開の切り替え、業務の時間帯、CSV の式の無害化、取込の上限、共有リンクの有効期限の上限と共有ビューの個人の情報、工数の入力で読めないプロジェクトの活動の 404、ロックの状態を返す相手、最後の PM の保護 |
 | CR-020 | 1.1・1.2・2.1・8 NFR-06・10 | 本番の配置（Google Cloud の Cloud Run・Cloud SQL。Terraform。サーバが画面を配る 1 コンテナ）とバックアップ |
+
+1.4 の変更の内訳：
+
+| CR | 変えた箇所 | 内容 |
+|---|---|---|
+| CR-024 | 6.2 API-SCH-003・7.1・7.2・7.3・11 | ガント（UI-SCH-002）に WBS の要素の行と編集（行を足す・名前・インデント・まとめる・移す・消す・バーのドラッグ・依存）を足し、活動の置き場の WP・WP の中の位置・予定開始日から数えた終了日を API-SCH-003 で変えられるようにした |
 
 # 1. 方式設計
 
@@ -594,7 +601,7 @@ stateDiagram-v2
 | API-EST-003 | `GET /api/v1/projects/{project_id}/estimates/rollup` | ボトムアップの集計 | project.view | EST-02 |
 | API-SCH-001 | `GET /api/v1/projects/{project_id}/activities` | 活動の一覧（日程・依存・担当付き） | project.view | SCH-02 |
 | API-SCH-002 | `POST /api/v1/projects/{project_id}/activities` | 活動を足す（WPの配下。日程を再計算する。希望開始日はプロジェクトの開始日以降。CR-018） | schedule.edit | SCH-01, SCH-03, SCH-09 |
-| API-SCH-003 | `PATCH /api/v1/projects/{project_id}/activities/{activity_id}` | 活動を変える（日程を再計算する。希望開始日はプロジェクトの開始日以降。CR-018） | schedule.edit | SCH-03 |
+| API-SCH-003 | `PATCH /api/v1/projects/{project_id}/activities/{activity_id}` | 活動を変える（日程を再計算する。希望開始日はプロジェクトの開始日以降。CR-018。置き場の WP（`work_package_id`）と WP の中の位置（`position`。0 から。省けば別の WP へは末尾、同じ WP では並びを変えない）、今の予定開始日から数えた終了日（`planned_finish`。希望開始日は変えずに期間を決める。他の日付・期間・マイルストーンの項目と一緒には指定できない）も変えられる。CR-024） | schedule.edit | SCH-03, SCH-01 |
 | API-SCH-004 | `PATCH /api/v1/projects/{project_id}/activities` | 活動をまとめて変える（全件か無しか。希望開始日はプロジェクトの開始日以降。CR-018） | schedule.edit | SCH-02 |
 | API-SCH-005 | `DELETE /api/v1/projects/{project_id}/activities/{activity_id}` | 活動を消す | schedule.edit | SCH-01 |
 | API-SCH-006 | `POST /api/v1/projects/{project_id}/dependencies` | 依存を足す（循環を拒む） | schedule.edit | SCH-04 |
@@ -684,7 +691,7 @@ CSV は UTF-8（BOM付き）・カンマ区切り・1行目が見出し。xlsx �
 | UI-WBS-003 | WBSの検証・レビュー・承認 | `/projects/:projectId/wbs-review` | PM・計画担当者・承認者 | WBS-13, WBS-16, WBS-20, WBS-21, WBS-22 |
 | UI-WBS-004 | 責任分担表 | `/projects/:projectId/responsibility` | PM | WBS-10 |
 | UI-SCH-001 | タスクリスト | `/projects/:projectId/activities` | 計画担当者 | SCH-01, SCH-02, SCH-03, SCH-04, SCH-09, EFF-01, EST-01 |
-| UI-SCH-002 | ガントチャート・イナズマ線 | `/projects/:projectId/gantt` | 全員 | SCH-06, SCH-10, SCH-11, SCH-12, SCH-13, PRG-01, PRG-08, PRG-12, PRG-13, PRG-18 |
+| UI-SCH-002 | ガントチャート・イナズマ線 | `/projects/:projectId/gantt` | 全員（編集は計画担当者） | SCH-06, SCH-10, SCH-11, SCH-12, SCH-13, PRG-01, PRG-08, PRG-12, PRG-13, PRG-18, WBS-01, SCH-01, SCH-03, SCH-04, SCH-09 |
 | UI-SCH-003 | ベースラインと差異 | `/projects/:projectId/baselines` | PM | SCH-16, SCH-17, SCH-18 |
 | UI-PRG-001 | 進捗入力（報告日） | `/projects/:projectId/status-reports/:reportId` | 実行担当者・進捗管理担当者 | PRG-01, PRG-02, PRG-03, PRG-05, PRG-17, EFF-06 |
 | UI-PRG-002 | 遅延分析 | `/projects/:projectId/status-reports/:reportId/delays` | 進捗管理担当者・PM | PRG-19 |
@@ -726,6 +733,7 @@ flowchart LR
 
 - ガント（UI-SCH-002）から報告日を作る（API-PRG-001。status_report.manage）。報告日が1件も無いプロジェクトでも、ここから進捗入力（UI-PRG-001）へ進める。
 - 活動の見積（人時・人日、手法・前提・参照資料）はタスクリスト（UI-SCH-001）で書く（API-EST-001 の `ACTIVITY`。EST-01）。
+- ガント（UI-SCH-002）でも、WBS の要素と活動を足し・名前を変え・移し・消し、日付と依存を変えられる（7.3 の編集。CR-024）。担当と割当工数・見積はタスクリスト（UI-SCH-001）で、WBS 辞書・採番と改番は WBS（UI-WBS-001・002）で書く。
 
 権限の無い操作のボタンは出さない（`GET /api/v1/me` の権限で決める）。サーバ側でも必ず判定する（NFR-04）。
 
@@ -736,6 +744,18 @@ flowchart LR
 - 表示の単位（日・週・月）は1日あたりの横幅だけを変える。行の高さは一定で、行の順はサーバが返す順（RULE-SCH-005）に従う。
 - マイルストーンは菱形で描く。
 - 活動 2,000 件で3秒以内に描画を終える（NFR-02）。見えている行だけを描く（縦方向の仮想化）。
+- **WBS の要素の行（UI-SCH-002 だけ。CR-024）**：API-WBS-001 の木から、各要素の行をその配下の行の前に差し込む（WBS の並びの順。活動の行の順と `row_index` はサーバのまま。過去の線・会議レポートの頂点は `row_index` で当てるので、サーバの行は増やさない）。要素の行には配下の活動の予定のバーの最も早い開始〜最も遅い終了を要約のバー（濃い灰の細いバー。両端に下向きの爪）で③のレイヤに描き、基準・実績・ラベル・イナズマ線の頂点は描かない（イナズマ線は要素の行をまたいで次の活動の頂点へ結ぶ）。編集していないときは、配下に活動の無い要素の行を出さない。WBS を読めなければ要素の行を出さずに今までどおり描く。会議レポート（7.4）と共有ビュー（UI-RPT-002）は要素の行を出さない。
+- **編集（UI-SCH-002。CR-024）**：schedule.edit か wbs.edit を持つ人だけが「編集」に切り替えられる。どの操作も既存の API を呼んでその場で保存し（変更履歴に残る）、保存の後にガントと WBS を読み直して描き直す。元に戻す操作は無い。操作のボタンはその権限を持つ人にだけ出す（活動・日付・依存は schedule.edit、要素は wbs.edit）。
+  - 行を選ぶ（クリック・上下の矢印）。名前を変える：F2・ダブルクリックで入力にし、Enter で保存、Esc で取り消す（要素は API-WBS-003、活動は API-SCH-003）。
+  - 行を足す（Insert・帯のボタン）：活動の行か WP の行を選んでいれば、その WP の末尾に活動を足す（API-SCH-002。期間の既定は 1 稼働日）。WP 以外の要素の行なら子の要素を、何も選んでいなければ最上位の要素を足す（API-WBS-002。区分を選ぶ。既定は WP）。
+  - インデント（Alt+Shift+→）・アウトデント（Alt+Shift+←）は要素の行だけ：直前の兄弟の子の末尾へ・親の次の兄弟へ移す（API-WBS-004。WBS ID は変えず改番待ちになる。5.2）。直前の兄弟が WP ならインデントできない（RULE-WBS-003）。
+  - 活動を動かす：同じ WP の中で上下へ（Alt+Shift+↑・↓）、別の WP へ（移す先を選ぶ）（API-SCH-003 の `position`・`work_package_id`）。
+  - まとめる：選んだ活動を新しい WP に（最初の活動の WP と同じ親の下、その WP の次に API-WBS-002 で作り、API-SCH-003 で順に移す）、選んだ要素を新しい上位の要素に（最初の要素と同じ親の下に作り、API-WBS-004 で順に移す）。1 件ずつの操作なので、途中で失敗したら、そこまでの移動を残して移せなかった行を示す。
+  - 消す（Delete。確かめてから）：要素は配下ごと（API-WBS-005）、活動は API-SCH-005。
+  - バーのドラッグ（活動の予定のバーだけ。日の単位に丸める。Esc で取り消す）：本体は開始を落とした日にする（API-SCH-003 の `requested_start`。期間は変えない）。右端は今の予定開始日から落とした日までを期間にする（`planned_finish`）。マイルストーンは本体だけ動かせる。要約のバーは動かせない。計算し直した開始が落とした日と違う（先行が後に終わるなど）ときは、その旨を示す。
+  - 依存：バーの右の丸を別の活動のバーへドラッグすると、終了→開始の依存を足す（API-SCH-006。循環は `SCHEDULE_CYCLE` を示す）。矢印を選んで Delete で消す（API-SCH-007）。キーボードでは、選んだ活動の欄で後続を足し、先行を外す。
+  - 希望開始日のある活動の行には印を付け、選んだ活動の欄で外せる（API-SCH-003 で `requested_start` を空にする）。
+  - 要素を変えると、基準化の後なら WBS は下書きに戻る（5.10）。編集の帯に WBS の状態を出す。
 
 ## 7.4 定例会議レポート（UI-RPT-001）
 
@@ -843,7 +863,7 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | PRJ-02 | スコープ定義（対象内・対象外） | DB-PRJ-002, DB-WBS-005 | RULE-WBS-004 | API-PRJ-005, API-PRJ-006, API-WBS-013, API-WBS-026 | UI-PRJ-002, UI-WBS-002 |
 | PRJ-04 | 稼働カレンダーの設定 | DB-PRJ-003, DB-PRJ-004 | RULE-CAL-001 | API-PRJ-007, API-PRJ-008 | UI-PRJ-002 |
 | PRJ-06 | メンバー・ロールの管理 | DB-PRJ-005, DB-CMN-001 | RULE-AUTH-001 | API-PRJ-009, API-PRJ-010, API-PRJ-011, API-CMN-003 | UI-PRJ-002 |
-| WBS-01 | 階層構造の作成・編集 | DB-WBS-001 | RULE-WBS-003 | API-WBS-001, API-WBS-002, API-WBS-003, API-WBS-004, API-WBS-005 | UI-WBS-001 |
+| WBS-01 | 階層構造の作成・編集 | DB-WBS-001 | RULE-WBS-003 | API-WBS-001, API-WBS-002, API-WBS-003, API-WBS-004, API-WBS-005 | UI-WBS-001, UI-SCH-002 |
 | WBS-02 | 要素区分の設定 | DB-WBS-001 | RULE-WBS-003 | API-WBS-002, API-WBS-003 | UI-WBS-001 |
 | WBS-04 | ツリー図・アウトライン表示 | DB-WBS-001 | — | API-WBS-001 | UI-WBS-001 |
 | WBS-05 | WBS IDの自動採番 | DB-WBS-002 | RULE-WBS-001 | API-WBS-006, API-WBS-007 | UI-WBS-001 |
@@ -860,12 +880,12 @@ A3横の1枚に、上段：ガント＋イナズマ線（報告日の前後4週�
 | EST-01 | WP・活動単位の工数見積 | DB-EST-001 | RULE-EST-002 | API-EST-001 | UI-WBS-001, UI-SCH-001 |
 | EST-02 | ボトムアップ集計 | — | RULE-EST-001 | API-WBS-001, API-EST-003 | UI-WBS-001 |
 | EST-08 | 見積根拠の記録 | DB-EST-001 | RULE-EST-002 | API-EST-001, API-EST-002 | UI-WBS-002 |
-| SCH-01 | WPからの活動展開 | DB-SCH-001 | RULE-WBS-003 | API-SCH-002, API-SCH-005 | UI-SCH-001 |
+| SCH-01 | WPからの活動展開 | DB-SCH-001 | RULE-WBS-003 | API-SCH-002, API-SCH-003, API-SCH-005 | UI-SCH-001, UI-SCH-002 |
 | SCH-02 | タスクリストの表示・編集 | — | RULE-SCH-006 | API-SCH-001, API-SCH-004 | UI-SCH-001 |
-| SCH-03 | 開始日・終了日・期間の設定 | DB-SCH-001 | RULE-CAL-001 | API-SCH-002, API-SCH-003 | UI-SCH-001 |
-| SCH-04 | 依存関係の設定 | DB-SCH-002 | RULE-SCH-001 | API-SCH-006, API-SCH-007 | UI-SCH-001 |
+| SCH-03 | 開始日・終了日・期間の設定 | DB-SCH-001 | RULE-CAL-001 | API-SCH-002, API-SCH-003 | UI-SCH-001, UI-SCH-002 |
+| SCH-04 | 依存関係の設定 | DB-SCH-002 | RULE-SCH-001 | API-SCH-006, API-SCH-007 | UI-SCH-001, UI-SCH-002 |
 | SCH-06 | 自動スケジューリング | DB-SCH-001 | RULE-SCH-002 | API-SCH-008 | UI-SCH-002 |
-| SCH-09 | マイルストーンの設定 | DB-SCH-001 | RULE-SCH-002 | API-SCH-002 | UI-SCH-001 |
+| SCH-09 | マイルストーンの設定 | DB-SCH-001 | RULE-SCH-002 | API-SCH-002 | UI-SCH-001, UI-SCH-002 |
 | SCH-10 | クリティカルパスの算出・表示 | DB-SCH-001 | RULE-SCH-003 | API-SCH-008, API-SCH-009 | UI-SCH-002 |
 | SCH-11 | ガントチャート表示 | — | RULE-SCH-005 | API-SCH-010 | UI-SCH-002 |
 | SCH-12 | 予定・実績・基準の重ね表示 | — | RULE-SCH-005 | API-SCH-010 | UI-SCH-002 |
