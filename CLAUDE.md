@@ -50,8 +50,18 @@ ksdx trace verify                  # 要求→設計の写像（要求 64 / GAP 
 ## ブランチ
 
 `docs/branch-rules.md` に従う。作業は `dev`（または `wt/<task_id>`）。**`main` へ直接コミットしない。**
-`main` へは `ksdls test gate --verify --root <リポジトリ>` を通した後に `ksdls escalate --root <リポジトリ>` で入れる。
-リモートは GitHub Enterprise の非公開リポジトリ `ProductExperiencePlatform/ksd-project`。`git push` はエージェントが行わない。
+`main` へは関門（`ksdls test gate --verify`）を通した後に `ksdls escalate` で入れる。流すのは次の節の `kloop release` で、
+エージェントは関門・escalate・`git push` を自分の Bash で打たない。
+リモートは GitHub Enterprise の非公開リポジトリ `ProductExperiencePlatform/ksd-project`。
+
+## 本番へ出す（ksd-ls の導入先）
+
+- 本番へ出すとき（関門 → escalate → `dev` と `main` の push。デプロイとクラウドの構成変更は含まない）は `kloop release request` で頼む。流すのは sandbox の外の受け手で、手順は kloop の中で決まっている
+- 人に関門・escalate・push のコマンドを打たせない（エージェントの `kloop release run`・`install`・`uninstall` は guard が止める）
+- 受け手が入っていなければ（`kloop release status`）、人に `kloop release install` を 1 回頼む
+- 結果は `kloop release status` と `.kloop/release/<run_id>/report.md` で見る。止まったら理由を直してから頼み直す
+- 関門が流れている間（15〜20 分）は、主の作業ツリーで編集・コミットをしない（escalate は作業ツリーが汚れていると止まる）。
+  デプロイ（`deploy/deploy.sh`）は今までどおり利用者が流す
 
 ## エンジニアリング制約
 

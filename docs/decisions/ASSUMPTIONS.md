@@ -1784,3 +1784,29 @@
     - 訓練用のインスタンスが取った自動バックアップは、インスタンスと一緒に消えた（消した後のプロジェクトのバックアップの一覧に `ksdp-pg-drill` の行が無い。
       利用者が 2026-11-14 に確かめた。消したインスタンスを名指しした一覧は 403 を返す）
     - 消したインスタンスの名前をしばらく使えないことは、Cloud SQL の仕様の記憶による（確かめていない）
+
+## A-52: 本番へ出すのを `kloop release` に移し、guard には release を止める部分だけを写したこと（2026-11-14）
+
+- **経緯:** kloop 11.14.0 に `kloop release` が入った（関門 → 試験の層への記録 → escalate → push dev → push main を、sandbox の外の受け手が決まった順で流す）。
+  それまでは、この 4 つを利用者が `!` で打っていた。利用者が 2026-11-14 に次の 3 つを決めた。
+  1. 受け手を入れる（`kloop release install`。利用者が sandbox の外で 1 回）
+  2. 雛形の guard のうち、release を止める部分（CR-144）を先に入れる
+  3. CLAUDE.md を書き換える
+- **選択:**
+  - **guard**：雛形（`ksd-loop/templates/claude/hooks/guard.py`。kloop 11.14.1）から、`kloop_release_denial` と、それが使う関数・`_command_words` だけを写した。
+    `fixed_bash_denial` の ksdls の判定の後で呼ぶ（雛形と同じ位置）。エージェントの `kloop release run`・`install`・`uninstall`・知らない口を止め、
+    `request`・`status` は通す。今の guard は `kloop release` を何も止めないので、受け手を入れる前に入れる。
+    `.claude/hooks` はエージェントが書けないため、作った版を利用者が置き換えた
+  - **写さなかったもの**：雛形の RQ-KL-017・CR-139（`cat`・`tee`・`git commit -F -` の heredoc の中身を、ksdls・クラウドなどの規則から外す）。
+    止める範囲を狭める変更なので、別に判断する。写さないので、heredoc の中に `kloop release run` などと書いた Bash も止まる（止める側）
+  - **CLAUDE.md**：「ブランチ」の「`git push` はエージェントが行わない」を「関門・escalate・`git push` を自分の Bash で打たない」に改めた。
+    雛形の「本番へ出す」の節（4 行）を写し、関門の間は作業ツリーを変えないこと、デプロイは今までどおり利用者が流すことを足した
+- **確かめたこと:**
+  - 雛形の試験（ksd-ls の `tests/test_release.py` の `TestTemplateGuard`）と同じコマンド：止める 30・通す 13 が全て見込みどおり。
+    `[bash].deny` で置き換えられないこと、判定の途中の例外で止めることも確かめた
+  - このリポジトリのセッションの transcript にある Bash のコマンド 6,624 種を、元の guard と新しい guard の両方に掛け、判定が変わったものは 0
+  - フックとしての呼び出し（標準入力の JSON）で、`kloop release install` が deny、`kloop release request` と `git status` が通る
+- **覆す場合:** guard の差分（足しただけで、消した行は無い）と CLAUDE.md の差分を戻し、`kloop release uninstall` で受け手を外す。関門・escalate・push は利用者が `!` で打つ形に戻る
+- **限界:**
+  - guard が見ないもの（雛形と同じ）：書いたスクリプトの中、名前を組み立てる形
+  - 受け手そのもの（systemd の単位・関門・escalate・push の流れ）は ksd-ls の試験で確かめたもので、このリポジトリではまだ流していない
