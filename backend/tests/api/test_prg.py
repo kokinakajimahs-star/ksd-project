@@ -584,7 +584,7 @@ def test_lightning_line_matches_basis_example(world: World) -> None:
     assert [r["counted_as"] for r in line["rows"]] == ["BEHIND", "AHEAD", "ON_SCHEDULE", "ON_SCHEDULE"]
     first = line["rows"][0]
     assert (first["row_index"], first["wbs_code"], first["start_date"], first["finish_date"], first["duration_days"]) == (
-        0, "1.1", "2026-12-01", "2026-12-21", 21)
+        0, "1.1.1", "2026-12-01", "2026-12-21", 21)  # WBS ID の列は活動の番号（CR-028）
     assert first["point"]["calendar"] == {"date": "2026-12-06", "fraction": 0.25}
 
 
@@ -720,8 +720,8 @@ def test_finalize_freezes_snapshot_and_rejects_later_input(world: World, client:
     items = db_session.scalars(select(ProgressSnapshotItem).where(ProgressSnapshotItem.snapshot_id == body["snapshot_id"])
                                .order_by(ProgressSnapshotItem.row_order)).all()
     assert [(i.activity_id, i.row_order, i.wbs_code, i.percent_complete, i.point, i.deviation, i.judgement) for i in items] == [
-        (a, 0, "1.1", Decimal("20.00"), Decimal("2.0000"), Decimal("-4.0000"), "BEHIND"),
-        (m, 1, "1.1", None, Decimal("6.0000"), Decimal("0.0000"), "NOT_COMPUTED"),
+        (a, 0, "1.1.1", Decimal("20.00"), Decimal("2.0000"), Decimal("-4.0000"), "BEHIND"),  # 確定する時の活動の番号を写す
+        (m, 1, "1.1.2", None, Decimal("6.0000"), Decimal("0.0000"), "NOT_COMPUTED"),
     ]
     # 実績工数は表の報告日以前の合計（実績の無い活動は 0）。ETC は RULE-EFF-001（A-28）：A は入力した残工数が優先、
     # M は進捗率が未算定なので max(見積 0（未見積）− 実績 0, 0)＝0
@@ -741,6 +741,14 @@ def test_finalize_freezes_snapshot_and_rejects_later_input(world: World, client:
     assert [(r["start_date"], r["finish_date"], r["duration_days"]) for r in after["rows"]] == [
         ("2026-12-01", "2026-12-10", 10), ("2026-12-10", "2026-12-10", 0)]
     assert after["rows"][0]["remaining_hours"] == 40.0 and after["rows"][0]["progress_method"] is None
+    # 確定の後に WP の先頭へ活動を足すと今の番号は振り直るが、確定済みの線の行は確定した時の活動の番号のまま。
+    # 遅延活動（API-PRG-009）は今の番号（4.2・6.2。CR-028）
+    z = world.add("Z", duration_days=1)
+    assert client.patch(world.url(f"/activities/{z}"), json={"position": 0}, headers=world.h["planner"]).status_code == 200
+    assert [r["wbs_code"] for r in world.line(report)["rows"]] == ["1.1.1", "1.1.2"]
+    delays = client.get(world.url(f"/status-reports/{report}/delays"), headers=world.h["viewer"])
+    assert delays.status_code == 200, delays.text
+    assert {d["activity_id"]: d["wbs_code"] for d in delays.json()["delays"]} == {a: "1.1.2"}
     assert client.post(world.url(f"/status-reports/{MISSING}/finalize"), headers=world.h["pm"]).status_code == 404
 
 

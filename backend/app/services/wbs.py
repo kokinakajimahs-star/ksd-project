@@ -358,10 +358,19 @@ class WbsContext:
 
     @property
     def rule(self) -> NumberingRule:
-        row = self.rule_row
-        return NumberingRule(
-            separator=row.separator, min_digits=row.min_digits, prefix=row.prefix, pad_first_level=row.pad_first_level
-        )
+        return rule_of_row(self.rule_row)
+
+
+def rule_of_row(row: WbsNumberingRule) -> NumberingRule:
+    """採番規則の行（DB-WBS-002）を ``NumberingRule`` にする。"""
+    return NumberingRule(
+        separator=row.separator, min_digits=row.min_digits, prefix=row.prefix, pad_first_level=row.pad_first_level
+    )
+
+
+def numbering_rule(session: Session, project_id: int) -> NumberingRule:
+    """プロジェクトの採番規則（読むだけ。行が無ければ ``numbering_rule_row`` の既定の値）。"""
+    return rule_of_row(numbering_rule_row(session, project_id))
 
 
 def numbering_rule_row(session: Session, project_id: int, *, for_update: bool = False) -> WbsNumberingRule:

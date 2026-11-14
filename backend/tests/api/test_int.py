@@ -217,7 +217,7 @@ def test_export_wbs_csv_follows_design_6_3(world: World) -> None:
 
 
 def test_export_activities_and_time_entries_columns(world: World, db_session: Session) -> None:
-    """API-INT-001：活動は WP の WBS ID・先行（; 区切り）・担当者のログインID、実績工数はログインID・活動ID・作業日・工数。"""
+    """API-INT-001：活動は活動の番号（CR-028）・WP の WBS ID・先行（; 区切り）・担当者のログインID、実績工数はログインID・活動ID・作業日・工数。"""
     db_session.add(ActivityDependency(project_id=world.pid, predecessor_id=world.a, successor_id=world.b))
     db_session.add(TimeEntry(user_id=world.users["contractor"].id, activity_id=world.c, work_date=date(2026, 12, 2),
                              hours=Decimal("2.5"), note="調査"))
@@ -225,9 +225,9 @@ def test_export_activities_and_time_entries_columns(world: World, db_session: Se
     activities = world.grid("activities")
     assert tuple(activities[0]) == ACTIVITY_COLUMNS
     assert activities[1:] == [
-        [str(world.a), "1.1", "A", "", "5", "0", "", "", ""],
-        [str(world.b), "1.1", "B", "", "3", "0", "", str(world.a), ""],
-        [str(world.c), "2.1", "C", "", "2", "0", "", "", lid("contractor")],
+        [str(world.a), "1.1.1", "1.1", "A", "", "5", "0", "", "", ""],
+        [str(world.b), "1.1.2", "1.1", "B", "", "3", "0", "", str(world.a), ""],
+        [str(world.c), "2.1.1", "2.1", "C", "", "2", "0", "", "", lid("contractor")],
     ]
     entries = world.grid("time-entries")
     assert tuple(entries[0]) == TIME_ENTRY_COLUMNS
@@ -511,7 +511,7 @@ def test_import_requires_write_permission_of_target(world: World, db_session: Se
         body = world.load("wbs", csv_of(wbs), who="executor", dry_run=dry_run, expect=403)
         assert body["error"]["code"] == "FORBIDDEN"
     activities = world.grid("activities")
-    activities[1][2] = "A（改）"
+    activities[1][3] = "A（改）"
     world.load("activities", csv_of(activities), who="executor", expect=403)
     assert world.activity(world.a).name == "A" and world.elements()["WP1"].name == "WP1"
 
@@ -520,10 +520,10 @@ def test_import_requires_write_permission_of_target(world: World, db_session: Se
     assert world.load("activities", csv_of(activities), who="executor")["written"] is True
     assert world.activity(world.a).name == "A（改）"
     estimate = world.grid("activities")
-    estimate[1][6] = "12"
+    estimate[1][7] = "12"
     for dry_run in (True, False):
         world.load("activities", csv_of(estimate), who="executor", dry_run=dry_run, expect=403)
-    added = world.grid("activities") + [["", "1.1", "D", "", "2", "0", "4", "", ""]]
+    added = world.grid("activities") + [["", "", "1.1", "D", "", "2", "0", "4", "", ""]]
     world.load("activities", csv_of(added), who="executor", expect=403)
     assert world.activity(world.a).estimate_hours is None
     world.grant("EXECUTOR", "estimate.edit")
@@ -562,7 +562,7 @@ def test_import_xlsx_reads_typed_cells(world: World) -> None:
     sheet = workbook.active
     assert sheet is not None
     sheet.append(list(ACTIVITY_COLUMNS))
-    sheet.append([world.a, "1.1", "A", datetime(2026, 12, 7), 4, 0, 6.5, None, lid("executor")])
+    sheet.append([world.a, 1.1, "1.1", "A", datetime(2026, 12, 7), 4, 0, 6.5, None, lid("executor")])  # 番号は読まない
     buffer = BytesIO()
     workbook.save(buffer)
     body = world.load("activities", buffer.getvalue(), fmt="xlsx")
@@ -743,9 +743,9 @@ def test_import_activities_writes_dependencies_assignees_and_recalculates(world:
     """API-INT-002：活動の追加（活動ID が空）・更新、先行は活動の先行の全て、担当の置き換え。日程を計算し直す（RULE-SCH-002）。"""
     grid = [
         list(ACTIVITY_COLUMNS),
-        [str(world.a), "1.1", "A", "", "5", "0", "", "", ""],
-        [str(world.b), "1.1", "B", "", "2", "0", "10", str(world.a), f"{lid('executor')};{lid('planner')}"],
-        ["", "1.2", "D", "", "0", "1", "", f"{world.b};{world.c}", ""],
+        [str(world.a), "1.1.1", "1.1", "A", "", "5", "0", "", "", ""],
+        [str(world.b), "1.1.2", "1.1", "B", "", "2", "0", "10", str(world.a), f"{lid('executor')};{lid('planner')}"],
+        ["", "", "1.2", "D", "", "0", "1", "", f"{world.b};{world.c}", ""],
     ]
     body = world.load("activities", csv_of(grid))
     assert body["written"] is True
@@ -766,7 +766,7 @@ def test_import_activities_writes_dependencies_assignees_and_recalculates(world:
     assert [(r.target_id, r.hours) for r in records] == [(world.b, Decimal(10))]
 
     # 先行を外す（ファイルの値がその活動の先行の全て）
-    grid[2][7] = ""
+    grid[2][8] = ""
     body = world.load("activities", csv_of(grid[:3]))
     assert body["changes"][0]["changed"] == ["先行の活動ID（; 区切り）"]
     db_session.expire_all()
@@ -777,19 +777,19 @@ def test_import_activities_cycle_is_rejected(world: World) -> None:
     """API-INT-002：取り込んだ後の依存が循環すれば ``SCHEDULE_CYCLE``（RULE-SCH-001）。何も書かない。"""
     grid = [
         list(ACTIVITY_COLUMNS),
-        [str(world.a), "1.1", "A", "", "5", "0", "", str(world.b), ""],
-        [str(world.b), "1.1", "B", "", "3", "0", "", str(world.a), ""],
+        [str(world.a), "1.1.1", "1.1", "A", "", "5", "0", "", str(world.b), ""],
+        [str(world.b), "1.1.2", "1.1", "B", "", "3", "0", "", str(world.a), ""],
     ]
     body = world.load("activities", csv_of(grid), expect=422)
     assert body["error"]["code"] == "IMPORT_INVALID"
     assert {d["code"] for d in body["error"]["details"]} == {"SCHEDULE_CYCLE"}
     assert world.client.get(world.url("/activities"), headers=world.h["planner"]).status_code == 200
-    assert world.grid("activities")[1][7] == ""
+    assert world.grid("activities")[1][8] == ""
 
 
 def test_import_activities_rejects_assignee_who_is_not_a_member(world: World) -> None:
     """API-INT-002：新しく置く担当はメンバーである有効な利用者だけ（API-EFF-001 と同じ。EFF-01）。"""
-    grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "", "5", "0", "", "", lid("outsider")]]
+    grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1.1", "1.1", "A", "", "5", "0", "", "", lid("outsider")]]
     body = world.load("activities", csv_of(grid), dry_run=True)
     assert [(i["row"], i["code"]) for i in body["issues"]] == [(2, "NOT_FOUND")]
 
@@ -797,7 +797,7 @@ def test_import_activities_rejects_assignee_who_is_not_a_member(world: World) ->
 def test_import_activities_judges_start_after_locking_project(world: World, race: RaceProbe) -> None:
     """API-INT-002（CR-018・A-49 の 3）：書く取込は、プロジェクトの行をロックしてから開始日を読む。ロックの直前に別の操作が
     開始日を 12-03 にしてコミットしていれば、12-02 の希望開始日の行は ``BEFORE_PROJECT_START`` で何も書かない。"""
-    grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1", "A", "2026-12-02", "5", "0", "", "", ""]]
+    grid = [list(ACTIVITY_COLUMNS), [str(world.a), "1.1.1", "1.1", "A", "2026-12-02", "5", "0", "", "", ""]]
 
     def move_project_start(other: Session) -> None:
         project = other.get(Project, world.pid)
@@ -809,7 +809,7 @@ def test_import_activities_judges_start_after_locking_project(world: World, race
     body = world.load("activities", csv_of(grid), expect=422)
     assert [(d["row"], d["code"]) for d in body["error"]["details"]] == [(2, "BEFORE_PROJECT_START")]
     assert race.locked[:1] == ["projects"]
-    assert world.grid("activities")[1][3] != "2026-12-02"
+    assert world.grid("activities")[1][4] != "2026-12-02"
 
 
 def test_import_activities_rejects_requested_start_before_project_start(world: World, db_session: Session) -> None:
@@ -821,10 +821,10 @@ def test_import_activities_rejects_requested_start_before_project_start(world: W
     db_session.commit()
     grid = [
         list(ACTIVITY_COLUMNS),
-        [str(world.a), "1.1", "A", "2026-11-30", "5", "0", "", "", ""],
-        [str(world.b), "1.1", "B", "2026-12-01", "3", "0", "", "", ""],
-        ["", "1.2", "新", "2026-11-27", "1", "0", "", "", ""],
-        [str(world.c), "2.1", "C 改", "2026-11-27", "4", "0", "", "", lid("contractor")],
+        [str(world.a), "1.1.1", "1.1", "A", "2026-11-30", "5", "0", "", "", ""],
+        [str(world.b), "1.1.2", "1.1", "B", "2026-12-01", "3", "0", "", "", ""],
+        ["", "", "1.2", "新", "2026-11-27", "1", "0", "", "", ""],
+        [str(world.c), "2.1.1", "2.1", "C 改", "2026-11-27", "4", "0", "", "", lid("contractor")],
     ]
     expected = [(2, "希望開始日", "BEFORE_PROJECT_START"), (4, "希望開始日", "BEFORE_PROJECT_START")]
     dry = world.load("activities", csv_of(grid), dry_run=True)

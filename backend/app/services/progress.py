@@ -895,12 +895,12 @@ def lightning_line(session: Session, access: ProjectAccess, actor: User, project
         calculated = _calculate_line(session, plan, report, entries, ordered)
         line = calculated.line
         source = SOURCE_CALCULATED
-        elements = plan.element_by_id
+        codes = plan.activity_codes()
         for a, vertex in zip(calculated.activities, line.vertices, strict=True):
             entry = entries.get(a.id)
             rows.append(
                 LightningRowView(
-                    vertex=vertex, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
+                    vertex=vertex, wbs_code=codes[a.id], name=a.name,
                     is_milestone=a.is_milestone, is_critical=a.is_critical, start_date=a.start_date,
                     finish_date=a.finish_date, duration_days=a.duration_days,
                     progress_method=effective_method(plan.project, a), percent_complete=calculated.percents[a.id],
@@ -999,7 +999,7 @@ def finalize(
     percents = {k: round_percent(v) for k, v in exact.items()}
     efforts = links.effort.effort(session, project_id, report.report_date, entries, [a.id for a in ordered],
                                   percents=percents)
-    elements = plan.element_by_id
+    codes = plan.activity_codes()  # 写しには確定する時の活動の番号を写す（4.2。CR-028）
     settings = project_settings(plan.project)
     activities = []
     for a in ordered:
@@ -1007,7 +1007,7 @@ def finalize(
         effort = efforts.get(a.id, ActivityEffort())
         activities.append(
             SnapshotActivity(
-                activity_id=a.id, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
+                activity_id=a.id, wbs_code=codes[a.id], name=a.name,
                 start_date=a.start_date, finish_date=a.finish_date,  # type: ignore[arg-type]
                 duration_days=a.duration_days, is_milestone=a.is_milestone, is_critical=a.is_critical,
                 percent_complete=exact[a.id],  # 写しには小数 2 桁へ丸めた値が入る（RULE-PRG-007。5.6）

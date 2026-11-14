@@ -62,7 +62,7 @@ from app.domain.scheduling import (
     calculate_schedule,
     check_bulk_update,
 )
-from app.domain.wbs_code import CodedElement, display_preorder
+from app.domain.wbs_code import ActivitySlot, CodedElement, NumberingRule, activity_codes, display_preorder
 from app.domain.wbs_rules import ActivityRef, AssignmentRef, WbsRuleError, ensure_hierarchy
 from app.errors import AppError
 from app.infra.db import lock_row
@@ -80,6 +80,7 @@ from app.models.sch import (  # API 層は依存・スケジュールベース�
 from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
+from app.services.wbs import coded_element, numbering_rule
 
 # PATCH（API-SCH-003）で受ける項目。``requested_finish``・``planned_finish`` は保存しない（開始日・期間を求めるのに使う。SCH-03・CR-024）
 _DATE_FIELDS = frozenset({"requested_start", "requested_finish", "duration_days", "is_milestone"})
@@ -267,15 +268,20 @@ def _cycle_error(activity_ids: Iterable[int]) -> AppError:
     return AppError(422, "SCHEDULE_CYCLE", "依存が循環しています", details=[{"activity_ids": ids}])
 
 
+def _activity_slot(a: Activity) -> ActivitySlot:
+    return ActivitySlot(id=a.id, work_package_id=a.work_package_id, sort_order=a.sort_order)
+
+
 @dataclass(frozen=True)
 class Plan:
-    """1 つの操作で読む計画の全体（WBS 要素・活動・依存は ID の順）。"""
+    """1 つの操作で読む計画の全体（WBS 要素・活動・依存は ID の順。``rule`` はプロジェクトの採番規則）。"""
 
     project: Project
     calendar: WorkCalendar
     elements: list[WbsElement]
     activities: list[Activity]
     dependencies: list[ActivityDependency]
+    rule: NumberingRule
 
     @property
     def element_by_id(self) -> dict[int, WbsElement]:
@@ -298,6 +304,18 @@ class Plan:
         )
         rank = {element_id: i for i, element_id in enumerate(preorder)}
         return sorted(self.activities, key=lambda a: (rank[a.work_package_id], a.sort_order, a.id))
+
+    def activity_codes(self) -> dict[int, str]:
+        """活動の番号（5.2。CR-028）：``{活動の id: 置き場の WP の ID ＋ WP の中の順番}``。
+
+        読める範囲（9.2 の注記）に関わらず、プロジェクトの全ての活動で数える。呼ぶたびに今の並びから作る（保存しない）。
+        """
+        elements = self.element_by_id
+        return activity_codes(
+            (_activity_slot(a) for a in self.activities),
+            {a.work_package_id: coded_element(elements[a.work_package_id]) for a in self.activities},
+            self.rule,
+        )
 
 
 def work_calendar(session: Session, project_id: int) -> WorkCalendar:
@@ -323,7 +341,34 @@ def load_plan(session: Session, project_id: int) -> Plan:
                 select(ActivityDependency).where(ActivityDependency.project_id == project_id).order_by(ActivityDependency.id)
             )
         ),
+        rule=numbering_rule(session, project_id),
     )
+
+
+def activity_codes_of(session: Session, activity_ids: Iterable[int]) -> dict[int, str]:
+    """活動の番号（5.2。CR-028）を、プロジェクトをまたいで引く（工数・是正措置の一覧のように活動の id から引く出力）。
+
+    番号は置き場の WP の全ての活動の並びで決まるので、同じ WP の活動を全て読む。無い活動の id は返さない。
+    """
+    wanted = set(activity_ids)
+    if not wanted:
+        return {}
+    wp_ids = set(session.scalars(select(Activity.work_package_id).where(Activity.id.in_(wanted))))
+    if not wp_ids:
+        return {}
+    slots = [
+        ActivitySlot(id=row.id, work_package_id=row.work_package_id, sort_order=row.sort_order)
+        for row in session.execute(
+            select(Activity.id, Activity.work_package_id, Activity.sort_order).where(Activity.work_package_id.in_(wp_ids))
+        )
+    ]
+    work_packages = list(session.scalars(select(WbsElement).where(WbsElement.id.in_(wp_ids))))
+    codes: dict[int, str] = {}
+    for project_id in sorted({wp.project_id for wp in work_packages}):
+        in_project = {wp.id: coded_element(wp) for wp in work_packages if wp.project_id == project_id}
+        codes.update(activity_codes((s for s in slots if s.work_package_id in in_project), in_project,
+                                    numbering_rule(session, project_id)))
+    return {activity_id: code for activity_id, code in codes.items() if activity_id in wanted}
 
 
 def _schedule_of(plan: Plan) -> Schedule:
@@ -411,9 +456,10 @@ def _assignees_by_activity(session: Session, links: ScheduleLinks, project_id: i
 
 @dataclass(frozen=True)
 class ActivityView:
-    """活動 1 件の出力の元（置き場の WP・先行と後続・担当）。"""
+    """活動 1 件の出力の元（活動の番号・置き場の WP・先行と後続・担当）。"""
 
     activity: Activity
+    code: str  # 活動の番号（5.2。CR-028）
     work_package: WbsElement
     predecessor_ids: tuple[int, ...]
     successor_ids: tuple[int, ...]
@@ -426,6 +472,7 @@ def _views(
 ) -> list[ActivityView]:
     """活動の出力の元。``visible`` を渡したら、先行・後続の相手は読める活動だけ（9.2 の注記）。"""
     elements = plan.element_by_id
+    codes = plan.activity_codes()
     assignees = _assignees_by_activity(session, links, plan.project.id)
     preds: dict[int, list[int]] = {}
     succs: dict[int, list[int]] = {}
@@ -437,6 +484,7 @@ def _views(
     return [
         ActivityView(
             activity=a,
+            code=codes[a.id],
             work_package=elements[a.work_package_id],
             predecessor_ids=tuple(sorted(preds.get(a.id, ()))),
             successor_ids=tuple(sorted(succs.get(a.id, ()))),
@@ -1008,10 +1056,12 @@ def plan_gantt(
                 bars[item.activity_id] = BaselineBarInput(item.start_date, item.finish_date, item.is_milestone)
 
     assignees = _assignees_by_activity(session, links, project_id)
+    codes = plan.activity_codes()  # 番号は読めない活動も数える（5.2。CR-028）
     activities = [
         GanttActivity(
             id=a.id,
             work_package_id=a.work_package_id,
+            wbs_code=codes[a.id],
             name=a.name,
             sort_order=a.sort_order,
             is_milestone=a.is_milestone,
@@ -1075,10 +1125,11 @@ def save_baseline(
 
     elements = plan.element_by_id
     ordered = plan.ordered_activities()
+    codes = plan.activity_codes()  # 活動の項目は保存する時の活動の番号を写す（4.2。CR-028）
     items: list[ScheduleBaselineItem] = [
         ScheduleBaselineItem(
             schedule_baseline_id=baseline.id, item_type="ACTIVITY", activity_id=a.id, element_id=a.work_package_id,
-            wbs_code=elements[a.work_package_id].wbs_code, name=a.name, start_date=a.start_date,
+            wbs_code=codes[a.id], name=a.name, start_date=a.start_date,
             finish_date=a.finish_date, duration_days=a.duration_days, is_milestone=a.is_milestone,
             estimate_hours=a.estimate_hours,
         )
@@ -1166,7 +1217,7 @@ def variance(
     if baseline is None or baseline.project_id != project_id:
         raise _baseline_not_found(baseline_id)
     plan = load_plan(session, project_id)
-    elements = plan.element_by_id
+    codes = plan.activity_codes()
     rows = compare_with_baseline(
         [
             BaselineActivityItem(activity_id=i.activity_id, wbs_code=i.wbs_code, name=i.name, start_date=i.start_date,
@@ -1174,7 +1225,7 @@ def variance(
             for i in _activity_items(session, baseline.id)
         ],
         [
-            PlanActivity(activity_id=a.id, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
+            PlanActivity(activity_id=a.id, wbs_code=codes[a.id], name=a.name,
                          start_date=a.start_date, finish_date=a.finish_date, is_milestone=a.is_milestone,
                          estimate_hours=a.estimate_hours)
             for a in plan.ordered_activities()

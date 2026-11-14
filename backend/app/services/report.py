@@ -253,12 +253,12 @@ def _build(
         source = SOURCE_CALCULATED
         exact = report_exact_percents(session, project, ordered, entries)  # P は丸める前の値から（5.6）
         percents = {k: round_percent(v) for k, v in exact.items()}
-        elements = plan.element_by_id
+        codes = plan.activity_codes()
         for a in ordered:
             entry = entries.get(a.id)
             activities.append(
                 SnapshotActivity(
-                    activity_id=a.id, wbs_code=elements[a.work_package_id].wbs_code, name=a.name,
+                    activity_id=a.id, wbs_code=codes[a.id], name=a.name,
                     start_date=a.start_date, finish_date=a.finish_date,  # type: ignore[arg-type]
                     duration_days=a.duration_days, is_milestone=a.is_milestone, is_critical=a.is_critical,
                     percent_complete=exact[a.id],

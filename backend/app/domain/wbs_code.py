@@ -7,6 +7,8 @@
       code_without_first_pad(第1階層の要素) = prefix + pad(順番)
 
   既定の規則（``.``・1 桁・接頭辞なし・補完あり）で要求仕様書 W§4 の例（1.0、1.1、1.2、2.0、2.1…）になる。
+- 活動の番号（5.2。CR-028）：置き場の WP の ``code_without_first_pad`` ＋ ``separator`` ＋ ``pad(WP の中の順番)``。
+  保存せず、読むたびに WP の中の並び（``sort_order``・``id``）から作る（WBS-06・07 の WBS ID ではない）
 - 維持・改番・旧 ID の解決（RULE-WBS-002）：
   - 新規：``順番 = 親の last_child_seq + 1``。``last_child_seq`` は減らさない（削除した番号を再利用しない）
   - 移動：移動先の親の ``last_child_seq + 1`` を新しい順番にするが **``wbs_code`` は変えない**。
@@ -136,6 +138,40 @@ def make_code(seq: int, rule: NumberingRule, parent: CodedElement | None = None)
     if parent is None:
         return _check_code_length(rule.prefix + padded + rule.first_level_fill)
     return _check_code_length(code_stem(parent, rule) + rule.separator + padded)
+
+
+@dataclass(frozen=True)
+class ActivitySlot:
+    """活動の番号を決めるのに要る列（4.1 の ``activities``）。"""
+
+    id: int
+    work_package_id: int
+    sort_order: int
+
+
+def activity_codes(
+    activities: Iterable[ActivitySlot], work_packages: Mapping[int, CodedElement], rule: NumberingRule
+) -> dict[int, str]:
+    """活動の番号（5.2。CR-028）：置き場の WP の ``code_without_first_pad`` ＋ ``separator`` ＋ ``pad(WP の中の順番)``。
+
+    - WP の中の順番：その WP の活動を ``(sort_order, id)`` の順に並べた位置（1 から）。``sort_order`` の飛びは詰めて数える
+    - WP の ID は WP が**今持っている** ID（``make_code`` の親と同じ。移動して改番待ちの WP の活動も WP の表示と同じ頭）
+    - 番号は保存しない。足す・動かす・消すと、その WP の後ろの活動の番号が振り直る
+    - 置き場の WP が ``work_packages`` に無い活動は返さない（呼ぶ側がその WP を読んでいない）
+    - 長さの上限（``MAX_CODE_LENGTH``）は当てない（要素の表の列の上限で、活動の番号は要素の表に保存しない。A-59）
+
+    返すのは ``{活動の id: 活動の番号}``。
+    """
+    by_wp: dict[int, list[ActivitySlot]] = {}
+    for activity in activities:
+        if activity.work_package_id in work_packages:
+            by_wp.setdefault(activity.work_package_id, []).append(activity)
+    codes: dict[int, str] = {}
+    for wp_id, slots in by_wp.items():
+        stem = code_stem(work_packages[wp_id], rule) + rule.separator
+        for position, slot in enumerate(sorted(slots, key=lambda a: (a.sort_order, a.id)), start=1):
+            codes[slot.id] = stem + rule.pad(position)
+    return codes
 
 
 def code_for_path(seq_path: Sequence[int], rule: NumberingRule) -> str:

@@ -203,7 +203,8 @@ class ProgressSnapshotItem(Base):
 
     - ``row_order`` はガントの行の順（RULE-PRG-005 の折れ線の点の順）。スナップショットの中で一意
     - ``activity_id`` は写した活動。写しの値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2。後から活動を消しても変えない。CR-002）
-    - ``wbs_code`` 以降は写した時点の値。後から活動・進捗を変えても変わらない（BR-13）
+    - ``wbs_code`` 以降は写した時点の値。後から活動・進捗を変えても変わらない（BR-13）。``wbs_code`` は確定した時点の活動の番号
+      （5.2。CR-028。それより前に確定した行は置き場の WP の WBS ID のまま）
     - ``point`` は進捗ポイント、``deviation`` はずれ（``point − report_line``。5.6）。``judgement`` は 5.6 の判定（``JUDGEMENTS``）
     """
 

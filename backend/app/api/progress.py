@@ -330,7 +330,7 @@ def get_delays(
     a = view.analysis
     shown = view.visible
     activities = view.plan.activity_by_id
-    elements = view.plan.element_by_id
+    codes = view.plan.activity_codes()
 
     def visible(activity_id: int) -> bool:
         return shown is None or activity_id in shown
@@ -343,7 +343,7 @@ def get_delays(
         entry = view.entries.get(d.activity_id)
         delays.append(
             DelayOut(
-                activity_id=d.activity_id, wbs_code=elements[activity.work_package_id].wbs_code, name=activity.name,
+                activity_id=d.activity_id, wbs_code=codes[d.activity_id], name=activity.name,
                 deviation=float(d.deviation), percent_complete=_num(d.percent_complete),
                 delay_reason=entry.delay_reason if entry is not None else None,
                 forecast_finish=entry.forecast_finish if entry is not None else None,

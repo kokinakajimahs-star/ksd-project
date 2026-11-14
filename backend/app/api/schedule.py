@@ -68,7 +68,7 @@ def _activity_out(view: ActivityView) -> ActivityOut:
         id=a.id,
         project_id=a.project_id,
         work_package_id=a.work_package_id,
-        wbs_code=view.work_package.wbs_code,
+        wbs_code=view.code,
         work_package_name=view.work_package.name,
         name=a.name,
         sort_order=a.sort_order,
@@ -98,13 +98,13 @@ def _dependency_out(d: ActivityDependency) -> DependencyOut:
 
 
 def _schedule_out(view: ScheduleView) -> ScheduleOut:
-    elements = view.plan.element_by_id
+    codes = view.plan.activity_codes()
     rows = []
     for a in view.activities:
         s = view.schedule.activities[a.id]
         rows.append(
             ScheduledActivityOut(
-                activity_id=a.id, name=a.name, wbs_code=elements[a.work_package_id].wbs_code,
+                activity_id=a.id, name=a.name, wbs_code=codes[a.id],
                 is_milestone=a.is_milestone, start_date=s.start_date, finish_date=s.finish_date,
                 early_start=s.early_start, early_finish=s.early_finish, late_start=s.late_start,
                 late_finish=s.late_finish, total_float=s.total_float, is_critical=s.is_critical,

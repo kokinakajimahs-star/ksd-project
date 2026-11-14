@@ -847,6 +847,8 @@ describe("UI-SCH-002 表示の設定と活動の詳細と進捗（7.3。CR-027�
     expect(within(dialog).queryAllByRole("textbox")).toHaveLength(0);
     expect(within(dialog).queryByRole("button", { name: /保存/ })).toBeNull();
     expect(within(dialog).getByText("2026-12-01〜2026-12-21")).toBeInTheDocument();
+    // 活動の番号はサーバの wbs_code をそのまま出す（設計書 7.3・CR-028。画面は番号を作らない）
+    expect(within(dialog).getByText("活動の番号").nextElementSibling).toHaveTextContent(/^1\.1$/);
     expect(within(dialog).getByText("0 日（クリティカル）")).toBeInTheDocument();
     expect(within(dialog).getByText("1.1 関係者調整")).toBeInTheDocument();
     expect(within(dialog).getByText("15 稼働日")).toBeInTheDocument();

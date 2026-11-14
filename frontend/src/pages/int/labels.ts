@@ -37,6 +37,7 @@ export const TARGET_COLUMNS: Readonly<Record<IoTarget, { columns: readonly strin
   activities: {
     columns: [
       "活動ID",
+      "活動の番号",
       "WPのWBS ID",
       "名称",
       "希望開始日",
@@ -46,7 +47,7 @@ export const TARGET_COLUMNS: Readonly<Record<IoTarget, { columns: readonly strin
       "先行の活動ID（; 区切り）",
       "担当者のログインID（; 区切り）",
     ],
-    key: "活動ID（空なら追加）",
+    key: "活動ID（空なら追加）。活動の番号は出力だけの列で、取り込むときは読まない",
   },
   "time-entries": {
     columns: ["ログインID", "活動ID", "作業日", "工数（人時）", "備考"],

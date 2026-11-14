@@ -91,6 +91,7 @@ WBS_COLUMNS: Final = (
 )
 ACTIVITY_COLUMNS: Final = (
     "活動ID",
+    "活動の番号",  # 出力だけの列（5.2。CR-028）。取込は見出しの照合にだけ使い、値は読まない
     "WPのWBS ID",
     "名称",
     "希望開始日",
@@ -185,7 +186,10 @@ class WbsRow:
 
 @dataclass(frozen=True)
 class ActivityRow:
-    """``activities`` の 1 行。``activity_id`` が ``None`` は追加。先行・担当者は順を問わない（出力は昇順）。"""
+    """``activities`` の 1 行。``activity_id`` が ``None`` は追加。先行・担当者は順を問わない（出力は昇順）。
+
+    ``activity_code`` は活動の番号（5.2。CR-028）。出力だけの値で、取込は読まない（取り込んだ行は ``None``。比べない）。
+    """
 
     activity_id: int | None
     work_package_code: str
@@ -196,6 +200,7 @@ class ActivityRow:
     estimate_hours: Decimal | None = None
     predecessor_ids: tuple[int, ...] = ()
     assignee_login_ids: tuple[str, ...] = ()
+    activity_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +285,7 @@ def format_row(row: WbsRow | ActivityRow | TimeEntryRow) -> tuple[str, ...]:
     if isinstance(row, ActivityRow):
         return (
             "" if row.activity_id is None else str(row.activity_id),
+            _format_text(row.activity_code),
             row.work_package_code,
             row.name,
             _format_date(row.requested_start),
@@ -913,8 +919,12 @@ def _add_hierarchy_issue(problem: HierarchyIssue, line_of: Mapping[int, int], is
 # --- activities ------------------------------------------------------------
 
 
+# 比べる列（``_activity_values`` の順）。活動ID は照合キー、活動の番号は出力だけの列なので比べない
+_ACTIVITY_COMPARED: Final = tuple(c for c in ACTIVITY_COLUMNS if c not in ("活動ID", "活動の番号"))
+
+
 def _activity_values(row: ActivityRow) -> tuple[object, ...]:
-    """更新の比べ方：活動ID は照合キーなので比べない。先行・担当者は集合で比べる。"""
+    """更新の比べ方（``_ACTIVITY_COMPARED`` の列）：活動ID・活動の番号は比べない。先行・担当者は集合で比べる。"""
     return (
         row.work_package_code,
         row.name,
@@ -1021,7 +1031,7 @@ def plan_activity_import(
         if row.activity_id is None:
             changes.append(ActivityChange(line, ChangeAction.CREATE, row, None, wp_id, ()))
             continue
-        changed = _changed(ACTIVITY_COLUMNS[1:], _activity_values(current[row.activity_id]), _activity_values(row))
+        changed = _changed(_ACTIVITY_COMPARED, _activity_values(current[row.activity_id]), _activity_values(row))
         if changed:
             changes.append(ActivityChange(line, ChangeAction.UPDATE, row, row.activity_id, wp_id, changed))
         else:

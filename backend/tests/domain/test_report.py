@@ -61,6 +61,7 @@ ELEMENTS = [
 ]
 WORK_PACKAGE = {1: 10, 2: 10, 3: 10, 5: 10, 4: 20}
 SORT_ORDER = {1: 1, 2: 2, 3: 3, 5: 4, 4: 1}
+CODE = {1: "1.1", 2: "1.2", 3: "1.3", 5: "1.4", 4: "2.1"}  # 活動の番号（WP の ID ＋ WP の中の順番。CR-028）
 
 ESTIMATES: dict[int, Decimal | None] = {1: Decimal(160), 2: Decimal(80), 3: Decimal(40), 4: Decimal(64), 5: None}
 
@@ -87,6 +88,7 @@ def gantt_for(
                 percent_complete=a.percent_complete,
                 actual_start=a.actual_start,
                 actual_finish=a.actual_finish,
+                wbs_code=CODE[a.activity_id],
             )
             for a in rows
             if a.activity_id in ids
@@ -218,9 +220,9 @@ def test_milestone_forecast_from_delay_impact() -> None:
     report = open_report()
 
     # 資料作成の見込みの終了 10 + ceil(21 × 0.75) = 26 → 公開判定は 12/21 から 12/26 へ
-    # 行は最新計画のガントの行（WBS ID は置き場の WP の 1.0。CR-013）
+    # 行は最新計画のガントの行（CR-013）。WBS ID の列はガントの行の活動の番号（WP 1.0 の 4 番目で 1.4。CR-028）
     (milestone,) = report.milestones
-    assert (milestone.activity_id, milestone.wbs_code, milestone.name) == (5, "1.0", "公開判定")
+    assert (milestone.activity_id, milestone.wbs_code, milestone.name) == (5, "1.4", "公開判定")
     assert milestone.planned_date == d(21)
     assert milestone.forecast_date == d(26)
     assert milestone.slip_days == 5
@@ -249,8 +251,8 @@ def test_milestone_slip_counts_working_days() -> None:
     gantt = build_gantt(
         [GanttElement(id=10, parent_id=None, wbs_code="1.0", name="作業")],
         [
-            GanttActivity(1, 10, "作業", 1, False, d(1), d(4), True, 0, actual_start=d(1)),
-            GanttActivity(2, 10, "完了確認", 2, True, d(4), d(4), True, 0),
+            GanttActivity(1, 10, "作業", 1, False, d(1), d(4), True, 0, actual_start=d(1), wbs_code="1.1"),
+            GanttActivity(2, 10, "完了確認", 2, True, d(4), d(4), True, 0, wbs_code="1.2"),
         ],
         [(1, 2)],
         calendar=weekdays,

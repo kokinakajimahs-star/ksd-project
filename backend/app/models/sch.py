@@ -171,7 +171,8 @@ class ScheduleBaselineItem(Base):
 
     - ``item_type`` が ACTIVITY なら活動の写し、WORK_PACKAGE なら WP の写し（活動の無い WP の見積など。EFF-08 の基準の値）
     - ``activity_id`` は写した活動（WP の項目では空）。``element_id`` は項目の WP（WP の項目は自分、活動の項目は活動の置き場の WP）
-    - ``wbs_code``・``name`` 以降は写した時点の値。後から活動・WP を変えても変わらない（BR-12）
+    - ``wbs_code``・``name`` 以降は写した時点の値。後から活動・WP を変えても変わらない（BR-12）。活動の項目の ``wbs_code`` は
+      写した時点の活動の番号（5.2。CR-028。それより前に写した行は置き場の WP の WBS ID のまま）
     - ``activity_id``・``element_id`` は写した時点の値として持ち、外部キー制約を張らない（設計書 1.1 の 4.2。CR-002）。
       写した活動・WP を後から消しても変えない（今の計画に無い ID が SCH-18 の「削除された活動」）
     """

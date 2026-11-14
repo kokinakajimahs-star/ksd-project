@@ -162,7 +162,7 @@ export interface CorrectiveAction {
   element_id: number | null;
   activity_id: number | null;
   status_report_id: number | null;
-  /** 紐付けた要素（無ければ活動の WP）の WBS ID */
+  /** 紐付けた要素の WBS ID（活動だけに紐付けたなら活動の番号。CR-028） */
   wbs_code: string | null;
   cause: string;
   action: string;
