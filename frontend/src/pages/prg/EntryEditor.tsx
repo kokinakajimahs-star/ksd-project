@@ -168,7 +168,10 @@ interface EntryEditorProps {
   canApprove: boolean;
   /** 保存した後に呼ぶ（画面はイナズマ線を読み直す） */
   onSaved: (message: string) => void;
+  /** 閉じる（embedded のときは呼ばない） */
   onClose: () => void;
+  /** ほかの画面のダイアログの中に置く（見出しと「閉じる」を出さない。ガントの詳細と進捗。CR-027） */
+  embedded?: boolean;
 }
 
 export default function EntryEditor({
@@ -180,6 +183,7 @@ export default function EntryEditor({
   canApprove,
   onSaved,
   onClose,
+  embedded = false,
 }: EntryEditorProps) {
   const activityId = row.activity_id;
   const direct = row.progress_method === "DIRECT";
@@ -196,9 +200,11 @@ export default function EntryEditor({
 
   return (
     <section aria-label={`進捗を入力：${row.name}`} className="entry-editor">
-      <h3>
-        {row.wbs_code} {row.name}
-      </h3>
+      {!embedded && (
+        <h3>
+          {row.wbs_code} {row.name}
+        </h3>
+      )}
       <p>算定方式：{progressMethodLabel(row.progress_method)}</p>
       {canEnter && (
         <ProgressEntryForm
@@ -229,9 +235,11 @@ export default function EntryEditor({
           onSaved={onSaved}
         />
       )}
-      <button type="button" onClick={onClose}>
-        閉じる
-      </button>
+      {!embedded && (
+        <button type="button" onClick={onClose}>
+          閉じる
+        </button>
+      )}
     </section>
   );
 }

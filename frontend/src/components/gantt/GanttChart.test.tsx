@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -140,5 +140,38 @@ describe("要素の行を差し込んでも、イナズマ線・過去の線は�
     expect(cys('[data-layer="past-lines"] circle[data-judgement]')).toEqual([center(4)]);
     // 要素の行には頂点を描かない
     expect(cys('[data-layer="lightning"] circle[data-judgement]')).not.toContain(center(3));
+  });
+});
+
+describe("活動の行の見出し・バーのダブルクリックで詳細と進捗を開く（CR-027。7.3）", () => {
+  const gantt = makeGantt({
+    range_start: "2026-12-01",
+    range_end: "2026-12-31",
+    rows: [
+      makeGanttRow({
+        row_index: 0,
+        activity_id: 21,
+        planned: makeBar("PLANNED", "2026-12-01", "2026-12-04"),
+        actual: makeBar("ACTUAL", "2026-12-01", "2026-12-03"),
+        baseline: makeBar("BASELINE", "2026-12-01", "2026-12-05"),
+      }),
+    ],
+  });
+
+  it("編集していなくても、見出し・予定・実績・基準のバーのダブルクリックでその活動を渡す", () => {
+    const opened: number[] = [];
+    const { container } = render(<GanttChart gantt={gantt} unit="day" onOpenActivity={(id) => opened.push(id)} />);
+    fireEvent.doubleClick(container.querySelector('[data-layer="row-labels"] [data-activity-id="21"]')!);
+    for (const name of ["planned", "actual", "baseline"]) {
+      fireEvent.doubleClick(container.querySelector(`[data-layer="${name}"] [data-activity-id="21"]`)!);
+    }
+    expect(opened).toEqual([21, 21, 21, 21]);
+  });
+
+  it("渡さなければダブルクリックで何もしない（会議レポート・共有ビュー）", () => {
+    const { container } = render(<GanttChart gantt={gantt} unit="day" />);
+    expect(() =>
+      fireEvent.doubleClick(container.querySelector('[data-layer="planned"] [data-activity-id="21"]')!),
+    ).not.toThrow();
   });
 });

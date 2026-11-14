@@ -121,6 +121,8 @@ export interface GanttChartProps {
   outline?: OutlineRow[];
   /** 編集の状態と操作。渡すと編集の操作を受け、範囲を後ろへ広げる（空の計画でも描く） */
   edit?: GanttChartEdit;
+  /** 活動の行の見出し・バーのダブルクリックで、その活動の詳細と進捗を開く（CR-027）。省けば開かない */
+  onOpenActivity?: (activityId: number) => void;
 }
 
 /** 依存の矢印の鍵 */
@@ -148,7 +150,7 @@ const PLOT_CLIP_ID = "gantt-plot-clip";
 const INDENT = { activities: 8, outline: 12 } as const;
 /** バーの右端の、終わりを動かす掴みの幅 */
 const RESIZE_GRIP = 6;
-/** これより小さい動きはクリック（選ぶだけ） */
+/** これより小さい動きはクリック（選ぶだけ）。日付は横の動きがこれ以上のときだけ動かす（ダブルクリックのぶれで動かさない。CR-027） */
 const DRAG_THRESHOLD = 3;
 
 /** ⑥⑦ に描く線：報告日線と、判定の付いた頂点（描く行の位置と x） */
@@ -235,6 +237,11 @@ function daysOf(dx: number, dayWidth: number): number {
   return days === 0 ? 0 : dx < 0 ? -days : days;
 }
 
+/** バーを動かす日数：横の動きが DRAG_THRESHOLD に満たなければ 0（縦のぶれ・小さなぶれでは動かさない） */
+function barDays(dx: number, dayWidth: number): number {
+  return Math.abs(dx) < DRAG_THRESHOLD ? 0 : daysOf(dx, dayWidth);
+}
+
 function selectHow(event: ReactMouseEvent): SelectHow {
   return event.shiftKey ? "range" : event.ctrlKey || event.metaKey ? "toggle" : "only";
 }
@@ -249,6 +256,7 @@ export default function GanttChart({
   viewportHeight = 480,
   outline,
   edit,
+  onOpenActivity,
 }: GanttChartProps) {
   const [scrollTop, setScrollTop] = useState(0);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -366,7 +374,7 @@ export default function GanttChart({
         const p = svgPoint(event);
         update({
           ...d,
-          days: daysOf(dx, dayWidth),
+          days: barDays(dx, dayWidth),
           moved: d.moved || Math.abs(dx) >= DRAG_THRESHOLD || Math.abs(dy) >= DRAG_THRESHOLD,
           linking: isLinking(d.how, d.fromY, p.y),
           toX: p.x,
@@ -387,8 +395,8 @@ export default function GanttChart({
       const p = svgPoint(event);
       if (d.kind === "bar" && !isLinking(d.how, d.fromY, p.y)) {
         const dx = event.clientX - d.originX;
-        const days = daysOf(dx, dayWidth);
-        if ((d.moved || Math.abs(dx) >= DRAG_THRESHOLD) && days !== 0) {
+        const days = barDays(dx, dayWidth);
+        if (days !== 0) {
           current.onBarDrop(d.activityId, d.how, days);
         }
         return;
@@ -522,7 +530,8 @@ export default function GanttChart({
     if (choose !== "only" || !edit.selected.has(key) || edit.selected.size !== 1) {
       edit.onSelectRow(key, choose);
     }
-    if (choose === "only") {
+    // ダブルクリックの 2 回目の押下ではドラッグを始めない（詳細と進捗を開く操作。CR-027）
+    if (choose === "only" && event.detail < 2) {
       const from = pointIn(svgRef.current, event.clientX, event.clientY);
       startDrag({
         kind: "bar",
@@ -609,7 +618,15 @@ export default function GanttChart({
     startDrag({ kind: "link", activityId, fromX, fromY, toX: fromX, toY: fromY });
   }
 
-  function bar(row: GanttRow, position: number, b: GanttBar, kind: "baseline" | "planned" | "actual") {
+  // バーのダブルクリックで詳細と進捗を開く。編集ではクリックで行を選ぶ（日付を動かす掴みはこの上に重ねる）
+  function barEvents(row: GanttRow, key: string) {
+    return {
+      onMouseDown: edit === undefined ? undefined : (e: ReactMouseEvent) => onRowMouseDown(key, e),
+      onDoubleClick: onOpenActivity === undefined ? undefined : () => onOpenActivity(row.activity_id),
+    };
+  }
+
+  function bar(row: GanttRow, key: string, position: number, b: GanttBar, kind: "baseline" | "planned" | "actual") {
     const x1 = x(b.start);
     const x2 = x(b.end);
     const y = rowTop(position);
@@ -629,6 +646,7 @@ export default function GanttChart({
           fill={fill}
           stroke={critical ? CRITICAL_COLOR : "#424242"}
           strokeWidth={critical ? 2 : 1}
+          {...barEvents(row, key)}
         >
           <title>{barTitle(`${row.name} ${label}`, b)}</title>
         </polygon>
@@ -654,6 +672,7 @@ export default function GanttChart({
         fill={geometry.fill}
         stroke={critical ? CRITICAL_COLOR : "none"}
         strokeWidth={critical ? 2 : 0}
+        {...barEvents(row, key)}
       >
         <title>{barTitle(`${row.name} ${label}`, b)}</title>
       </rect>
@@ -818,19 +837,19 @@ export default function GanttChart({
         )}
 
         {/* ② ベースラインのバー（細い灰色） */}
-        <g data-layer="baseline" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
-          {visibleActivities.map(({ row, position }) => row.baseline && bar(row, position, row.baseline, "baseline"))}
+        <g data-layer="baseline" clipPath={plotClip}>
+          {visibleActivities.map(({ row, key, position }) => row.baseline && bar(row, key, position, row.baseline, "baseline"))}
         </g>
 
         {/* ③ 予定のバー（クリティカルは赤い枠。マイルストーンは菱形）と要素の行の要約のバー */}
-        <g data-layer="planned" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
-          {visibleActivities.map(({ row, position }) => row.planned && bar(row, position, row.planned, "planned"))}
+        <g data-layer="planned" clipPath={plotClip}>
+          {visibleActivities.map(({ row, key, position }) => row.planned && bar(row, key, position, row.planned, "planned"))}
           {visibleElements.map(({ r, position }) => summaryBar(r, position))}
         </g>
 
         {/* ④ 実績のバー（未完了なら報告日まで） */}
-        <g data-layer="actual" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
-          {visibleActivities.map(({ row, position }) => row.actual && bar(row, position, row.actual, "actual"))}
+        <g data-layer="actual" clipPath={plotClip}>
+          {visibleActivities.map(({ row, key, position }) => row.actual && bar(row, key, position, row.actual, "actual"))}
         </g>
 
         {/* バーの上の担当者名と進捗率（SCH-13） */}
@@ -1053,6 +1072,7 @@ export default function GanttChart({
                       fill="transparent"
                       style={{ cursor: "grab" }}
                       onMouseDown={(e) => onBarMouseDown(row, key, "move", e)}
+                      onDoubleClick={onOpenActivity === undefined ? undefined : () => onOpenActivity(row.activity_id)}
                     >
                       <title>{`${row.name}：横へドラッグで日付を動かす。別の行へドラッグで依存をつなぐ`}</title>
                     </rect>
@@ -1071,6 +1091,7 @@ export default function GanttChart({
                       fill="transparent"
                       style={{ cursor: "grab" }}
                       onMouseDown={(e) => onBarMouseDown(row, key, "move", e)}
+                      onDoubleClick={onOpenActivity === undefined ? undefined : () => onOpenActivity(row.activity_id)}
                     >
                       <title>{`${row.name}：横へドラッグで開始を動かす。別の行へドラッグで依存をつなぐ`}</title>
                     </rect>
@@ -1084,6 +1105,7 @@ export default function GanttChart({
                       fill="transparent"
                       style={{ cursor: "ew-resize" }}
                       onMouseDown={(e) => onBarMouseDown(row, key, "resize", e)}
+                      onDoubleClick={onOpenActivity === undefined ? undefined : () => onOpenActivity(row.activity_id)}
                     >
                       <title>{`${row.name}：ドラッグで終わりを動かす`}</title>
                     </rect>
@@ -1128,10 +1150,7 @@ export default function GanttChart({
             const chosen = edit?.selected.has(r.key) ?? false;
             const isCursor = edit?.cursor === r.key;
             const isSource = r.kind === "activity" && picking === r.row.activity_id;
-            const common = {
-              onMouseDown: (e: ReactMouseEvent) => onRowMouseDown(r.key, e),
-              onDoubleClick: edit === undefined ? undefined : () => edit.onStartRename(r.key),
-            };
+            const onMouseDown = (e: ReactMouseEvent) => onRowMouseDown(r.key, e);
             const background = (
               <rect
                 x={0}
@@ -1144,7 +1163,14 @@ export default function GanttChart({
             );
             if (r.kind === "element") {
               return (
-                <g key={r.key} data-element-id={r.element.id} data-row-key={r.key} {...common}>
+                // 要素の行のダブルクリックは名前を変える（活動の行は詳細と進捗を開く。CR-027）
+                <g
+                  key={r.key}
+                  data-element-id={r.element.id}
+                  data-row-key={r.key}
+                  onMouseDown={onMouseDown}
+                  onDoubleClick={edit === undefined ? undefined : () => edit.onStartRename(r.key)}
+                >
                   {background}
                   <text
                     x={labelX(r.depth, indent)}
@@ -1166,7 +1192,8 @@ export default function GanttChart({
                 data-activity-id={row.activity_id}
                 data-row-key={r.key}
                 data-picking={isSource ? "source" : undefined}
-                {...common}
+                onMouseDown={onMouseDown}
+                onDoubleClick={onOpenActivity === undefined ? undefined : () => onOpenActivity(row.activity_id)}
               >
                 {background}
                 <text
