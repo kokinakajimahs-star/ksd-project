@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # バックアップから戻せることを確かめる訓練（設計書 8 NFR-06。手順書は deploy/README.md の 6.4。A-51）。利用者が流す：
 #
-#   bash deploy/restore-drill.sh [clone|restore-backup|check|cleanup|status]
+#   bash deploy/restore-drill.sh [clone|restore-backup|check|cleanup|status|wait]
 #
 #   clone           本番のインスタンスを、ある時刻の状態で訓練用のインスタンスへ複製する（ポイントインタイムリカバリ。README 6.3）
 #                   時刻の既定は 10 分前（DRILL_POINT_IN_TIME で UTC の時刻を渡せる）
@@ -10,6 +10,8 @@
 #                   CSV の書き出し（gcloud sql export csv）で読むので、DB へつながない・パスワードを使わない
 #   cleanup         訓練用のインスタンスと書き出しの置き場を消す
 #   status          訓練用のインスタンスの状態と、続いている操作を出す
+#   wait <操作の ID>  Cloud SQL の操作の終わりを上限なしで待ち、掛かった時間を出す（clone・restore-backup は自分で待つ。
+#                   gcloud の待ちが途中で打ち切られたときに使う）
 #
 # 本番のインスタンスへは、複製の元・バックアップの元・読む（check）としてしか触れない。書き込む先の名前は -drill を含むものに限る。
 # 本番のデータは変えないが、複製と CSV の書き出しは本番のインスタンスの操作として走る（同時に 1 つ。その間の deploy.sh apply は待たされるか失敗する）。
@@ -89,16 +91,26 @@ cmd_status() {
   fi
 }
 
+# Cloud SQL の操作の終わりを待ち、状態と掛かった時間（操作の記録の開始・終了の時刻）を出す。
+# gcloud の既定の待ちは 10 分ほどで打ち切られ（操作は続く）、複製はそれより長く掛かることがあるので、上限なしで待つ
+cmd_wait() {
+  local op=$1
+  [ -n "$op" ] || die "待つ操作の ID を渡す（例：bash deploy/restore-drill.sh wait <操作の ID>）"
+  echo "操作 $op の終わりを待つ（status で途中の状態を見られる）"
+  gcloud sql operations wait "$op" --project "$PROJECT_ID" --timeout=unlimited >/dev/null
+  gcloud sql operations describe "$op" --project "$PROJECT_ID" \
+    --format='table(operationType,status,startTime,endTime,error.errors[0].code)'
+}
+
 cmd_clone() {
-  local point
+  local point op
   point="${DRILL_POINT_IN_TIME:-$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%S.000Z)}"
   instance_exists "$DRILL_INSTANCE" && die "$DRILL_INSTANCE が既にある（cleanup で消してから流す）"
   step "$SOURCE_INSTANCE を $point（UTC）の状態で $DRILL_INSTANCE へ複製する（10〜20 分ほど掛かる）"
-  local started ended
-  started=$(date +%s)
-  gcloud sql instances clone "$SOURCE_INSTANCE" "$DRILL_INSTANCE" --point-in-time="$point" --project "$PROJECT_ID"
-  ended=$(date +%s)
-  echo "複製に掛かった時間：$((ended - started)) 秒（複製した時刻 $point）"
+  op=$(gcloud sql instances clone "$SOURCE_INSTANCE" "$DRILL_INSTANCE" --point-in-time="$point" \
+    --project "$PROJECT_ID" --async --format='value(name)')
+  cmd_wait "$op"
+  echo "複製した時刻：$point（掛かった時間は上の startTime〜endTime）"
   cmd_status
 }
 
@@ -111,16 +123,15 @@ cmd_restore_backup() {
   backup_end=$(gcloud sql backups describe "$backup_id" --instance "$SOURCE_INSTANCE" --project "$PROJECT_ID" \
     --format='value(endTime)')
   step "$SOURCE_INSTANCE のバックアップ $backup_id（$backup_end に取得）を $DRILL_INSTANCE へ戻す（訓練用の中身は置き換わる）"
-  local started ended
-  started=$(date +%s)
-  gcloud sql backups restore "$backup_id" --backup-instance="$SOURCE_INSTANCE" \
-    --restore-instance="$DRILL_INSTANCE" --project "$PROJECT_ID" --quiet
-  ended=$(date +%s)
-  echo "戻すのに掛かった時間：$((ended - started)) 秒"
+  local op
+  op=$(gcloud sql backups restore "$backup_id" --backup-instance="$SOURCE_INSTANCE" \
+    --restore-instance="$DRILL_INSTANCE" --project "$PROJECT_ID" --quiet --async --format='value(name)')
+  cmd_wait "$op"
+  echo "戻したバックアップ：$backup_id（$backup_end に取得。掛かった時間は上の startTime〜endTime）"
   cmd_status
 }
 
-# 書き出しの置き場を用意し、そのインスタンスの身元に読み書きを許す（README 6.3 と同じ置き場）
+# 書き出しの置き場（訓練だけのもの）を用意し、そのインスタンスの身元に読み書きを許す
 prepare_bucket() {
   local instance=$1 sql_sa
   if ! gcloud storage buckets describe "$BUCKET" --project "$PROJECT_ID" --format='value(name)' >/dev/null 2>&1; then
@@ -171,6 +182,10 @@ main() {
       ;;
     cleanup) cmd_cleanup ;;
     status) cmd_status ;;
+    wait)
+      shift
+      cmd_wait "${1:-}"
+      ;;
     -h | --help | help | "") usage ;;
     *)
       usage >&2
