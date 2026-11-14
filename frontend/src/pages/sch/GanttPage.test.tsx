@@ -8,7 +8,10 @@ import type { Gantt } from "../../api/sch";
 import { DAY_WIDTH, LABEL_WIDTH } from "../../components/gantt/scale";
 import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../test/mockApi";
+import { makeProgressEntry } from "../../test/prgFixtures";
 import {
+  activityList,
+  makeActivity,
   makeBar,
   makeGantt,
   makeGanttRow,
@@ -177,6 +180,12 @@ function layer(container: HTMLElement, name: string): Element {
   return element;
 }
 
+/** 行き先の並びの「表示の設定」を開く（CR-027） */
+function openSettings(): HTMLElement {
+  fireEvent.click(within(screen.getByRole("navigation", { name: "行き先" })).getByRole("button", { name: "表示の設定" }));
+  return screen.getByRole("dialog", { name: "表示の設定" });
+}
+
 async function chart(container: HTMLElement) {
   await screen.findByRole("img", { name: "ガントチャート" });
   await waitFor(() => expect(layer(container, "lightning").querySelectorAll("circle")).toHaveLength(5));
@@ -312,6 +321,7 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     const height = svg().getAttribute("height");
     expect(height).toBe(String(32 + 5 * 28));
     expect(svg()).toHaveAttribute("width", String(LABEL_WIDTH + 21 * DAY_WIDTH.day));
+    openSettings();
     fireEvent.change(screen.getByLabelText("表示の単位"), { target: { value: "week" } });
     expect(svg()).toHaveAttribute("width", String(LABEL_WIDTH + 21 * DAY_WIDTH.week));
     fireEvent.change(screen.getByLabelText("表示の単位"), { target: { value: "month" } });
@@ -326,6 +336,7 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     await chart(container);
     expect(sent(calls, "GET", `${BASE}/gantt`)[0]!.url).toBe(`${BASE}/gantt`);
 
+    openSettings();
     fireEvent.change(screen.getByLabelText("比べる基準"), { target: { value: "61" } });
 
     await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(2));
@@ -339,6 +350,7 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     expect(layer(container, "past-lines").children).toHaveLength(0);
 
     // OPEN の報告日は選べない
+    openSettings();
     const fieldset = screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" });
     expect(within(fieldset).getAllByRole("checkbox")).toHaveLength(1);
     fireEvent.click(within(fieldset).getByLabelText("2026-12-03"));
@@ -385,6 +397,7 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     await chart(container);
     expect(screen.getByText("今の計画に無い活動の頂点 2 件は描いていない")).toBeInTheDocument();
 
+    openSettings();
     fireEvent.click(
       within(screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).getByLabelText("2026-12-03"),
     );
@@ -412,12 +425,15 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     );
     const { container } = renderAt();
     await chart(container);
-
-    fireEvent.click(screen.getByRole("button", { name: "日程を計算し直す" }));
-
-    expect(await screen.findByRole("status")).toHaveTextContent("プロジェクトの終了日 2026-12-21");
-    expect(screen.getByRole("status")).toHaveTextContent("クリティカルな活動 2 件");
+    // 編集できる人は開いたときから編集するので、バーの終わりの後ろへ広げた範囲で 1 回読み直す（7.3。CR-027）
     await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(2));
+
+    const dialog = openSettings();
+    fireEvent.click(within(dialog).getByRole("button", { name: "日程を計算し直す" }));
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("プロジェクトの終了日 2026-12-21");
+    expect(within(dialog).getByRole("status")).toHaveTextContent("クリティカルな活動 2 件");
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(3));
     expect(sent(calls, "GET", `${BASE}/status-reports/41/lightning-line`)).toHaveLength(2);
   });
 
@@ -425,7 +441,7 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     mockApi(routes(meWith(["project.view"])));
     const { container } = renderAt();
     await chart(container);
-    expect(screen.queryByRole("button", { name: "日程を計算し直す" })).toBeNull();
+    expect(within(openSettings()).queryByRole("button", { name: "日程を計算し直す" })).toBeNull();
   });
 
   it("循環があれば再計算の 422 の理由を出す", async () => {
@@ -437,9 +453,10 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     const { container } = renderAt();
     await chart(container);
 
-    fireEvent.click(screen.getByRole("button", { name: "日程を計算し直す" }));
+    const dialog = openSettings();
+    fireEvent.click(within(dialog).getByRole("button", { name: "日程を計算し直す" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("依存が循環しています");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("依存が循環しています");
   });
 
   it("活動 2,000 件でも見えている行だけを描く（7.3・NFR-02）", async () => {
@@ -585,13 +602,15 @@ describe("UI-SCH-002 ガントから報告日を作る（7.2。API-PRG-001）", 
     );
     renderAt();
     await screen.findByRole("img", { name: "ガントチャート" });
-    const form = await screen.findByRole("form", { name: "報告日を作る" });
+    expect(screen.queryByRole("form", { name: "報告日を作る" })).toBeNull();
+    const dialog = openSettings();
+    const form = within(dialog).getByRole("form", { name: "報告日を作る" });
     expect(screen.queryByRole("link", { name: "進捗入力" })).toBeNull();
 
     fireEvent.change(within(form).getByLabelText("新しい報告日"), { target: { value: "2026-12-17" } });
     fireEvent.click(within(form).getByRole("button", { name: "報告日を作る" }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent("報告日 2026-12-17 を作った");
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("報告日 2026-12-17 を作って選んだ");
     expect(sent(calls, "POST", `${BASE}/status-reports`)[0]!.body).toEqual({ report_date: "2026-12-17" });
     const select = screen.getByLabelText("報告日");
     expect(select).toHaveValue("42");
@@ -614,7 +633,7 @@ describe("UI-SCH-002 ガントから報告日を作る（7.2。API-PRG-001）", 
     );
     const { container } = renderAt();
     await chart(container);
-    const form = screen.getByRole("form", { name: "報告日を作る" });
+    const form = within(openSettings()).getByRole("form", { name: "報告日を作る" });
 
     fireEvent.change(within(form).getByLabelText("新しい報告日"), { target: { value: "2026-12-10" } });
     fireEvent.click(within(form).getByRole("button", { name: "報告日を作る" }));
@@ -631,8 +650,9 @@ describe("UI-SCH-002 ガントから報告日を作る（7.2。API-PRG-001）", 
     mockApi(routes(meWith(["project.view", "schedule.edit", "progress.enter_all"])));
     const { container } = renderAt();
     await chart(container);
-    expect(screen.getByRole("button", { name: "日程を計算し直す" })).toBeInTheDocument();
-    expect(screen.queryByRole("form", { name: "報告日を作る" })).toBeNull();
+    const dialog = openSettings();
+    expect(within(dialog).getByRole("button", { name: "日程を計算し直す" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("form", { name: "報告日を作る" })).toBeNull();
   });
 });
 
@@ -704,6 +724,7 @@ describe("UI-SCH-002 非稼働日を表示範囲で受け取る（7.3・API-SCH-
     await chart(container);
 
     // 確定済みの過去の線（12/03）も範囲の中
+    openSettings();
     fireEvent.click(within(screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).getByLabelText("2026-12-03"));
     await waitFor(() => expect(layer(container, "past-lines").children).toHaveLength(1));
 
@@ -738,6 +759,7 @@ describe("UI-SCH-002 非稼働日を表示範囲で受け取る（7.3・API-SCH-
     await chart(container);
     expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(1);
 
+    openSettings();
     const fieldset = screen.getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" });
     fireEvent.click(within(fieldset).getByLabelText("2026-12-03"));
     await waitFor(() => expect(bandDates(container)).toEqual(["2026-11-28", "2026-11-29", "2026-12-05", "2026-12-06"]));
@@ -757,5 +779,219 @@ describe("UI-SCH-002 非稼働日を表示範囲で受け取る（7.3・API-SCH-
     expect(sent(calls, "GET", `${BASE}/gantt`)[2]!.url).toBe(
       `${BASE}/gantt?baseline_id=61&range_start=2026-11-25&range_end=2026-12-21`,
     );
+  });
+});
+
+describe("UI-SCH-002 表示の設定と活動の詳細と進捗（7.3。CR-027）", () => {
+  const ACTIVITY_21 = makeActivity({
+    id: 21,
+    name: "資料作成",
+    requested_start: "2026-12-01",
+    duration_days: 15,
+    start_date: "2026-12-01",
+    finish_date: "2026-12-21",
+    successor_ids: [22],
+    assignees: [{ user_id: 5, display_name: "計画 太郎", planned_hours: 30 }],
+  });
+  const ACTIVITY_22 = makeActivity({ id: 22, name: "関係者調整", predecessor_ids: [21], is_critical: false, total_float: 2 });
+  const ACTIVITIES = { [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList([ACTIVITY_21, ACTIVITY_22])) };
+
+  function rowLabel(container: HTMLElement, activityId: number): Element {
+    return container.querySelector(`[data-layer="row-labels"] [data-activity-id="${activityId}"]`)!;
+  }
+
+  beforeEach(() => {
+    setAuthToken("t-pm");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setAuthToken(null);
+  });
+
+  it("表示の設定は行き先の並びのボタンで開くダイアログに置き、図の上には今の設定を 1 行で示す。Esc で閉じてボタンへ的を戻す", async () => {
+    mockApi(routes(meWith(["project.view"])));
+    const { container } = renderAt();
+    await chart(container);
+    // 図の上に選ぶ欄を置かない
+    expect(screen.queryByLabelText("表示の単位")).toBeNull();
+    expect(screen.queryByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).toBeNull();
+    const summary = container.querySelector("p.gantt-legend")!;
+    expect(summary).toHaveTextContent(/^単位：日／基準の版はまだ無い／報告日：2026-12-10（許容幅 0.5 日）$/);
+
+    const button = within(screen.getByRole("navigation", { name: "行き先" })).getByRole("button", { name: "表示の設定" });
+    button.focus();
+    const dialog = openSettings();
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(within(dialog).getByLabelText("表示の単位")).toHaveFocus();
+    fireEvent.change(within(dialog).getByLabelText("表示の単位"), { target: { value: "week" } });
+    fireEvent.click(within(within(dialog).getByRole("group", { name: "重ねる過去の線（確定済みの報告日）" })).getByLabelText("2026-12-03"));
+    // 選ぶとその場で図に効く
+    await waitFor(() => expect(layer(container, "past-lines").children).toHaveLength(1));
+    expect(summary).toHaveTextContent(/^単位：週／基準の版はまだ無い／報告日：2026-12-10（許容幅 0.5 日）／過去の線 1 本$/);
+
+    fireEvent.keyDown(within(dialog).getByLabelText("表示の単位"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(button).toHaveFocus();
+  });
+
+  it("閲覧だけの人も活動の行の見出しのダブルクリックで詳細と進捗を開け、値だけを出す（活動は API-SCH-001 から読む）", async () => {
+    const { calls } = mockApi(routes(meWith(["project.view"]), ACTIVITIES));
+    const { container } = renderAt();
+    await chart(container);
+    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(0);
+
+    fireEvent.doubleClick(rowLabel(container, 21));
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" });
+    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
+    expect(within(dialog).queryAllByRole("textbox")).toHaveLength(0);
+    expect(within(dialog).queryByRole("button", { name: /保存/ })).toBeNull();
+    expect(within(dialog).getByText("2026-12-01〜2026-12-21")).toBeInTheDocument();
+    expect(within(dialog).getByText("0 日（クリティカル）")).toBeInTheDocument();
+    expect(within(dialog).getByText("1.1 関係者調整")).toBeInTheDocument();
+    expect(within(dialog).getByText("15 稼働日")).toBeInTheDocument();
+    expect(within(dialog).getByText("計画 太郎（30 人時）")).toBeInTheDocument();
+    expect(within(dialog).getByText("40 人時")).toBeInTheDocument();
+    // 進捗：未確定の報告日でも、書く権限が無ければ値だけ
+    expect(within(dialog).getByRole("heading", { name: "進捗（報告日 2026-12-10）" })).toBeInTheDocument();
+    expect(within(dialog).getByText("25%")).toBeInTheDocument();
+    expect(within(dialog).getByText("この活動の進捗を書く権限が無い")).toBeInTheDocument();
+    // メンバーは読まない（担当を書けない人）
+    expect(sent(calls, "GET", `${BASE}/members`)).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "閉じる" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("progress.enter_own で担当の人は、予定のバーのダブルクリックで開いたダイアログで進捗を書け、保存してもダイアログを開いたまま読み直す", async () => {
+    const { calls } = mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        ...ACTIVITIES,
+        [`PUT ${BASE}/status-reports/41/progress/21`]: () => jsonResponse(200, makeProgressEntry({ percent_complete: 40 })),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+
+    fireEvent.doubleClick(layer(container, "planned").querySelector('[data-activity-id="21"]')!);
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" });
+    const form = within(dialog).getByRole("form", { name: "進捗の入力" });
+    // 算定方式は schedule.edit を持つ人だけ
+    expect(within(dialog).queryByRole("form", { name: "算定方式" })).toBeNull();
+    fireEvent.change(within(form).getByLabelText("進捗率（%）"), { target: { value: "40" } });
+    fireEvent.click(within(form).getByRole("button", { name: "進捗を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/status-reports/41/progress/21`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/status-reports/41/progress/21`)[0]!.body).toMatchObject({ percent_complete: 40 });
+    expect(await within(dialog).findByText(/^「資料作成」の進捗を保存した/)).toBeInTheDocument();
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/status-reports/41/lightning-line`)).toHaveLength(2));
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`)).toHaveLength(2));
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(2));
+    expect(screen.getByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" })).toBeInTheDocument();
+  });
+
+  it("判定の一覧の活動の名前からも開け、Esc で閉じて名前へ的を戻す。担当でない活動・確定済みの報告日には値だけを出す", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_own"]), {
+        ...ACTIVITIES,
+        [`GET ${BASE}/status-reports/40/lightning-line`]: () =>
+          jsonResponse(200, makeLightningLine(LIGHTNING.rows, { report: REPORTS[0]! })),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+
+    const name = within(screen.getByRole("table", { name: "判定の一覧" })).getByRole("button", { name: "関係者調整" });
+    name.focus();
+    fireEvent.click(name);
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 関係者調整" });
+    expect(within(dialog).queryByRole("form", { name: "進捗の入力" })).toBeNull();
+    expect(within(dialog).getByText("この活動の進捗を書く権限が無い")).toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(name).toHaveFocus();
+
+    // 確定済みの報告日では、担当の活動でも値だけ
+    const settings = openSettings();
+    fireEvent.change(within(settings).getByLabelText("報告日"), { target: { value: "40" } });
+    fireEvent.click(within(settings).getByRole("button", { name: "閉じる" }));
+    await waitFor(() => expect(container.querySelector("p.gantt-legend")).toHaveTextContent("報告日：2026-12-03（確定）"));
+    fireEvent.doubleClick(rowLabel(container, 21));
+    const finalized = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" });
+    expect(within(finalized).getByRole("heading", { name: "進捗（報告日 2026-12-03・確定済み）" })).toBeInTheDocument();
+    expect(within(finalized).queryByRole("form", { name: "進捗の入力" })).toBeNull();
+    expect(within(finalized).getByText("確定済みの報告日なので値だけを出す")).toBeInTheDocument();
+  });
+
+  it("算定方式だけを書ける人（schedule.edit で担当でない）には、進捗の値を出したうえで算定方式のフォームを出す", async () => {
+    mockApi(
+      routes(meWith(["project.view", "schedule.edit", "progress.enter_own"]), {
+        ...ACTIVITIES,
+        [`GET ${BASE}/members`]: () => jsonResponse(200, { project_id: 3, items: [], total: 0, limit: 1000, offset: 0 }),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+
+    fireEvent.doubleClick(rowLabel(container, 22));
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 関係者調整" });
+    expect(within(dialog).getByText("60%")).toBeInTheDocument();
+    expect(within(dialog).getByRole("form", { name: "算定方式" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("form", { name: "進捗の入力" })).toBeNull();
+    expect(within(dialog).getByText("この活動の進捗の値を書く権限が無い（算定方式は変えられる）")).toBeInTheDocument();
+  });
+
+  it("確定したかは読み直したイナズマ線の報告日で見る（画面を開いた後に確定されたら、書く欄を出さない）", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_all"]), {
+        ...ACTIVITIES,
+        [`GET ${BASE}/status-reports/41/lightning-line`]: () =>
+          jsonResponse(200, makeLightningLine(LIGHTNING.rows, { report: { ...REPORTS[1]!, status: "FINALIZED" } })),
+      }),
+    );
+    const { container } = renderAt();
+    await chart(container);
+
+    fireEvent.doubleClick(rowLabel(container, 21));
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" });
+    expect(within(dialog).getByRole("heading", { name: "進捗（報告日 2026-12-10・確定済み）" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("form", { name: "進捗の入力" })).toBeNull();
+    expect(within(dialog).getByText("確定済みの報告日なので値だけを出す")).toBeInTheDocument();
+  });
+
+  it("イナズマ線を読めなければ、進捗の欄に読み込み中を出し続けずにその旨を示す", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_all"]), {
+        ...ACTIVITIES,
+        [`GET ${BASE}/status-reports/41/lightning-line`]: () => errorResponse(500, "INTERNAL", "失敗"),
+      }),
+    );
+    const { container } = renderAt();
+    await screen.findByRole("img", { name: "ガントチャート" });
+    await screen.findByText("失敗");
+
+    fireEvent.doubleClick(rowLabel(container, 21));
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 資料作成" });
+    expect(
+      await within(dialog).findByText("この報告日のイナズマ線を読めないので、進捗を出せない。画面を開き直してください"),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText("読み込み中…")).toBeNull();
+  });
+
+  it("報告日を選んでいなければ、進捗の欄に表示の設定で選ぶよう示す", async () => {
+    mockApi(
+      routes(meWith(["project.view", "progress.enter_all"]), {
+        ...ACTIVITIES,
+        [`GET ${BASE}/status-reports`]: () => jsonResponse(200, { items: [], total: 0, limit: 1000, offset: 0 }),
+      }),
+    );
+    const { container } = renderAt();
+    await screen.findByRole("img", { name: "ガントチャート" });
+    expect(container.querySelector("p.gantt-legend")).toHaveTextContent("報告日：選んでいない");
+
+    fireEvent.doubleClick(rowLabel(container, 22));
+    const dialog = await screen.findByRole("dialog", { name: "活動の詳細と進捗：1.1 関係者調整" });
+    expect(within(dialog).getByText("報告日を選んでいない。表示の設定で報告日を選ぶ（作る）と、ここで進捗を書ける")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("form", { name: "進捗の入力" })).toBeNull();
   });
 });

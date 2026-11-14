@@ -3,10 +3,11 @@
 // 確定済みの過去の線（API-PRG-008）を重ねる。比べる基準は版の一覧（API-SCH-012）から選ぶ（既定は最新の版）。
 // 非稼働日はサーバから受け取る：描く範囲（バーの範囲を報告日線・頂点・過去の線で広げたもの）が受け取った範囲に収まらなければ、
 // 描く範囲を range_start・range_end に渡して読み直す（7.3）。
-// 日程の再計算（API-SCH-008）のボタンは schedule.edit、報告日を作る部品（API-PRG-001。報告日が無くても出す）は
-// status_report.manage を持つ人にだけ出す（7.2。サーバでも必ず判定する）。
-// WBS の木（API-WBS-001）から要素の行を差し込み（7.3。読めなければ活動の行だけ）、schedule.edit か wbs.edit を持つ人は
-// 「編集する」で行・日付・依存をこの画面の図の上で変えられる（7.3 の「編集」。CR-024・CR-025）
+// 表示の単位・基準・報告日・過去の線・報告日を作る・日程の再計算は「表示の設定」のダイアログに置き、図の上には今の設定を
+// 1 行で示す（7.3。CR-027）。WBS の木（API-WBS-001）から要素の行を差し込み（7.3。読めなければ活動の行だけ）、
+// schedule.edit か wbs.edit を持つ人は開いたときから行・日付・依存をこの画面の図の上で変えられる（7.3 の「編集」。
+// CR-024・CR-025・CR-027）。活動の行・バーのダブルクリック（編集できる人はメニューでも）と判定の一覧の活動の名前から、
+// 活動の詳細と進捗のダイアログを開く（CR-027）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -22,14 +23,7 @@ import {
   type OverlaidLine,
   type StatusReport,
 } from "../../api/prg";
-import {
-  calculateSchedule,
-  getGantt,
-  listScheduleBaselines,
-  type Gantt,
-  type ScheduleBaseline,
-  type ScheduleResult,
-} from "../../api/sch";
+import { getGantt, listScheduleBaselines, type Gantt, type ScheduleBaseline } from "../../api/sch";
 import { getWbsTree, type WbsTree } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import GanttChart from "../../components/gantt/GanttChart";
@@ -46,13 +40,13 @@ import {
   type DateRange,
   type GanttUnit,
 } from "../../components/gantt/scale";
-import CreateReportForm from "../prg/CreateReportForm";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
+import ActivityDetailDialog from "./gantt/ActivityDetailDialog";
 import { GanttEditBar } from "./gantt/GanttEditBar";
+import GanttSettingsDialog from "./gantt/GanttSettingsDialog";
 import { useGanttEditor } from "./gantt/useGanttEditor";
 import { LIST_LIMIT_MAX } from "./limits";
 
-const UNITS: GanttUnit[] = ["day", "week", "month"];
 const JUDGEMENTS: Judgement[] = ["BEHIND", "ON_SCHEDULE", "AHEAD", "COMPLETED", "NOT_STARTED", "NOT_COMPUTED"];
 
 /** 既定で開く報告日：報告日の最も新しいもの。無ければ null */
@@ -91,6 +85,7 @@ export default function GanttPage() {
   const [baselineId, setBaselineId] = useState<number | null>(null);
   const [reportId, setReportId] = useState<number | null>(null);
   const [lightning, setLightning] = useState<LightningLine | null>(null);
+  const [lightningFailed, setLightningFailed] = useState(false);
   const [pastReportIds, setPastReportIds] = useState<number[]>([]);
   const [pastLines, setPastLines] = useState<OverlaidLine[]>([]);
   const [unit, setUnit] = useState<GanttUnit>("day");
@@ -99,13 +94,12 @@ export default function GanttPage() {
   const [error, setError] = useState<ErrorView | null>(null);
   /** ガントの描画データ（API-SCH-010）を読めなかった（読み込み中の表示を消す。他の API の誤りでは消さない） */
   const [ganttFailed, setGanttFailed] = useState(false);
-  const [calculating, setCalculating] = useState(false);
-  const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
-  const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
   /** WBS の木（要素の行に使う）。読めなければ null（要素の行を出さない） */
   const [tree, setTree] = useState<WbsTree | null>(null);
   const [treeFailed, setTreeFailed] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 開いている詳細と進捗のダイアログの活動。fromMenu は右クリックのメニューから開いた（閉じたら入力の的を図へ戻す） */
+  const [detail, setDetail] = useState<{ activityId: number; fromMenu: boolean } | null>(null);
   /** ガント・WBS の木を読み終えた reloadKey（読めなかったときも。保存の後の読み直しが終わるまで編集の操作を受けない） */
   const [ganttKey, setGanttKey] = useState<number | null>(null);
   const [treeKey, setTreeKey] = useState<number | null>(null);
@@ -175,6 +169,7 @@ export default function GanttPage() {
       return;
     }
     let cancelled = false;
+    setLightningFailed(false);
     getLightningLine(projectId, reportId).then(
       (result) => {
         if (!cancelled) {
@@ -184,6 +179,7 @@ export default function GanttPage() {
       (e: unknown) => {
         if (!cancelled) {
           setLightning(null);
+          setLightningFailed(true);
           setError(toErrorView(e));
         }
       },
@@ -246,6 +242,11 @@ export default function GanttPage() {
     };
   }, [projectId, reloadKey]);
 
+  // 編集できる人は開いたときから図の上で編集する（「編集」への切り替えは無い。7.3。CR-027）
+  const canEditSchedule = me !== null && projectId !== null && hasProjectPermission(me, projectId, "schedule.edit");
+  const canEditWbs = me !== null && projectId !== null && hasProjectPermission(me, projectId, "wbs.edit");
+  const editing = canEditSchedule || canEditWbs;
+
   // 描く範囲を広げる日付（GanttChart と同じ関数。7.3）。編集するときはバーの終わりの後ろへ広げる
   const extraDates = useMemo(() => {
     if (gantt === null) {
@@ -277,8 +278,6 @@ export default function GanttPage() {
     () => (gantt === null || tree === null ? undefined : buildOutline(tree.elements, gantt.rows, editing)),
     [gantt, tree, editing],
   );
-  const canEditSchedule = me !== null && projectId !== null && hasProjectPermission(me, projectId, "schedule.edit");
-  const canEditWbs = me !== null && projectId !== null && hasProjectPermission(me, projectId, "wbs.edit");
   const editor = useGanttEditor({
     projectId: projectId ?? 0,
     enabled: editing && projectId !== null && tree !== null && gantt !== null,
@@ -290,9 +289,9 @@ export default function GanttPage() {
     reloadKey,
     pageSettled: ganttKey === reloadKey && treeKey === reloadKey,
     onChanged: () => setReloadKey((k) => k + 1),
+    onOpenDetail: (activityId) => setDetail({ activityId, fromMenu: true }),
   });
 
-  const finalized = useMemo(() => reports.filter((r) => r.status === "FINALIZED"), [reports]);
   const listedRows = useMemo(() => {
     if (lightning === null) {
       return [];
@@ -313,33 +312,47 @@ export default function GanttPage() {
   }
 
   const canManageReports = me !== null && hasProjectPermission(me, projectId, "status_report.manage");
-
-  async function handleCalculate() {
-    if (projectId === null) {
-      return;
-    }
-    setCalculating(true);
-    setError(null);
-    try {
-      setCalculated(await calculateSchedule(projectId));
-      setReloadKey((k) => k + 1);
-    } catch (e) {
-      setError(toErrorView(e));
-    } finally {
-      setCalculating(false);
-    }
-  }
+  const selectedReport = reports.find((r) => r.id === reportId) ?? null;
 
   // 作った報告日を一覧に足して選ぶ（行き先に進捗入力が出る。7.2）
   function handleReportCreated(created: StatusReport) {
     setReports((current) => withReport(current, created));
     setReportId(created.id);
-    setCreatedReport(created);
   }
 
   function togglePast(id: number, checked: boolean) {
     setPastReportIds((ids) => (checked ? [...ids, id].sort((a, b) => a - b) : ids.filter((x) => x !== id)));
   }
+
+  function openDetail(activityId: number) {
+    setDetail({ activityId, fromMenu: false });
+  }
+
+  function closeDetail() {
+    const fromMenu = detail?.fromMenu ?? false;
+    setDetail(null);
+    if (fromMenu) {
+      editor.focusChart();
+    }
+  }
+
+  // 図の上に示す今の設定（1 行。7.3。CR-027）
+  const settingsSummary = [
+    `単位：${UNIT_LABELS[unit]}`,
+    gantt === null
+      ? null
+      : gantt.baseline !== null
+        ? `基準：第 ${gantt.baseline.version} 版 ${gantt.baseline.name}`
+        : "基準の版はまだ無い",
+    lightning !== null
+      ? `報告日：${lightning.report.report_date}${lightning.report.status === "FINALIZED" ? "（確定）" : ""}（許容幅 ${lightning.tolerance_days} 日）`
+      : reportId === null
+        ? "報告日：選んでいない"
+        : null,
+    pastReportIds.length > 0 ? `過去の線 ${pastReportIds.length} 本` : null,
+  ]
+    .filter((part) => part !== null)
+    .join("／");
 
   return (
     <section data-screen-id="UI-SCH-002" className="gantt-page">
@@ -349,106 +362,27 @@ export default function GanttPage() {
         <Link to={`/projects/${projectId}/activities`}>タスクリスト</Link>
         <Link to={`/projects/${projectId}/baselines`}>ベースラインと差異</Link>
         {reportId !== null && <Link to={`/projects/${projectId}/status-reports/${reportId}`}>進捗入力</Link>}
+        <button type="button" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}>
+          表示の設定
+        </button>
       </nav>
       <ErrorAlert error={error} />
-
-      <div role="group" aria-label="表示の設定" className="gantt-controls">
-        <label>
-          表示の単位
-          <select value={unit} onChange={(e) => setUnit(e.target.value as GanttUnit)}>
-            {UNITS.map((u) => (
-              <option key={u} value={u}>
-                {UNIT_LABELS[u]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          比べる基準
-          <select
-            value={baselineId === null ? "" : String(baselineId)}
-            onChange={(e) => setBaselineId(e.target.value === "" ? null : Number(e.target.value))}
-          >
-            <option value="">最新の版（既定）</option>
-            {baselines.map((b) => (
-              <option key={b.id} value={b.id}>
-                {`第 ${b.version} 版 ${b.name}`}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          報告日
-          <select
-            value={reportId === null ? "" : String(reportId)}
-            onChange={(e) => setReportId(e.target.value === "" ? null : Number(e.target.value))}
-          >
-            <option value="">（イナズマ線を出さない）</option>
-            {reports.map((r) => (
-              <option key={r.id} value={r.id}>
-                {`${r.report_date}${r.status === "FINALIZED" ? "（確定）" : ""}`}
-              </option>
-            ))}
-          </select>
-        </label>
-        {canEditSchedule && (
-          <button type="button" onClick={() => void handleCalculate()} disabled={calculating}>
-            日程を計算し直す
-          </button>
-        )}
-        {(canEditSchedule || canEditWbs) && (
-          <button type="button" aria-pressed={editing} onClick={() => setEditing((e) => !e)}>
-            {editing ? "編集を終える" : "編集する"}
-          </button>
-        )}
-      </div>
-
-      {canManageReports && <CreateReportForm projectId={projectId} onCreated={handleReportCreated} />}
-      {createdReport !== null && (
-        <p role="status">報告日 {createdReport.report_date} を作った。進捗入力で進捗を入れる</p>
-      )}
-
-      {finalized.length > 0 && (
-        <fieldset className="past-lines">
-          <legend>重ねる過去の線（確定済みの報告日）</legend>
-          {finalized.map((r) => (
-            <label key={r.id}>
-              <input
-                type="checkbox"
-                checked={pastReportIds.includes(r.id)}
-                onChange={(e) => togglePast(r.id, e.target.checked)}
-              />
-              {r.report_date}
-            </label>
-          ))}
-        </fieldset>
-      )}
-
-      {calculated !== null && (
-        <p role="status">
-          日程を計算し直した。プロジェクトの終了日 {calculated.project_finish_date ?? "—"}・最小のフロート{" "}
-          {calculated.min_total_float ?? "—"} 日・クリティカルな活動 {calculated.critical_path.length} 件
-        </p>
-      )}
 
       {/* 描画データが届くまで図の場所が空にならないよう、読んでいることを示す */}
       {gantt === null && !ganttFailed && <p className="loading">読み込み中…</p>}
       {gantt !== null && (
         <>
           {gantt.restricted && <p className="note">自分の割当の活動だけを表示している</p>}
-          <p className="gantt-legend">
-            {gantt.baseline !== null ? `基準：第 ${gantt.baseline.version} 版 ${gantt.baseline.name}` : "基準の版はまだ無い"}
-            {lightning !== null && `／報告日：${lightning.report.report_date}（許容幅 ${lightning.tolerance_days} 日）`}
-          </p>
+          <p className="gantt-legend">{settingsSummary}</p>
           {editing && tree === null && (
             <p role={treeFailed ? "alert" : undefined} className={treeFailed ? undefined : "loading"}>
-              {treeFailed ? "WBS を読めないので編集できません。読み直してください" : "WBS を読み込み中…"}
+              {treeFailed ? "WBS を読めないので編集できません。画面を開き直してください" : "WBS を読み込み中…"}
             </p>
           )}
           {editing && tree !== null && !editor.ready && (
             <p role={editor.loadError !== null ? "alert" : undefined} className={editor.loadError !== null ? undefined : "loading"}>
               {editor.loadError !== null
-                ? `活動の一覧を読めないので編集できません（${editor.loadError.message}）。編集を終えてから入り直してください`
+                ? `活動の一覧を読めないので編集できません（${editor.loadError.message}）。画面を開き直してください`
                 : "活動を読み込み中…"}
             </p>
           )}
@@ -463,6 +397,7 @@ export default function GanttPage() {
             pastLines={pastLines}
             outline={outline}
             edit={editor.chartEdit}
+            onOpenActivity={openDetail}
           />
           {unplaced !== null && unplaced.lightning > 0 && (
             <p className="note">{`今の計画に無い活動の頂点 ${unplaced.lightning} 件は描いていない`}</p>
@@ -506,7 +441,20 @@ export default function GanttPage() {
               {listedRows.map((row) => (
                 <tr key={`${row.row_index}-${row.activity_id ?? "x"}`} data-judgement={row.judgement}>
                   <td>{row.wbs_code}</td>
-                  <td>{row.name}</td>
+                  <td>
+                    {row.activity_id === null ? (
+                      row.name
+                    ) : (
+                      <button
+                        type="button"
+                        className="link-button"
+                        aria-haspopup="dialog"
+                        onClick={() => openDetail(row.activity_id!)}
+                      >
+                        {row.name}
+                      </button>
+                    )}
+                  </td>
                   <td>{row.percent_complete === null ? "—" : `${row.percent_complete}%`}</td>
                   <td>{row.display_date}</td>
                   <td>{deviationText(row.deviation)}</td>
@@ -520,6 +468,42 @@ export default function GanttPage() {
           </table>
           {listedRows.length === 0 && <p>該当する活動はありません</p>}
         </section>
+      )}
+
+      {settingsOpen && (
+        <GanttSettingsDialog
+          projectId={projectId}
+          unit={unit}
+          onUnit={setUnit}
+          baselines={baselines}
+          baselineId={baselineId}
+          onBaseline={setBaselineId}
+          reports={reports}
+          reportId={reportId}
+          onReport={setReportId}
+          pastReportIds={pastReportIds}
+          onTogglePast={togglePast}
+          canManageReports={canManageReports}
+          onReportCreated={handleReportCreated}
+          canEditSchedule={canEditSchedule}
+          onCalculated={() => setReloadKey((k) => k + 1)}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+      {detail !== null && me !== null && (
+        <ActivityDetailDialog
+          key={detail.activityId}
+          projectId={projectId}
+          activityId={detail.activityId}
+          me={me}
+          activities={editor.activities}
+          report={selectedReport}
+          lightning={lightning}
+          lightningFailed={lightningFailed}
+          reloadKey={reloadKey}
+          onSaved={() => setReloadKey((k) => k + 1)}
+          onClose={closeDetail}
+        />
       )}
     </section>
   );

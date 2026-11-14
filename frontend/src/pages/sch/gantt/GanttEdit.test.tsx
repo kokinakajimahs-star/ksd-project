@@ -1,4 +1,5 @@
-// ガント（UI-SCH-002）の WBS の要素の行と編集（設計書 7.3。CR-024・CR-025：図の上の操作だけで編集する）
+// ガント（UI-SCH-002）の WBS の要素の行と編集（設計書 7.3。CR-024・CR-025：図の上の操作だけで編集する。
+// CR-027：編集できる人は開いたときから編集する）
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +8,7 @@ import { setAuthToken } from "../../../api/client";
 import type { Me } from "../../../api/cmn";
 import type { Dependency, Gantt } from "../../../api/sch";
 import { HEADER_HEIGHT, ROW_HEIGHT } from "../../../components/gantt/scale";
-import { makeMe, makeUser } from "../../../test/fixtures";
+import { makeMe, makeMember, makeUser } from "../../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RecordedCall, type RouteHandler } from "../../../test/mockApi";
 import { activityList, makeActivity, makeBar, makeGantt, makeGanttRow } from "../../../test/schFixtures";
 import { makeElement, makeTree, sampleElements } from "../../../test/wbsFixtures";
@@ -118,7 +119,7 @@ async function startEditing(permissions = PLANNER, overrides: Record<string, Rou
   const api = mockApi(routes(permissions, overrides));
   const view = renderAt();
   await screen.findByRole("img", { name: "ガントチャート" });
-  fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
+  // 「編集する」への切り替えは無い（CR-027）。編集の帯が出るまで待つ
   await screen.findByRole("region", { name: "ガントの編集" });
   await waitFor(() => expect(view.container.querySelector('[data-layer="edit-rows"]')).not.toBeNull());
   const viewport = screen.getByTestId("gantt-viewport");
@@ -168,8 +169,9 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     expect(label(container, "e101").querySelector("text")?.getAttribute("font-weight")).toBe("600");
     // 要約のバーには基準・実績・ラベルを描かない
     expect(container.querySelectorAll('[data-layer="baseline"] [data-element-id]')).toHaveLength(0);
-    // 閲覧だけの人には編集の切り替えを出さない
-    expect(screen.queryByRole("button", { name: "編集する" })).toBeNull();
+    // 閲覧だけの人には編集の帯・掴みを出さない
+    expect(screen.queryByRole("region", { name: "ガントの編集" })).toBeNull();
+    expect(container.querySelector('[data-layer="edit-rows"]')).toBeNull();
   });
 
   it("WBS を読めなければ要素の行を出さずに今までどおり描く", async () => {
@@ -179,13 +181,16 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("編集に切り替えると活動の無い要素も出し、WBS の状態を帯に出す。帯に入力欄と操作のボタンを置かない（CR-025）", async () => {
+  it("編集できる人には開いたときから活動の無い要素も出し、WBS の状態を帯に出す。帯に入力欄と操作のボタンを置かない（CR-025・CR-027）", async () => {
     const { container, calls } = await startEditing();
+    expect(screen.queryByRole("button", { name: "編集する" })).toBeNull();
     expect(rowKeys(container)).toEqual(["e100", "e101", "a21", "a22", "e102", "a23", "e103"]);
     expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
     expect(within(strip()).getByText("作成中")).toBeInTheDocument();
     expect(within(strip()).queryAllByRole("textbox")).toHaveLength(0);
     expect(within(strip()).queryAllByRole("button")).toHaveLength(0);
+    // 操作の手引きは畳んでおく
+    expect(within(strip()).getByText("操作の手引き").closest("details")).not.toHaveAttribute("open");
     expect(within(strip()).queryAllByRole("combobox")).toHaveLength(0);
     expect(screen.queryByRole("region", { name: "選んだ行" })).toBeNull();
     // 希望開始日のある活動に印を付ける
@@ -338,6 +343,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     const menu = openMenu(container, "a22");
     expect(menu).toHaveAccessibleName("1.1 整理 の操作");
     expect(menuNames(menu)).toEqual([
+      "詳細と進捗…",
       "下に活動を足すEnter",
       "名前を変えるF2",
       "後続をつなぐ…",
@@ -353,7 +359,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     ]);
     // 右クリックした行を選ぶ。最初の項目に的を置く
     expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a22"]')?.getAttribute("data-selected")).toBe("true");
-    expect(within(menu).getByRole("menuitem", { name: "下に活動を足す" })).toHaveFocus();
+    expect(within(menu).getByRole("menuitem", { name: "詳細と進捗…" })).toHaveFocus();
 
     choose("下に活動を足す");
     expect(screen.queryByRole("menu")).toBeNull();
@@ -366,6 +372,8 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     fireEvent.mouseDown(label(container, "a21"));
     fireEvent.keyDown(viewport, { key: "F10", shiftKey: true });
     const menu = screen.getByRole("menu", { name: "1.1 聞き取り の操作" });
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "詳細と進捗…" }), { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitem", { name: "下に活動を足す" })).toHaveFocus();
     fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "下に活動を足す" }), { key: "ArrowDown" });
     expect(within(menu).getByRole("menuitem", { name: "名前を変える" })).toHaveFocus();
     fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "名前を変える" }), { key: "Escape" });
@@ -879,28 +887,36 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     mockApi(routes(PLANNER, { [`GET ${BASE}/activities`]: () => errorResponse(500, "INTERNAL", "失敗") }));
     renderAt();
     await screen.findByRole("img", { name: "ガントチャート" });
-    fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
-    expect(await screen.findByText(/^活動の一覧を読めないので編集できません（.+）。編集を終えてから入り直してください$/)).toBeInTheDocument();
+    expect(await screen.findByText(/^活動の一覧を読めないので編集できません（.+）。画面を開き直してください$/)).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "ガントの編集" })).toBeNull();
   });
 
-  it("schedule.edit だけの人：要素の行のメニューに要素の操作を出さず、バーは動かせる", async () => {
+  it("schedule.edit だけの人：要素の行のメニューに要素の操作を出さず、バーは動かせる。図の空いた所のメニューは操作が無いことを示す", async () => {
     const { container } = await startEditing(["project.view", "schedule.edit"]);
     expect(container.querySelector('[data-handle="move"]')).not.toBeNull();
     expect(menuNames(openMenu(container, "e100"))).toEqual(["WBS 辞書・担当・見積を開く"]);
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     // WP の行には活動を足せる
     expect(menuNames(openMenu(container, "e101"))).toEqual(["活動を足すEnter", "WBS 辞書・担当・見積を開く"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    // 最上位に要素を足すのは wbs.edit。目盛りの帯（空いた所）の右クリックでは行える項目が無い
+    fireEvent.contextMenu(screen.getByTestId("gantt-viewport"), { clientX: 300, clientY: HEADER_HEIGHT / 2 });
+    expect(menuNames(screen.getByRole("menu", { name: "図の操作" }))).toEqual(["ここで行える操作の権限がありません"]);
+    // 行える項目が無くてもメニューが的を受け、Esc で閉じる（キーが図へ行かない）
+    expect(screen.getByRole("menu")).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByTestId("gantt-viewport")).toHaveFocus();
   });
 
-  it("wbs.edit だけの人にはバーの掴みを出さず、活動の行のメニューは操作が無いことを示す", async () => {
+  it("wbs.edit だけの人にはバーの掴みを出さず、活動の行のメニューは詳細と進捗を開くことだけを出す", async () => {
     const { container } = await startEditing(["project.view", "wbs.edit"]);
     expect(container.querySelector('[data-handle="move"]')).toBeNull();
     expect(menuNames(openMenu(container, "e100"))).toContain("インデントAlt+Shift+→");
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-    expect(menuNames(openMenu(container, "a21"))).toEqual(["ここで行える操作の権限がありません"]);
-    // 行える項目が無くてもメニューが的を受け、Esc で閉じる（キーが図へ行かない）
-    expect(screen.getByRole("menu")).toHaveFocus();
+    // 活動の行で行えるのは詳細と進捗を開くことだけ（CR-027）
+    expect(menuNames(openMenu(container, "a21"))).toEqual(["詳細と進捗…"]);
+    expect(within(screen.getByRole("menu")).getByRole("menuitem", { name: "詳細と進捗…" })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
     expect(container.querySelector('[data-layer="edit-rows"] [data-row-key="a21"]')?.getAttribute("data-selected")).toBe("true");
@@ -922,9 +938,6 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
       }),
     );
     const { container } = renderAt();
-    // 編集していなければ今までどおり
-    expect(await screen.findByText("描く活動がありません")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
     await screen.findByRole("region", { name: "ガントの編集" });
     await waitFor(() => expect(container.querySelector('[data-layer="edit-rows"]')).not.toBeNull());
     expect(container.querySelector('svg[aria-label="ガントチャート"]')?.getAttribute("data-row-count")).toBe("0");
@@ -1053,8 +1066,159 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024・CR-025）", () 
     mockApi(routes(PLANNER, { [`GET ${BASE}/wbs`]: () => errorResponse(500, "INTERNAL", "失敗") }));
     renderAt();
     await screen.findByRole("img", { name: "ガントチャート" });
-    fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
-    expect(await screen.findByText("WBS を読めないので編集できません。読み直してください")).toBeInTheDocument();
+    expect(await screen.findByText("WBS を読めないので編集できません。画面を開き直してください")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "ガントの編集" })).toBeNull();
+  });
+
+  it("活動の行の見出し・バーのダブルクリックは詳細と進捗を開き（名前の入力にしない）、名前・期間を保存して開いたまま読み直す（API-SCH-003。CR-027）", async () => {
+    let current = ACTIVITIES;
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`GET ${BASE}/members`]: () => jsonResponse(200, { project_id: 3, items: [makeMember({ user_id: 5 })], total: 1, limit: 1000, offset: 0 }),
+      [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList(current, { dependencies: DEPENDENCIES })),
+      [`PATCH ${BASE}/activities/22`]: () => {
+        const saved = { ...ACTIVITIES[1]!, name: "要件の整理", duration_days: 4, start_date: "2026-12-08", finish_date: "2026-12-11" };
+        current = [ACTIVITIES[0]!, saved, ...ACTIVITIES.slice(2)];
+        return jsonResponse(200, saved);
+      },
+    });
+    fireEvent.doubleClick(label(container, "a22"));
+    const dialog = screen.getByRole("dialog", { name: "活動の詳細と進捗：1.1 整理" });
+    expect(within(viewport).queryAllByRole("textbox")).toHaveLength(0);
+    // 編集の部品が読んだ活動の一覧を使う（読み直さない）
+    expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(1);
+    const form = within(dialog).getByRole("form", { name: "活動の詳細" });
+    expect(within(form).getByLabelText("名前")).toHaveFocus();
+    expect(within(form).getByLabelText("希望開始日")).toHaveValue("2026-12-07");
+    expect(within(form).getByRole("button", { name: "詳細を保存する" })).toBeDisabled();
+    // 報告日が無ければ、表示の設定で選ぶよう示す
+    expect(within(dialog).getByText("報告日を選んでいない。表示の設定で報告日を選ぶ（作る）と、ここで進捗を書ける")).toBeInTheDocument();
+
+    fireEvent.change(within(form).getByLabelText("期間（稼働日）"), { target: { value: "0" } });
+    fireEvent.click(within(form).getByRole("button", { name: "詳細を保存する" }));
+    expect(within(form).getByRole("alert")).toHaveTextContent("期間は 1 以上 100000 以下の整数（稼働日）で入力してください");
+    fireEvent.change(within(form).getByLabelText("名前"), { target: { value: "要件の整理" } });
+    fireEvent.change(within(form).getByLabelText("期間（稼働日）"), { target: { value: "4" } });
+    fireEvent.click(within(form).getByRole("button", { name: "詳細を保存する" }));
+
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ name: "要件の整理", duration_days: 4 });
+    expect(await within(dialog).findByText(/^詳細を保存した（予定 2026-12-08〜2026-12-11）。計算した開始は 2026-12-08/)).toBeInTheDocument();
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(2));
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/gantt`).length).toBeGreaterThanOrEqual(2));
+    // 開いたまま、読み直した値を出す。作り直した入力欄に的があった所が消えても、的はダイアログに残る（Esc を受ける）
+    await waitFor(() => expect(dialog).toHaveAccessibleName("活動の詳細と進捗：1.1 要件の整理"));
+    const reloaded = within(dialog).getByRole("form", { name: "活動の詳細" });
+    expect(within(reloaded).getByLabelText("名前")).toHaveValue("要件の整理");
+    expect(within(reloaded).getByLabelText("期間（稼働日）")).toHaveValue("4");
+    expect(within(reloaded).getByRole("button", { name: "詳細を保存する" })).toBeDisabled();
+    expect(within(dialog).getByText("2026-12-08〜2026-12-11")).toBeInTheDocument();
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // バー（日付を動かす掴み）のダブルクリックでも開く
+    fireEvent.doubleClick(container.querySelector('[data-handle="move"][data-activity-id="21"]')!);
+    expect(screen.getByRole("dialog", { name: "活動の詳細と進捗：1.1 聞き取り" })).toBeInTheDocument();
+  });
+
+  it("バーのダブルクリックのぶれでは日付を動かさない：2 回目の押下ではドラッグを始めず、横の動きが小さければ縦にぶれても動かさない（CR-027）", async () => {
+    const { container, calls } = await startEditing();
+    // 月の表示（1 日 = 2px）では、3px 未満の横のぶれでも以前は日付が動いた
+    const settings = within(screen.getByRole("navigation", { name: "行き先" })).getByRole("button", { name: "表示の設定" });
+    fireEvent.click(settings);
+    fireEvent.change(within(screen.getByRole("dialog", { name: "表示の設定" })).getByLabelText("表示の単位"), { target: { value: "month" } });
+    fireEvent.click(within(screen.getByRole("dialog", { name: "表示の設定" })).getByRole("button", { name: "閉じる" }));
+    await waitFor(() => expect(container.querySelector("p.gantt-legend")).toHaveTextContent(/^単位：月／/));
+    const grip = () => container.querySelector('[data-handle="move"][data-activity-id="21"]')!;
+    const y = rowY(container, "a21");
+
+    // 1 回目：横に 2px・縦に 4px ぶれて離す → 選ぶだけ
+    fireEvent.mouseDown(grip(), { clientX: 400, clientY: y, detail: 1 });
+    fireEvent.mouseMove(window, { clientX: 402, clientY: y + 4 });
+    fireEvent.mouseUp(window, { clientX: 402, clientY: y + 4 });
+    // 2 回目の押下：大きく動いてもドラッグにしない
+    fireEvent.mouseDown(grip(), { clientX: 400, clientY: y, detail: 2 });
+    fireEvent.mouseMove(window, { clientX: 430, clientY: y });
+    expect(container.querySelector("[data-ghost]")).toBeNull();
+    fireEvent.mouseUp(window, { clientX: 430, clientY: y });
+    fireEvent.doubleClick(grip());
+    expect(screen.getByRole("dialog", { name: "活動の詳細と進捗：1.1 聞き取り" })).toBeInTheDocument();
+    expect(calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+  });
+
+  it("マイルストーンの詳細には期間の欄を出さず、期間を送らない（BR-04）", async () => {
+    const milestone = makeActivity({ id: 23, name: "画面案", work_package_id: 102, wbs_code: "1.2", sort_order: 1, is_milestone: true, duration_days: 0 });
+    let current = [ACTIVITIES[0]!, ACTIVITIES[1]!, milestone];
+    // 保存の後の読み直しは、こちらが離すまで返さない
+    let release: () => void = () => undefined;
+    let held: Promise<void> | null = null;
+    const { container, calls } = await startEditing(PLANNER, {
+      [`GET ${BASE}/members`]: () => jsonResponse(200, { project_id: 3, items: [], total: 0, limit: 1000, offset: 0 }),
+      [`GET ${BASE}/activities`]: async () => {
+        if (held !== null) {
+          await held;
+        }
+        return jsonResponse(200, activityList(current, { dependencies: DEPENDENCIES }));
+      },
+      [`PATCH ${BASE}/activities/23`]: () => {
+        held = new Promise((resolve) => {
+          release = resolve;
+        });
+        current = [ACTIVITIES[0]!, ACTIVITIES[1]!, { ...milestone, name: "画面案の承認" }];
+        return jsonResponse(200, current[2]);
+      },
+    });
+    fireEvent.doubleClick(label(container, "a23"));
+    const form = within(screen.getByRole("dialog", { name: "活動の詳細と進捗：1.2 画面案" })).getByRole("form", { name: "活動の詳細" });
+    expect(within(form).queryByLabelText("期間（稼働日）")).toBeNull();
+    fireEvent.change(within(form).getByLabelText("名前"), { target: { value: "画面案の承認" } });
+    fireEvent.click(within(form).getByRole("button", { name: "詳細を保存する" }));
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/23`)).toHaveLength(1));
+    expect(sent(calls, "PATCH", `${BASE}/activities/23`)[0]?.body).toEqual({ name: "画面案の承認" });
+    // 読み直すまでは同じ変更を二重に送れない
+    await waitFor(() => expect(screen.getByText(/^詳細を保存した/)).toBeInTheDocument());
+    expect(within(form).getByRole("button", { name: "詳細を保存する" })).toBeDisabled();
+    fireEvent.submit(form);
+    expect(sent(calls, "PATCH", `${BASE}/activities/23`)).toHaveLength(1);
+    release();
+    await waitFor(() => expect(screen.getByRole("dialog")).toHaveAccessibleName("活動の詳細と進捗：1.2 画面案の承認"));
+    expect(sent(calls, "PATCH", `${BASE}/activities/23`)).toHaveLength(1);
+  });
+
+  it("メニューの「詳細と進捗…」で開き、的はダイアログが受ける。担当と割当工数を保存し（API-EFF-001）、閉じると図へ的を戻す", async () => {
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`GET ${BASE}/members`]: () =>
+        jsonResponse(200, {
+          project_id: 3,
+          items: [makeMember({ user_id: 5, display_name: "計画 太郎" }), makeMember({ user_id: 6, display_name: "退任 次郎", is_active: false })],
+          total: 2,
+          limit: 1000,
+          offset: 0,
+        }),
+      [`PUT ${BASE}/activities/21/assignments`]: () =>
+        jsonResponse(200, { activity_id: 21, estimate_hours: 40, planned_hours_total: 16, difference_hours: -24, assignments: [] }),
+    });
+    fireEvent.mouseDown(label(container, "a21"));
+    openMenu(container, "a21");
+    choose("詳細と進捗…");
+    const dialog = screen.getByRole("dialog", { name: "活動の詳細と進捗：1.1 聞き取り" });
+    // メニューを閉じても、的を図へ戻してダイアログから奪わない
+    await waitFor(() => expect(within(dialog).getByLabelText("名前")).toHaveFocus());
+
+    const assignment = await within(dialog).findByRole("form", { name: "聞き取り の担当と割当工数" });
+    fireEvent.click(within(assignment).getByRole("button", { name: "担当を足す" }));
+    // 有効なメンバーだけを選べる
+    expect(within(within(assignment).getByLabelText("1 行目の担当者")).queryByRole("option", { name: "退任 次郎" })).toBeNull();
+    fireEvent.change(within(assignment).getByLabelText("1 行目の担当者"), { target: { value: "5" } });
+    fireEvent.change(within(assignment).getByLabelText("1 行目の割当工数"), { target: { value: "16" } });
+    fireEvent.click(within(assignment).getByRole("button", { name: "担当を保存する" }));
+    await waitFor(() => expect(sent(calls, "PUT", `${BASE}/activities/21/assignments`)).toHaveLength(1));
+    expect(sent(calls, "PUT", `${BASE}/activities/21/assignments`)[0]?.body).toEqual({ assignments: [{ user_id: 5, planned_hours: 16 }] });
+    expect(await within(dialog).findByText("担当と割当工数を保存した")).toBeInTheDocument();
+    await waitFor(() => expect(sent(calls, "GET", `${BASE}/activities`)).toHaveLength(2));
+
+    fireEvent.keyDown(within(dialog).getByLabelText("名前"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(viewport).toHaveFocus());
   });
 });

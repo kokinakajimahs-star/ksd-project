@@ -15,6 +15,8 @@ export interface AssignmentEditorProps {
   members: Member[];
   onSaved: (result: ActivityAssignments) => void;
   onClose: () => void;
+  /** ガントの詳細と進捗のダイアログに入れる（見出しと「閉じる」はダイアログが持つ。CR-027） */
+  embedded?: boolean;
 }
 
 interface Row {
@@ -52,7 +54,14 @@ function hoursText(value: number | null): string {
   return value === null ? "—" : `${value} 人時`;
 }
 
-export default function AssignmentEditor({ projectId, activity, members, onSaved, onClose }: AssignmentEditorProps) {
+export default function AssignmentEditor({
+  projectId,
+  activity,
+  members,
+  onSaved,
+  onClose,
+  embedded = false,
+}: AssignmentEditorProps) {
   const [rows, setRows] = useState<Row[]>(() =>
     activity.assignees.map((a) => ({
       userId: String(a.user_id),
@@ -95,9 +104,11 @@ export default function AssignmentEditor({ projectId, activity, members, onSaved
 
   return (
     <form aria-label={`${activity.name} の担当と割当工数`} onSubmit={(e) => void handleSubmit(e)}>
-      <h3>
-        担当と割当工数：{activity.id} {activity.name}
-      </h3>
+      {!embedded && (
+        <h3>
+          担当と割当工数：{activity.id} {activity.name}
+        </h3>
+      )}
       <table aria-label="担当">
         <thead>
           <tr>
@@ -152,9 +163,11 @@ export default function AssignmentEditor({ projectId, activity, members, onSaved
       <button type="submit" disabled={submitting}>
         担当を保存する
       </button>
-      <button type="button" onClick={onClose}>
-        閉じる
-      </button>
+      {!embedded && (
+        <button type="button" onClick={onClose}>
+          閉じる
+        </button>
+      )}
     </form>
   );
 }

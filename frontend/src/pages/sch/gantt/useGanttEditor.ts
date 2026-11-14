@@ -43,7 +43,7 @@ import {
 
 export interface GanttEditorInput {
   projectId: number;
-  /** 編集に切り替えている */
+  /** 編集できる（schedule.edit か wbs.edit を持ち、ガントと WBS を読めた。切り替えは無い。CR-027） */
   enabled: boolean;
   gantt: Gantt | null;
   /** WBS の要素（API-WBS-001。先行順）。読めなければ null */
@@ -57,6 +57,8 @@ export interface GanttEditorInput {
   pageSettled: boolean;
   /** 保存した後に呼ぶ（ガント・WBS・活動を読み直す） */
   onChanged: () => void;
+  /** 活動の詳細と進捗のダイアログを開く（メニューの「詳細と進捗」。CR-027） */
+  onOpenDetail?: (activityId: number) => void;
 }
 
 /** 選んだ行の中身 */
@@ -85,6 +87,8 @@ export interface OpenMenu {
 export interface GanttEditor {
   /** 活動の一覧（API-SCH-001。依存の ID を持つ）を読めた */
   ready: boolean;
+  /** 読んだ活動の一覧（読むまで・編集できなければ null。詳細と進捗のダイアログも使う。CR-027） */
+  activities: Activity[] | null;
   chartEdit: GanttChartEdit | undefined;
   canEditSchedule: boolean;
   canEditWbs: boolean;
@@ -103,6 +107,8 @@ export interface GanttEditor {
   menu: OpenMenu | null;
   /** メニューを閉じる（restoreFocus なら入力の的を図へ戻す） */
   closeMenu: (restoreFocus: boolean) => void;
+  /** 入力の的を図へ戻す（メニューから開いた詳細と進捗のダイアログを閉じたとき。CR-027） */
+  focusChart: () => void;
   /** メニューの項目を選ぶ（閉じてから行う） */
   chooseMenuEntry: (entry: MenuEntry) => void;
   confirmingDelete: boolean;
@@ -193,7 +199,7 @@ function tidy(entries: (MenuEntry | false)[]): MenuEntry[] {
 }
 
 export function useGanttEditor(input: GanttEditorInput): GanttEditor {
-  const { projectId, enabled, gantt, outline, canEditSchedule, canEditWbs, reloadKey, pageSettled, onChanged } = input;
+  const { projectId, enabled, gantt, outline, canEditSchedule, canEditWbs, reloadKey, pageSettled, onChanged, onOpenDetail } = input;
   const elements = useMemo(() => input.elements ?? [], [input.elements]);
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
@@ -215,7 +221,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
   // 操作を重ねて流さない・保存の後の読み直しが終わるまで次の操作を受けない（state は次の描画まで変わらないので ref でも見る）
   const busyRef = useRef(false);
   const awaitingReloadRef = useRef(false);
-  // 編集を終えるたびに進める（終えた後に届いた操作の結果の文言を出さない）
+  // 編集できなくなるたびに進める（その後に届いた操作の結果の文言を出さない）
   const generation = useRef(0);
   // メニュー・確かめを閉じた後、行の中の入力も確かめも開いていなければ、入力の的を図へ戻す
   const focusAfterRef = useRef(false);
@@ -247,7 +253,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     };
   }, [projectId, enabled, reloadKey]);
 
-  // 編集を終えたら、選択・入力・メニュー・確かめ・文言と活動の一覧を消す（入り直したら読み直す）
+  // 編集できなくなったら（WBS・ガントを読めない間など）、選択・入力・メニュー・確かめ・文言と活動の一覧を消す（戻れば読み直す）
   useEffect(() => {
     if (!enabled) {
       generation.current += 1;
@@ -1112,6 +1118,13 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     const predecessors = dependencies.filter((d) => d.successor_id === activity.id);
     const successors = dependencies.filter((d) => d.predecessor_id === activity.id);
     return [
+      onOpenDetail !== undefined &&
+        item("detail", "詳細と進捗…", () => {
+          // 的は開いたダイアログが受ける（メニューを閉じて図へ戻すと、ダイアログから的を奪う）。閉じたら focusChart で図へ戻す
+          focusAfterRef.current = false;
+          onOpenDetail(activity.id);
+        }),
+      separator("s0"),
       S && item("add", "下に活動を足す", () => startAdd(key), "Enter"),
       S && item("rename", "名前を変える", () => startRename(key), "F2"),
       separator("s1"),
@@ -1335,6 +1348,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
 
   return {
     ready,
+    activities: ready ? activities : null,
     chartEdit,
     canEditSchedule,
     canEditWbs,
@@ -1347,6 +1361,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     selection,
     menu,
     closeMenu,
+    focusChart: () => setFocusRequest((n) => n + 1),
     chooseMenuEntry,
     confirmingDelete: pendingDeletion !== null,
     deleteSummary: pendingDeletion?.summary ?? "",

@@ -1,5 +1,6 @@
-// ガントの編集の帯（設計書 7.3 の「編集」。CR-024・CR-025）：WBS の状態・選んだ行の要約・結果と誤りの文言・消すことの確かめ・
-// 操作の手引きだけを図の上に出す。入力欄と操作のボタンは置かない（操作は図の上のキー・右クリックのメニュー・行の中の入力・ドラッグ）
+// ガントの編集の帯（設計書 7.3 の「編集」。CR-024・CR-025・CR-027）：WBS の状態・選んだ行の要約・結果と誤りの文言・消すことの確かめ・
+// 操作の手引き（畳んでおく）だけを図の上に出す。入力欄と操作のボタンは置かない（操作は図の上のキー・右クリックのメニュー・行の中の入力・
+// ドラッグ・ダブルクリック）
 import type { KeyboardEvent } from "react";
 
 import type { WbsTree } from "../../../api/wbs";
@@ -65,17 +66,21 @@ export function GanttEditBar({ editor, tree }: { editor: GanttEditor; tree: WbsT
 
       <ErrorAlert error={editor.error} />
       {editor.loadError !== null && (
-        <p role="alert">{`活動の一覧を読み直せません（${editor.loadError.message}）。編集を終えてから入り直してください`}</p>
+        <p role="alert">{`活動の一覧を読み直せません（${editor.loadError.message}）。画面を開き直してください`}</p>
       )}
       {/* 結果の行は常に置く（文言が出入りしても図が上下に動かない） */}
       <p role="status" className="gantt-edit-status">
         {editor.message ?? (editor.saving ? "保存しています…" : editor.reloading ? "読み直しています…" : "")}
       </p>
-      <p className="note">
-        右クリック（Shift+F10）で行の操作のメニュー。行をクリック・上下の矢印で選び（Ctrl＋クリックで足す、Shift で範囲、Esc で外す）、
-        Enter で下に行を足し、F2・ダブルクリックで名前、Delete で消す。Alt+Shift+矢印でインデント・アウトデント・上下へ。
-        バーを横へドラッグすると開始（右端は終わり）が動き、別の活動の行へドラッグすると依存をつなぐ（Esc で取り消す）。矢印を選んで Delete で依存を外す
-      </p>
+      <details className="gantt-edit-help">
+        <summary>操作の手引き</summary>
+        <p className="note">
+          右クリック（Shift+F10）で行の操作のメニュー。行をクリック・上下の矢印で選び（Ctrl＋クリックで足す、Shift で範囲、Esc で外す）、
+          Enter で下に行を足し、F2 で名前（要素の行はダブルクリックでも）、Delete で消す。Alt+Shift+矢印でインデント・アウトデント・上下へ。
+          バーを横へドラッグすると開始（右端は終わり）が動き、別の活動の行へドラッグすると依存をつなぐ（Esc で取り消す）。矢印を選んで Delete で依存を外す。
+          活動の行・バーをダブルクリックすると、詳細と進捗のダイアログを開く
+        </p>
+      </details>
       {editor.menu !== null && <GanttMenu menu={editor.menu} onChoose={editor.chooseMenuEntry} onClose={editor.closeMenu} />}
     </section>
   );

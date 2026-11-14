@@ -348,14 +348,14 @@
   /* ===== 3. 画面の中の並び ===== */
 
   /* 行き先・操作のボタンの並び */
-  :where(.page-links, .project-destinations, .actions, .form-actions, .filters, .view-switch, .week-nav, .gantt-controls, .effort-basis) {
+  :where(.page-links, .project-destinations, .actions, .form-actions, .filters, .view-switch, .week-nav, .effort-basis) {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-sm) var(--space-lg);
     margin: var(--space-sm) 0;
   }
-  :where(.page-links, .project-destinations, .actions, .form-actions, .filters, .view-switch, .week-nav, .gantt-controls, .effort-basis, .pager) > :where(button + button) {
+  :where(.page-links, .project-destinations, .actions, .form-actions, .filters, .view-switch, .week-nav, .effort-basis, .pager) > :where(button + button) {
     margin-inline-start: 0;
   }
   :where(.project-destinations) {
@@ -543,5 +543,106 @@
     height: 0;
     margin: var(--space-xxs, 4px) 0;
     border-top: var(--borderWidth-default) solid var(--borderColor-muted, var(--borderColor-default));
+  }
+  /* ガントの操作の手引き（畳んでおく。CR-027） */
+  :where(.gantt-edit-help) {
+    margin: var(--space-xs) 0;
+    font-size: var(--text-body-size-small);
+  }
+  :where(.gantt-edit-help > summary) {
+    color: var(--fgColor-muted);
+    cursor: pointer;
+  }
+  /* 文の中のリンクの形のボタン（判定の一覧の活動の名前。CR-027） */
+  :where(.link-button) {
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--fgColor-accent);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  :where(.link-button:hover) {
+    text-decoration: underline;
+  }
+
+  /* 画面の上に重ねるダイアログ（components/Dialog。ガントの表示の設定・活動の詳細と進捗。CR-027） */
+  :where(.dialog-backdrop) {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 6vh var(--space-md) var(--space-md);
+    overflow-y: auto;
+    background: var(--overlay-backdrop-bgColor, rgb(31 35 40 / 40%));
+  }
+  :where(.dialog) {
+    display: flex;
+    flex-direction: column;
+    width: min(40rem, 100%);
+    max-height: 88vh;
+    border: var(--borderWidth-default) solid var(--borderColor-default);
+    border-radius: var(--borderRadius-large, var(--borderRadius-medium));
+    background: var(--bgColor-default);
+    box-shadow: var(--shadow-floating-large, 0 12px 28px rgb(66 74 83 / 30%));
+  }
+  :where(.dialog.dialog-wide) {
+    width: min(56rem, 100%);
+  }
+  :where(.dialog:focus) {
+    outline: none;
+  }
+  :where(.dialog-header) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-lg);
+    border-bottom: var(--borderWidth-default) solid var(--borderColor-muted, var(--borderColor-default));
+  }
+  :where(.dialog-header > h3) {
+    margin: 0;
+  }
+  :where(.dialog-body) {
+    padding: var(--space-sm) var(--space-lg) var(--space-lg);
+    overflow-y: auto;
+  }
+  :where(.dialog-status) {
+    min-height: 1lh;
+    margin: 0 0 var(--space-xs);
+  }
+  :where(.dialog-section + .dialog-section) {
+    margin-top: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: var(--borderWidth-default) solid var(--borderColor-muted, var(--borderColor-default));
+  }
+  :where(.dialog-section > h4) {
+    margin: 0 0 var(--space-sm);
+    font-size: var(--text-body-size-medium);
+  }
+  :where(.settings-fields, .detail-form, .settings-actions) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-sm) var(--space-lg);
+    margin: var(--space-sm) 0;
+  }
+  :where(.detail-list) {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-xxs, 4px) var(--space-md);
+    margin: var(--space-sm) 0;
+  }
+  :where(.detail-list > dt) {
+    color: var(--fgColor-muted);
+  }
+  :where(.detail-list > dd) {
+    margin: 0;
   }
 }

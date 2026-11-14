@@ -89,6 +89,16 @@ const GANTT_ROUTES: Record<string, unknown> = {
   ]),
 };
 
+/** UI-SCH-002 に未確定の報告日（12/10）とそのイナズマ線を足したもの（表示の設定・詳細と進捗のダイアログ。CR-027） */
+const GANTT_REPORT_ROUTES: Record<string, unknown> = {
+  ...GANTT_ROUTES,
+  "GET /api/v1/projects/3/status-reports": { ...emptyPage, items: [makeStatusReport()], total: 1 },
+  "GET /api/v1/projects/3/status-reports/41/lightning-line": makeLightningLine([
+    makeLightningRow(),
+    makeLightningRow({ row_index: 1, activity_id: 22, wbs_code: "1.2", name: "基本設計", percent_complete: 40, judgement: "ON_SCHEDULE" }),
+  ]),
+};
+
 const SCREENS: Screen[] = [
   { id: "UI-CMN-001", path: "/login", login: false },
   { id: "UI-PRJ-001", path: "/projects" },
@@ -137,7 +147,6 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').dispatchEvent("mousedown", { button: 0 });
       await page.getByText(/^選んだ行：1\.1 /).waitFor();
@@ -150,7 +159,6 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-handle="move"][data-activity-id="21"]').click({ button: "right" });
       await page.getByRole("menu", { name: "1.1 資料作成 の操作" }).waitFor();
@@ -163,11 +171,12 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a22"]').click();
       await page.keyboard.press("Shift+F10");
       await page.getByRole("menu", { name: "1.2 基本設計 の操作" }).waitFor();
+      // 先頭は「詳細と進捗…」（CR-027）
+      await page.keyboard.press("ArrowDown");
       await page.keyboard.press("ArrowDown");
       await page.getByRole("menuitem", { name: "名前を変える" }).and(page.locator(":focus")).waitFor();
     },
@@ -179,7 +188,6 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').click();
       await page.keyboard.press("Enter");
@@ -193,7 +201,6 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       const box = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
       if (box !== null) {
@@ -211,7 +218,6 @@ const SCREENS: Screen[] = [
     path: "/projects/3/gantt",
     routes: GANTT_ROUTES,
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       const from = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
       const to = await page.locator('[data-handle="move"][data-activity-id="21"]').boundingBox();
@@ -224,6 +230,30 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    // 行き先の並びの「表示の設定」：単位・基準・報告日・過去の線・報告日を作る・日程の再計算のダイアログ（CR-027）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-settings",
+    path: "/projects/3/gantt",
+    routes: GANTT_REPORT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "表示の設定" }).click();
+      await page.getByRole("dialog", { name: "表示の設定" }).waitFor();
+    },
+  },
+  {
+    // 活動のバーのダブルクリック：活動の詳細と進捗のダイアログ（CR-027）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-detail",
+    path: "/projects/3/gantt",
+    routes: GANTT_REPORT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("region", { name: "ガントの編集" }).waitFor();
+      await page.locator('[data-handle="move"][data-activity-id="22"]').dblclick();
+      await page.getByRole("dialog", { name: /^活動の詳細と進捗：/ }).waitFor();
+      await page.getByRole("form", { name: "進捗の入力" }).waitFor();
+    },
+  },
+  {
     // 選んだ活動の右の丸を別の活動のバーへドラッグして離す：依存を足す（API-SCH-006）
     id: "UI-SCH-002",
     name: "UI-SCH-002-link",
@@ -233,7 +263,6 @@ const SCREENS: Screen[] = [
       "POST /api/v1/projects/3/dependencies": { id: 91, predecessor_id: 21, successor_id: 22, dep_type: "FS", lag_days: 0 },
     },
     act: async (page) => {
-      await page.getByRole("button", { name: "編集する" }).click();
       await page.getByRole("region", { name: "ガントの編集" }).waitFor();
       await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').click();
       const handle = await page.locator('[data-handle="link"]').boundingBox();
