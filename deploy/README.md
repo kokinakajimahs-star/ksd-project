@@ -9,7 +9,7 @@
 | Cloud Run のジョブ | `ksdp-migrate` | DB の移行（`alembic upgrade head`）。サービスを入れ替える前に流す |
 | Cloud Run のジョブ | `ksdp-pgverify` | PostgreSQL での検証（`pytest backend/tests`。検証用の DB `pmt_verify` だけを使う） |
 | Cloud SQL | `ksdp-pg` | PostgreSQL 16。DB `pmt`（本番）・`pmt_verify`（検証）。ユーザー `pmt_app`（本番の表の持ち主）・`pmt_verifier`（検証。試験ごとの DB を作って消す） |
-| Secret Manager | `ksdp-database-url`・`ksdp-verify-database-url`・`ksdp-initial-admin-password` | 秘密の値。本番の 2 つを読めるのは `ksdp-run`、検証の DB の URL を読めるのは `ksdp-verify` だけ |
+| Secret Manager | `ksdp-database-url`・`ksdp-verify-database-url`・`ksdp-initial-admin-password` | 秘密の値。本番の 2 つを読めるのは `ksdp-run`、検証の DB の URL を読めるのは `ksdp-verify` だけ。ほかに Terraform の外の `ksdp-ui-verify-password`（12 章） |
 | Artifact Registry | `ksdp-images` | イメージ `pmt`（サーバ）・`pmt-test`（試験） |
 | サービスアカウント | `ksdp-run`・`ksdp-verify`・`ksdp-build` | Cloud Run のサービスと移行のジョブの身元・検証のジョブの身元・Cloud Build の身元 |
 | Cloud Storage | `ksdp-build-<project>`・`ksdp-tfstate-<project>` | Cloud Build へ上げるソース（7 日で消す）・Terraform の状態（版管理あり。`deploy.sh` が作る） |
@@ -314,3 +314,44 @@ gcloud run services logs read ksdp-pmt --region "$REGION" --project "$PROJECT" -
 - 検証用の DB は本番と同じインスタンスにある
 - 独自のドメイン・監視と通知は置いていない
 - 前のイメージへ戻す（5 章）ときに選べるのは、Artifact Registry に残っているイメージだけ（新しい `registry_keep_recent` 個と、30 日を過ぎていないもの）
+- 12 章の秘密 `ksdp-ui-verify-password` と検証専用の利用者は Terraform の外にある（7.2 の片付けでは消えない。12 章の「やめる」で消す）
+
+## 12. 画面の実ブラウザでの評価に使う検証専用の利用者（CR-026）
+
+`spec-ids.toml` の `[[ui_runtime.login]]` は、本番へ向けて流した実ブラウザでの評価（ui-runtime）が、検証専用で読むだけの利用者でログインしてから
+ログインの要る画面を開くための宣言である。その利用者とパスワードの秘密を、**利用者が自分の端末で**次を流して用意する（値は画面に出ない）：
+
+```bash
+bash deploy/ui-verify-user.sh                 # プロジェクトが 1 つだけならそれを使う。2 つ以上なら一覧を出して止まる
+bash deploy/ui-verify-user.sh <プロジェクトの ID>
+```
+
+- 作るもの：秘密 `ksdp-ui-verify-password`（英数字 32 文字。無ければ作る。Terraform の秘密と同じリージョン）、利用者 `ui-verify`
+  （表示名「画面の検証（読むだけ）」。システムの権限なし）、渡したプロジェクトのメンバーの行（ロール VIEWER だけ）。流し直すと、あるものを合わせる
+- 書き込む前に確かめ、外れれば何も変えずに止まる：同じログイン名の利用者が既にあり、この手順で作ったもの（上の表示名でシステム管理者でない）
+  でないとき（作り替えない。`UI_VERIFY_LOGIN` で別の名にする）、そのプロジェクトの VIEWER が読む以外の権限を持つとき
+- 書いた後に検証専用の利用者でログインし、システムの権限が無く、どのプロジェクトでも project.view と data.export しか持たないことを確かめる。
+  外れれば（別のプロジェクトで書くロールを与えられていたときなど）、そのプロジェクトのメンバーから外し、利用者を無効にしてから止まる
+- ログインには最初のシステム管理者の秘密（3 章）を使う。画面で管理者のパスワードを変えていれば HTTP 401 で止まる。
+  流すたびにログインの失敗が 1 回数えられ、10 回続くと管理者が 15 分ロックされる（NFR-04）ので、401 なら流し直さない
+- 流すと検証専用の利用者のパスワードを設定し直すので、その利用者のセッションは失効する。実ブラウザでの評価と同時に流さない
+- 別のプロジェクトの ID で流し直しても、前のプロジェクトのメンバーの行は残る（読むだけ）。要らなければプロジェクトの設定のメンバーで外す
+- 出した `projectId`・`elementId`・`reportId` は `spec-ids.toml` の `[ui_runtime].route_params` に書く（保護パスなので CR を通す）。
+  プロジェクト・その要素・報告日を消したら、流し直して書き直す
+- 秘密の値は画面・引数に出さない。`bash -x` で流しても xtrace はスクリプトの先頭で止め、gcloud の HTTP の記録（`core/log_http`）も止める
+- 秘密を初めて作った回は、版がまだ無いので gcloud が `WARNING: The following filter keys were not present in any resource : state` を出す（害は無い）
+- 本文の無い POST（ログアウト）には `Content-Length: 0` を付ける。Cloud Run の前段は付いていない POST を HTTP 411 で断る
+- 評価は、アプリが動いている本番へ向けて利用者の端末で流す（agent-browser 0.34.0 と gcloud auth login が要る。sandbox の中では見えない）：
+
+  ```bash
+  KLOOP_UI_RUNTIME_BASE_URL=<サービスの URL> bash scripts/verify.sh ui
+  ```
+
+  base_url のオリジンが宣言の `origin` と一致するときだけログインする。手元（`http://localhost:5173`）へ向けたときは、ログインの要る画面は「見ていない」になる。
+  TLS を検査する社内のプロキシを通る端末では、Linux の Chrome は `/etc/ssl/certs` を見ないので、全ての画面が `net::ERR_CERT_AUTHORITY_INVALID`
+  で開けない（ログインと API は curl・Python が `/etc/ssl/certs` で通る）。プロキシの根の証明書を Chrome の NSS の DB へ入れる：
+  `certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n <名> -i <根の証明書>`（certutil は libnss3-tools。DB が無ければ先に `-N --empty-password` で作る）
+- パスワードを替える：`ROTATE=1 bash deploy/ui-verify-user.sh <プロジェクトの ID>`（秘密に新しい版を置き、利用者のパスワードを合わせる。
+  古い版は残るので、要らなければ `gcloud secrets versions disable <版> --secret ksdp-ui-verify-password --project "$PROJECT"` で無効にする）
+- やめる：画面のユーザーの管理で `ui-verify` を無効にし、`gcloud secrets delete ksdp-ui-verify-password --project "$PROJECT"` を流し、
+  `spec-ids.toml` の宣言を外す CR を起票する

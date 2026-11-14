@@ -910,3 +910,58 @@ R1 のデータの形（WBS → WP → 活動、終了→開始・ラグ 0、依
 
 ### 暫定対応
 無し
+
+## CR-026 : ログインの要る画面を本番で実ブラウザの評価にかける（`spec-ids.toml` の `[[ui_runtime.login]]`）
+
+- 状態：**承認**（2026-11-14。利用者が「1と２承認します。3も推奨案で進めてください。」と承認した。1 は本番の検証専用で読むだけの利用者、
+  2 はそのパスワードを Secret Manager に置き gcloud auth login のアカウントで読めるようにすること、3 がこの CR）。`spec-ids.toml` に反映した
+
+### 対象箇所
+`spec-ids.toml`（kloop の保護パス）の `[ui_runtime]` と `[[checks]] ui-runtime`。設計書・要求仕様書・`trace.toml`・`scripts/verify.sh` は変えない
+
+### 現行の記載
+- `skip_routes` にログインの要る 20 のルートを並べ、実ブラウザでの評価（ui-runtime）で見るのは UI-CMN-001（ログイン）と UI-RPT-002（共有ビュー）の 2 画面だけ（CR-023）
+- `route_params` は共有ビューの `token` だけ
+- `[[checks]] ui-runtime` に `reuse` を書いていない
+
+### 問題
+CR-023 のとき、検証器（agent-browser）はログインしなかった。ログインの要る画面を開くと `RequireAuth` がログイン画面へ送るので、その画面の
+名でログイン画面を評価することになり、20 画面を外していた。20 画面は、実ブラウザで開けるか・未捕捉の例外・WCAG の違反を一度も見ていない。
+また本番へ出すときの報告には、外した 20 画面が「飛ばした検査」として残っている
+
+### 根拠
+kloop 11.17 の `[[ui_runtime.login]]`（ksd-ls の CR-150。kloop の ADR-011 §5。雛形 `templates/bootstrap/spec-ids.toml` の ui_runtime の節）。
+宣言した origin と base_url のオリジンが一致するときだけ、Secret Manager から検証専用の利用者のパスワードを読み、ログインの API へ POST し、
+応答をセッションの置き場（ここでは sessionStorage）へ init script で入れてから画面を開く。パスワードとセッションの値は notes・結果の JSON・
+引数に出ない。雛形は「ログインの要る画面は skip_routes に入れない」「環境ごとに流すなら reuse = false」と書いている
+
+### 提案する変更後の記載（推奨案）
+1. `[[ui_runtime.login]]` を 1 つ足す（本番）
+
+   | 欄 | 値 | 理由 |
+   |---|---|---|
+   | `origin` | 本番の Cloud Run の URL（`https://ksdp-pmt-…a.run.app`） | 本番へ向けて流したとき（`KLOOP_UI_RUNTIME_BASE_URL`）だけログインする。手元（`http://localhost:5173`）ではログインせず、ログインの要る画面は「見ていない」のまま |
+   | `secret` | `projects/kc-dbsb-poc-260109/secrets/ksdp-ui-verify-password/versions/latest` | 2 の秘密。値は `deploy/ui-verify-user.sh` が作る |
+   | `username` | `ui-verify` | 1 の利用者。ロールは閲覧者（VIEWER：project.view と data.export だけ。設計書 9.2）で、システムの権限を持たない |
+   | `logged_out` | `UI-CMN-001`・`UI-RPT-002` | ログイン画面と共有ビューはログインせずに開く（今までどおり） |
+   | `request` | `/api/v1/auth/login`、`login_id`・`password` | API-CMN-001 |
+   | `session` | sessionStorage の `pmt.session` に `token`・`expiresAt`・`user`（応答の `access_token`・`expires_at`・`user`） | 画面が覚えるログインの形（`frontend/src/auth/session.tsx`。A-25） |
+   | `logout` | `/api/v1/auth/logout` | API-CMN-002。終わったらトークンを失効させる |
+
+2. `skip_routes` を空にする
+3. `route_params` に `projectId`・`elementId`・`reportId` を足す（1 の利用者がメンバーの本番のプロジェクトと、その WBS の先頭の要素・最も新しい報告日。
+   どれも秘密ではない。`deploy/ui-verify-user.sh` が出す）。2026-11-14 に利用者が本番で流し、`projectId = "1"`（試行のプロジェクト）・
+   `elementId = "1"`・`reportId = "1"` を書いた
+4. `[[checks]] ui-runtime` に `reuse = false` を書く（合否は鍵に入らない環境の応答に依る）
+
+### 影響範囲
+- 設計 ID の増減は無い（193 件のまま）。`docs/spec-ids.json` は設定の sha の部分だけが変わる
+- 関門・手元：今までどおり。手元で見るのは 2 画面で、ログインの要る 20 画面は skip_routes ではなく「ログインしていない」理由で「見ていない」になる
+- 本番へ向けて利用者の端末で流すと（`KLOOP_UI_RUNTIME_BASE_URL=<本番の URL> bash scripts/verify.sh ui`）、22 画面を開く。
+  検証専用の利用者は読むだけなので、ほかの権限が要る画面（ユーザーの管理・承認・工数の入力と集計・変更履歴・取込）は権限の無いときの
+  表示を評価する。中身の表示の評価は、その権限を持つ利用者の宣言を別に足すまで見ない
+- 本番の URL が `spec-ids.toml`（非公開のリポジトリ）に入る。URL に利用者の名前は入らない
+- 本番の DB に検証専用の利用者が 1 人とメンバーの行が 1 つ増える。Secret Manager に秘密が 1 つ増える（Terraform の外。`deploy/ui-verify-user.sh` が作る）
+
+### 暫定対応
+無し
