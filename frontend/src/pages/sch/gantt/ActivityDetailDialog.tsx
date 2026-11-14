@@ -186,7 +186,7 @@ export default function ActivityDetailDialog({
           <section aria-labelledby="detail-heading" className="dialog-section">
             <h4 id="detail-heading">詳細</h4>
             <dl className="detail-list">
-              <dt>WBS ID</dt>
+              <dt>活動の番号</dt>
               <dd>{activity.wbs_code}</dd>
               <dt>置き場の WP</dt>
               <dd>{activity.work_package_name}</dd>

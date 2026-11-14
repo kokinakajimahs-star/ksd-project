@@ -72,6 +72,7 @@ class GanttActivity:
 
     ``start_date``・``finish_date`` は日程計算（RULE-SCH-002）の結果（計算の前は ``None`` で、予定のバーを出さない）。
     ``assignees`` は担当者の表示名（並べたい順）。``percent_complete`` は進捗率（0〜100。``None`` は未算定）。
+    ``wbs_code`` は活動の番号（5.2。CR-028）。番号は読めない活動も数えるので、描く活動だけからは作れず、呼び手が渡す。
     """
 
     id: int
@@ -87,6 +88,7 @@ class GanttActivity:
     percent_complete: Decimal | None = None
     actual_start: date | None = None
     actual_finish: date | None = None
+    wbs_code: str = field(kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ class GanttBar:
 
 @dataclass(frozen=True)
 class GanttRow:
-    """ガントの 1 行（1 つの活動）。``row_index`` は 0 から。``wbs_code``・``work_package_name`` は活動の置き場の WP。"""
+    """ガントの 1 行（1 つの活動）。``row_index`` は 0 から。``wbs_code`` は活動の番号（CR-028）、``work_package_name`` は置き場の WP。"""
 
     row_index: int
     activity_id: int
@@ -409,7 +411,7 @@ def build_gantt(
                 activity_id=activity.id,
                 name=activity.name,
                 work_package_id=wp.id,
-                wbs_code=wp.wbs_code,
+                wbs_code=activity.wbs_code,
                 work_package_name=wp.name,
                 depth=depth[wp.id],
                 is_milestone=activity.is_milestone,

@@ -1,6 +1,6 @@
 {
   "generated_from": "pmt-design.md",
-  "document_sha256": "b6da070708d3b0fd",
+  "document_sha256": "e2336e24cd9b0134",
   "kinds": {
     "db": {
       "label": "テーブル",
@@ -451,7 +451,7 @@
         {
           "id": "RULE-WBS-001",
           "name": "WBS IDの採番",
-          "criteria": "採番規則（区切り・最小桁数・接頭辞・第1階層の補完）と兄弟の順番からIDを作る（5.2）",
+          "criteria": "採番規則（区切り・最小桁数・接頭辞・第1階層の補完）と兄弟の順番からIDを作る。活動の番号（置き場の WP の ID と WP の中の順番。CR-028）も同じ規則で作る（5.2）",
           "module": "wbs_code.py",
           "group": "WBS"
         },
@@ -2292,6 +2292,6 @@
     "ui": 22,
     "total": 193
   },
-  "source_sha256": "b6da070708d3b0fd943eed78929488c529462f2bf61949d9801718d1b1441a09:2d478fbcde2a4a92b044aa54d9f76ae5266f8bda10a4da72760f8065b5724f47",
+  "source_sha256": "e2336e24cd9b0134da73c251bc151f3949ba2bee7c7db1e2aa93ebb0fcef1f32:2d478fbcde2a4a92b044aa54d9f76ae5266f8bda10a4da72760f8065b5724f47",
   "extractor_sha256": "b8d15ead6b061f8c9cd8001f4d4df78defe0d47749b77e3c74f15a631afde9d2"
 }

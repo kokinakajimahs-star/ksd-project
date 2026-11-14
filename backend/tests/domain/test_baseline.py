@@ -195,11 +195,11 @@ REBASE_ELEMENTS = (
 )
 REBASE_ACTIVITIES = (
     RebaselineActivity(id=10, work_package_id=2, name="設計", start_date=d("12/01"), finish_date=d("12/03"),
-                       duration_days=3, is_milestone=False, estimate_hours=Decimal(24)),
+                       duration_days=3, is_milestone=False, estimate_hours=Decimal(24), wbs_code="1.1.1"),
     RebaselineActivity(id=11, work_package_id=3, name="実装", start_date=d("12/04"), finish_date=d("12/10"),
-                       duration_days=5, is_milestone=False, estimate_hours=Decimal(40)),
+                       duration_days=5, is_milestone=False, estimate_hours=Decimal(40), wbs_code="1.2.1"),
     RebaselineActivity(id=12, work_package_id=3, name="完了", start_date=d("12/10"), finish_date=d("12/10"),
-                       duration_days=0, is_milestone=True, estimate_hours=None),
+                       duration_days=0, is_milestone=True, estimate_hours=None, wbs_code="1.2.2"),
 )
 
 
@@ -253,16 +253,16 @@ def test_rebaseline_scope_copies_elements_and_dictionary_in_wbs_order() -> None:
 
 
 def test_rebaseline_schedule_copies_activities_and_work_packages() -> None:
-    """RULE-CHG-004：スケジュールの版には全ての活動（渡された順）と全ての WP（WBS の並び）を写す。
+    """RULE-CHG-004：スケジュールの版には全ての活動（渡された順。WBS ID の列は渡された活動の番号。CR-028）と全ての WP（WBS の並び）を写す。
     WP の見積は RULE-EST-001 の値（活動があれば活動の合計で自分の見積は使わない、無ければ自分の見積）、
     日付は配下の活動の最も早い開始日〜最も遅い終了日、活動が無ければ空（手動の版と同じ写し方）。"""
     items = rebaseline().schedule.items
     activities = [i for i in items if i.item_type == "ACTIVITY"]
     assert [(i.activity_id, i.element_id, i.wbs_code, i.start_date, i.finish_date, i.duration_days, i.is_milestone,
              i.estimate_hours) for i in activities] == [
-        (10, 2, "1.1", d("12/01"), d("12/03"), 3, False, Decimal(24)),
-        (11, 3, "1.2", d("12/04"), d("12/10"), 5, False, Decimal(40)),
-        (12, 3, "1.2", d("12/10"), d("12/10"), 0, True, None),
+        (10, 2, "1.1.1", d("12/01"), d("12/03"), 3, False, Decimal(24)),
+        (11, 3, "1.2.1", d("12/04"), d("12/10"), 5, False, Decimal(40)),
+        (12, 3, "1.2.2", d("12/10"), d("12/10"), 0, True, None),
     ]
     wps = [i for i in items if i.item_type == "WORK_PACKAGE"]
     assert [(i.element_id, i.activity_id, i.start_date, i.finish_date, i.duration_days, i.estimate_hours)
@@ -284,7 +284,8 @@ def test_rebaseline_schedule_copies_activities_and_work_packages() -> None:
         {"schedule_name": " "},
         {"schedule_name": "あ" * 201},
         {"activities": (RebaselineActivity(id=99, work_package_id=1, name="x", start_date=None, finish_date=None,
-                                           duration_days=1, is_milestone=False, estimate_hours=None),)},
+                                           duration_days=1, is_milestone=False, estimate_hours=None,
+                                           wbs_code="1.1"),)},
         {"elements": (*REBASE_ELEMENTS, RebaselineElement(id=5, parent_id=42, wbs_code="9.9", kind="COMPONENT",
                                                           name="x", own_estimate_hours=None))},
     ],

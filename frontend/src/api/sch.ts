@@ -14,7 +14,7 @@ export interface Activity {
   id: number;
   project_id: number;
   work_package_id: number;
-  /** 置き場の WP の WBS ID */
+  /** 活動の番号（置き場の WP の WBS ID ＋ WP の中の順番。設計書 5.2・CR-028。サーバが作る） */
   wbs_code: string;
   work_package_name: string;
   name: string;

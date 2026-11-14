@@ -69,7 +69,7 @@ from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, forbidden, load_role_permission_table, principal_of, project_not_found
 from app.services.progress import entries_of_report, percents_at_report, project_settings, report_percents
 from app.services.project_access import ProjectAccess
-from app.services.schedule import Plan, load_plan
+from app.services.schedule import Plan, activity_codes_of, load_plan
 
 ENTER_OWN = "effort.enter_own"
 EFFORT_VIEW = "effort.view"
@@ -209,24 +209,24 @@ class ActivityAssignmentsView:
 
 
 def _assignment_rows(session: Session, project_id: int, activity_ids: Sequence[int] | None = None,
-                     user_id: int | None = None) -> list[tuple[Assignment, Activity, str]]:
+                     user_id: int | None = None) -> list[tuple[Assignment, Activity]]:
     query = (
-        select(Assignment, Activity, WbsElement.wbs_code)
+        select(Assignment, Activity)
         .join(Activity, Activity.id == Assignment.activity_id)
-        .join(WbsElement, WbsElement.id == Activity.work_package_id)
         .where(Activity.project_id == project_id)
     )
     if activity_ids is not None:
         query = query.where(Assignment.activity_id.in_(activity_ids))
     if user_id is not None:
         query = query.where(Assignment.user_id == user_id)
-    return [(a, act, code) for a, act, code in session.execute(query).all()]
+    return [(a, act) for a, act in session.execute(query).all()]
 
 
 def _activity_assignments_view(session: Session, activity: Activity) -> ActivityAssignmentsView:
     found = _assignment_rows(session, activity.project_id, [activity.id])
-    names = _display_names(session, (a.user_id for a, _, _ in found))
-    rows = [AssignmentRow(a, act, code, names.get(a.user_id, "")) for a, act, code in
+    names = _display_names(session, (a.user_id for a, _ in found))
+    code = activity_codes_of(session, [activity.id])[activity.id]  # 活動の番号（5.2。CR-028）
+    rows = [AssignmentRow(a, act, code, names.get(a.user_id, "")) for a, act in
             sorted(found, key=lambda r: r[0].user_id)]
     total = sum((_decimal(r.assignment.planned_hours) for r in rows if r.assignment.planned_hours is not None), _ZERO)
     estimate = None if activity.estimate_hours is None else _decimal(activity.estimate_hours)
@@ -301,8 +301,9 @@ def list_assignments(
     rank = {a.id: i for i, a in enumerate(plan.ordered_activities())}
     found.sort(key=lambda r: (rank.get(r[1].id, len(rank)), r[0].user_id))
     page = found[offset:offset + limit]
-    names = _display_names(session, (a.user_id for a, _, _ in page))
-    return [AssignmentRow(a, act, code, names.get(a.user_id, "")) for a, act, code in page], len(found)
+    names = _display_names(session, (a.user_id for a, _ in page))
+    codes = plan.activity_codes()  # 活動の番号（5.2。CR-028）。読めない活動も数える
+    return [AssignmentRow(a, act, codes[act.id], names.get(a.user_id, "")) for a, act in page], len(found)
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +364,9 @@ def _time_entry_rows(session: Session, entries: Iterable[TimeEntry]) -> list[Tim
     ids = sorted({e.activity_id for e in rows})
     info: dict[int, tuple[int, str, str]] = {}
     if ids:
-        found = session.execute(
-            select(Activity.id, Activity.project_id, Activity.name, WbsElement.wbs_code)
-            .join(WbsElement, WbsElement.id == Activity.work_package_id)
-            .where(Activity.id.in_(ids))
-        ).all()
-        info = {r[0]: (r[1], r[2], r[3]) for r in found}
+        found = session.execute(select(Activity.id, Activity.project_id, Activity.name).where(Activity.id.in_(ids))).all()
+        codes = activity_codes_of(session, ids)  # 活動の番号（5.2。CR-028）。プロジェクトをまたぐ
+        info = {r[0]: (r[1], r[2], codes[r[0]]) for r in found}
     return [TimeEntryRow(entry=e, project_id=info[e.activity_id][0], activity_name=info[e.activity_id][1],
                          wbs_code=info[e.activity_id][2]) for e in rows]
 
@@ -653,7 +651,7 @@ def summary(
     members = session.scalars(select(ProjectMember).where(ProjectMember.project_id == project_id)).all()
     shares = [AssignmentShare(activity_id=a.activity_id, user_id=a.user_id,
                               planned_hours=None if a.planned_hours is None else _decimal(a.planned_hours))
-              for a, _, _ in _assignment_rows(session, project_id)]
+              for a, _ in _assignment_rows(session, project_id)]
     axes = aggregate_effort(
         basis.rollup,
         assignments=shares,

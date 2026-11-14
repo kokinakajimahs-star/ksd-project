@@ -593,9 +593,11 @@ def test_apply_writes_plan_recalculates_and_rebaselines(world: World) -> None:
     assert list(versions) == [1, 2]  # 手動の版は残る
     new_schedule = world.session.get(ScheduleBaseline, applied["schedule_baseline"]["id"])
     assert new_schedule is not None and new_schedule.change_request_id == draft["id"]
-    copied = world.session.scalars(select(ScheduleBaselineItem.name).where(
+    copied = world.session.execute(select(ScheduleBaselineItem.name, ScheduleBaselineItem.wbs_code).where(
         ScheduleBaselineItem.schedule_baseline_id == new_schedule.id, ScheduleBaselineItem.item_type == "ACTIVITY"))
-    assert sorted(copied) == ["A", "B", "C"]
+    # 活動の項目の WBS ID は反映した後の活動の番号（4.2・RULE-CHG-004。CR-028）
+    assert sorted(copied.tuples()) == [("A", f"{world.wp1_code}.1"), ("B", f"{world.wp1_code}.2"),
+                                       ("C", f"{world.wp1_code}.3")]
     scope = world.session.get(ScopeBaseline, applied["scope_baseline"]["id"])
     assert scope is not None and scope.change_request_id == draft["id"]
     scope_count = world.session.scalar(select(func.count()).select_from(ScopeBaselineElement)
@@ -753,7 +755,10 @@ def test_create_corrective_action(world: World) -> None:
     """API-CHG-007 是正措置を登録する：action.manage、要素か活動への紐付け、状態は NOT_STARTED。"""
     created = world.action(activity_id=world.a, owner_user_id=world.uid("executor"), due_date="2026-12-15")
     assert created["status"] == "NOT_STARTED"
-    assert created["wbs_code"] == world.wp1_code
+    # 活動に結び付いた措置の WBS ID は活動の番号、要素に結び付いた措置は要素の WBS ID（CR-028）
+    assert created["wbs_code"] == f"{world.wp1_code}.1"
+    assert world.action(activity_id=world.b)["wbs_code"] == f"{world.wp1_code}.2"
+    assert world.action(element_id=world.wp1)["wbs_code"] == world.wp1_code
     assert created["overdue"] is False and created["effect"] is None
     world.action(who="executor", expect=403, element_id=world.wp1)
     world.action(who="planner", expect=403, element_id=world.wp1)

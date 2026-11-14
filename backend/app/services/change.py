@@ -78,6 +78,7 @@ from app.services.auth import User, authorize_project, forbidden, principal_of
 from app.services.clock import business_period
 from app.services.project_access import ProjectAccess
 from app.services.schedule import (
+    activity_codes_of,
     before_project_start,
     calculate_and_store,
     load_plan,
@@ -701,6 +702,7 @@ def _write_baselines(
         for entry in session.scalars(select(WbsDictionaryEntry).where(WbsDictionaryEntry.element_id.in_(ids)))
     } if ids else {}
     name = f"変更要求 #{change_request.number} {change_request.title}"[:_BASELINE_NAME_LIMIT]
+    codes = plan.activity_codes()
     try:
         rebaseline = plan_rebaseline(
             change_request_id=change_request.id,
@@ -720,7 +722,8 @@ def _write_baselines(
             activities=[
                 RebaselineActivity(id=a.id, work_package_id=a.work_package_id, name=a.name, start_date=a.start_date,
                                    finish_date=a.finish_date, duration_days=a.duration_days,
-                                   is_milestone=a.is_milestone, estimate_hours=a.estimate_hours)
+                                   is_milestone=a.is_milestone, estimate_hours=a.estimate_hours,
+                                   wbs_code=codes[a.id])
                 for a in plan.ordered_activities()
             ],
         )
@@ -832,14 +835,20 @@ def _check_links(session: Session, access: ProjectAccess, project_id: int, value
 
 def _action_views(session: Session, project_id: int, actions: Sequence[CorrectiveAction],
                   today: date) -> list[CorrectiveActionView]:
+    """``wbs_code`` は要素に結び付いた措置なら要素の WBS ID、活動だけに結び付いた措置なら活動の番号（5.2。CR-028）。"""
     codes = {e.id: e.wbs_code for e in _elements(session, project_id)}
-    work_packages = dict(session.execute(  # type: ignore[arg-type]
-        select(Activity.id, Activity.work_package_id).where(Activity.project_id == project_id)).all())
+    activity_codes = activity_codes_of(
+        session, {a.activity_id for a in actions if a.element_id is None and a.activity_id is not None})
     views: list[CorrectiveActionView] = []
     for action in actions:
-        element_id = action.element_id if action.element_id is not None else work_packages.get(action.activity_id)
+        if action.element_id is not None:
+            code = codes.get(action.element_id)
+        elif action.activity_id is not None:
+            code = activity_codes.get(action.activity_id)
+        else:
+            code = None
         views.append(CorrectiveActionView(
-            action=action, wbs_code=codes.get(element_id) if element_id is not None else None,
+            action=action, wbs_code=code,
             overdue=is_corrective_action_overdue(action.due_date, action.status, today=today),
         ))
     return views

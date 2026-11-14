@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -64,7 +64,7 @@ class BaselineActivityItem:
 
 @dataclass(frozen=True)
 class PlanActivity:
-    """最新の計画の活動（4.1 の ``activities`` の日程の結果と見積。``wbs_code`` は置き場の WP の ID）。"""
+    """最新の計画の活動（4.1 の ``activities`` の日程の結果と見積。``wbs_code`` は活動の番号（5.2。CR-028））。"""
 
     activity_id: int
     wbs_code: str
@@ -266,7 +266,10 @@ class RebaselineElement:
 
 @dataclass(frozen=True)
 class RebaselineActivity:
-    """反映して日程を計算し直した後の活動（4.1 の ``activities`` のうち版に写す列）。"""
+    """反映して日程を計算し直した後の活動（4.1 の ``activities`` のうち版に写す列）。
+
+    ``wbs_code`` は活動の番号（5.2。CR-028）。版の活動の項目へ写す（4.2）。番号は採番規則と WP の中の並びで決まるので呼び手が渡す。
+    """
 
     id: int
     work_package_id: int
@@ -276,6 +279,7 @@ class RebaselineActivity:
     duration_days: int
     is_milestone: bool
     estimate_hours: Decimal | None
+    wbs_code: str = field(kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -432,7 +436,7 @@ def plan_rebaseline(
             item_type=ITEM_TYPE_ACTIVITY,
             activity_id=a.id,
             element_id=a.work_package_id,
-            wbs_code=by_id[a.work_package_id].wbs_code,
+            wbs_code=a.wbs_code,
             name=a.name,
             start_date=a.start_date,
             finish_date=a.finish_date,

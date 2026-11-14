@@ -187,8 +187,9 @@ def test_add_activities_schedules_forward_and_backward(world: World) -> None:
     assert [rows[i]["total_float"] for i in (a, b, m, c)] == [0, 0, 0, 4]
     assert (rows[c]["late_start"], rows[c]["late_finish"]) == ("2026-12-07", "2026-12-07")
     assert rows[b]["predecessor_ids"] == [a] and rows[b]["successor_ids"] == [m]
-    assert rows[a]["wbs_code"] == "1.1" and rows[a]["work_package_name"] == "WP1"
+    assert rows[a]["wbs_code"] == "1.1.1" and rows[a]["work_package_name"] == "WP1"  # 活動の番号（CR-028）
     assert [r["sort_order"] for r in (rows[a], rows[b], rows[m], rows[c])] == [1, 2, 3, 4]
+    assert [r["wbs_code"] for r in (rows[a], rows[b], rows[m], rows[c])] == ["1.1.1", "1.1.2", "1.1.3", "1.1.4"]
 
 
 def test_list_orders_by_wbs_then_sort_order_and_pages(world: World) -> None:
@@ -265,6 +266,9 @@ def test_contractor_sees_only_assigned_activities(app: FastAPI, world: World) ->
     assert cp["project_finish_date"] is None and cp["restricted"] is True
     gantt = world.client.get(world.url("/gantt"), headers=world.h["contractor"]).json()
     assert [r["activity_id"] for r in gantt["rows"]] == [b] and gantt["links"] == [] and gantt["restricted"] is True
+    # 活動の番号は読めない活動も数える（5.2。CR-028）：B は WP1 の 2 番目
+    assert body["items"][0]["wbs_code"] == "1.1.2" and gantt["rows"][0]["wbs_code"] == "1.1.2"
+    assert cp["activities"][0]["wbs_code"] == "1.1.2"
 
 
 def test_contractor_dependency_ids_and_baseline_counts_use_only_visible_activities(
@@ -381,9 +385,11 @@ def test_update_activity_moves_between_work_packages_and_reorders(world: World, 
     assert order() == [x2, x3, x1, y1]
     moved = patch(x3, {"work_package_id": world.wp2, "position": 0})  # 別の WP の先頭へ
     assert moved.status_code == 200, moved.text
-    wp2_code = world.activities()[y1]["wbs_code"]
-    assert (moved.json()["work_package_id"], moved.json()["wbs_code"]) == (world.wp2, wp2_code)
+    assert (moved.json()["work_package_id"], moved.json()["wbs_code"]) == (world.wp2, "1.2.1")
     assert order() == [x2, x1, x3, y1]
+    # 活動の番号は WP の中の並びで振り直る（5.2。CR-028）：残った WP1 は詰まり、WP2 の y1 は 2 番目になる
+    numbers = {i: r["wbs_code"] for i, r in world.activities().items()}
+    assert [numbers[i] for i in (x2, x1, x3, y1)] == ["1.1.1", "1.1.2", "1.2.1", "1.2.2"]
     assert patch(x2, {"work_package_id": world.wp2}).status_code == 200  # 位置を省けば末尾
     assert order() == [x1, x3, y1, x2]
     assert patch(x1, {"work_package_id": world.wp2, "position": 99}).status_code == 200  # 末尾より後は末尾
@@ -616,12 +622,14 @@ def test_delete_activity_removes_dependencies_and_keeps_baseline_copy(
     assert client.delete(world.url(f"/activities/{a}"), headers=world.h["planner"]).status_code == 204
     rows = world.activities()
     assert a not in rows and rows[b]["predecessor_ids"] == [] and dates(rows[b]) == ("2026-12-01", "2026-12-02")
+    assert [rows[i]["wbs_code"] for i in (b, m, c)] == ["1.1.1", "1.1.2", "1.1.3"]  # 消すと後ろが振り直る（CR-028）
     assert a not in fake.rows
     db_session.expire_all()
     assert db_session.scalars(select(ActivityDependency).where(ActivityDependency.predecessor_id == a)).all() == []
     # 写しは変えない（活動の ID も写しの値のまま。設計書 1.1 の 4.2。CR-002）
     copies = db_session.scalars(select(ScheduleBaselineItem).where(ScheduleBaselineItem.name == "A")).all()
-    assert [(i.activity_id, i.start_date) for i in copies] == [(a, date(2026, 12, 1))]
+    # 活動の項目の WBS ID は保存した時の活動の番号（4.2。CR-028）
+    assert [(i.activity_id, i.start_date, i.wbs_code) for i in copies] == [(a, date(2026, 12, 1), "1.1.1")]
     assert client.delete(world.url(f"/activities/{a}"), headers=world.h["planner"]).status_code == 404
 
 
@@ -718,7 +726,7 @@ def test_gantt_rows_bars_links_and_progress(app: FastAPI, world: World, client: 
     row = g["rows"][0]
     assert row["planned"]["start"] == {"position": 0.0, "calendar": {"date": "2026-12-01", "fraction": 0.0}}
     assert row["planned"]["end"] == {"position": 3.0, "calendar": {"date": "2026-12-03", "fraction": 1.0}}
-    assert row["actual"] is None and row["baseline"] is None and row["depth"] == 2 and row["wbs_code"] == "1.1"
+    assert row["actual"] is None and row["baseline"] is None and row["depth"] == 2 and row["wbs_code"] == "1.1.1"
     milestone = g["rows"][2]["planned"]
     assert milestone["is_milestone"] is True and milestone["start"] == milestone["end"]
     assert milestone["end"]["calendar"] == {"date": "2026-12-07", "fraction": 1.0}
@@ -824,6 +832,7 @@ def test_variance_against_baseline(world: World, client: TestClient, db_session:
     db_session.commit()
     assert client.delete(world.url(f"/activities/{c}"), headers=world.h["planner"]).status_code == 204
     d = world.add("D", duration_days=1)["id"]
+    assert client.patch(world.url(f"/activities/{d}"), json={"position": 0}, headers=world.h["planner"]).status_code == 200
 
     response = client.get(world.url(f"/schedule-baselines/{baseline['id']}/variance"), headers=world.h["viewer"])
     assert response.status_code == 200, response.text
@@ -832,12 +841,15 @@ def test_variance_against_baseline(world: World, client: TestClient, db_session:
     rows = [(r["status"], r["activity_id"], r["name"], r["start_variance_days"], r["finish_variance_days"],
              r["estimate_variance_hours"]) for r in body["rows"]]
     assert rows == [
+        ("ADDED", d, "D", None, None, None),
         ("MATCHED", a, "A", 0, 2, 2.5),
         ("MATCHED", b, "B", 2, 2, None),
         ("MATCHED", m, "M", 2, 2, None),
-        ("ADDED", d, "D", None, None, None),
         ("DELETED", c, "C", None, None, None),  # 写しは消した活動の ID を写しの値のまま持つ（設計書 1.1 の 4.2）
     ]
+    # WBS ID の列は活動の番号（CR-028）。今の計画の行は今の番号（先頭へ足した D で A〜M は 1 つずつ後ろへ振り直る）、
+    # 消した C は写した時の番号（基準では WP1 の 4 番目）
+    assert [r["wbs_code"] for r in body["rows"]] == ["1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.4"]
     assert client.get(world.url(f"/schedule-baselines/{MISSING}/variance"), headers=world.h["viewer"]).status_code == 404
     other = World(client, world.session, code="PRJ-T")
     assert client.get(other.url(f"/schedule-baselines/{baseline['id']}/variance"),

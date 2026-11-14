@@ -75,7 +75,7 @@ class AssigneeOut(BaseModel):
 
 
 class ActivityOut(BaseModel):
-    """活動 1 件（日程・依存・担当付き）。``start_date`` 以降は日程計算の結果（4.2）。``wbs_code`` は置き場の WP の WBS ID。"""
+    """活動 1 件（日程・依存・担当付き）。``start_date`` 以降は日程計算の結果（4.2）。``wbs_code`` は活動の番号（置き場の WP の WBS ID ＋ WP の中の順番。5.2・CR-028）。"""
 
     id: int
     project_id: int

@@ -65,7 +65,7 @@ class SnapshotError(ValueError):
 
 @dataclass(frozen=True)
 class SnapshotActivity:
-    """確定の時点の活動の値（4.1 の ``activities`` の最新計画・WP の WBS ID・報告日の進捗・実績工数・ETC）。
+    """確定の時点の活動の値（4.1 の ``activities`` の最新計画・活動の番号（5.2。CR-028）・報告日の進捗・実績工数・ETC）。
 
     ``percent_complete`` は RULE-PRG-001 の丸める前の進捗率（``Fraction`` か ``Decimal``。``None`` は未算定）。
     ポイント・ずれ・判定はこの値から求め、写しの ``percent_complete`` には 4.1 の精度（小数 2 桁）へ丸めた値を置く

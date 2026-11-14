@@ -219,7 +219,8 @@ def test_meeting_report_of_open_report_is_calculated(world: World, client: TestC
     delays = world.get(f"/status-reports/{report}/delays")
     assert [d["activity_id"] for d in body["delays"]] == [d["activity_id"] for d in delays["delays"]] == [world.a]
     delay = body["delays"][0]
-    assert (delay["wbs_code"], delay["name"], delay["planned_finish"]) == ("1.1", "A", "2026-12-10")
+    assert (delay["wbs_code"], delay["name"], delay["planned_finish"]) == ("1.1.1", "A", "2026-12-10")  # 活動の番号（CR-028）
+    assert delays["delays"][0]["wbs_code"] == "1.1.1"
     assert (delay["delay_reason"], delay["forecast_finish"], delay["forecast_entered"]) == ("要員不足", "2026-12-14", True)
     assert delay["deviation"] < 0 and delay["percent_complete"] == 20.0 and delay["is_critical"] is True
 
@@ -278,6 +279,13 @@ def test_meeting_report_of_finalized_report_uses_snapshot(world: World, client: 
     assert after["gantt"]["baseline"]["name"] == "初版"
     kpi = after["kpi"]
     assert kpi["baseline_hours"] == 120.0 and kpi["eac_variance_hours"] == kpi["eac_hours"] - 120.0
+    # 確定の後に WP の先頭へ活動を足すと今の番号は振り直るが、遅延一覧（写し）は確定した時の活動の番号のまま（4.2・6.2。CR-028）
+    z = world.add("Z", duration_days=1)
+    assert client.patch(world.url(f"/activities/{z}"), json={"position": 0}, headers=world.h["planner"]).status_code == 200
+    renumbered = world.meeting(report)
+    assert [(d["activity_id"], d["wbs_code"]) for d in renumbered["delays"]] == [(world.a, "1.1.1")]
+    current = {r["activity_id"]: r["wbs_code"] for r in renumbered["gantt"]["rows"]}
+    assert (current[z], current[world.a]) == ("1.1.1", "1.1.2")
 
 
 def test_meeting_report_of_finalized_report_takes_plan_values_from_latest_plan(

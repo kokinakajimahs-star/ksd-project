@@ -11,11 +11,13 @@ import pytest
 
 from app.domain.wbs_code import (
     MAX_CODE_LENGTH,
+    ActivitySlot,
     CodedElement,
     CodeHistoryEntry,
     NumberingRule,
     ResolvedBy,
     WbsCodeError,
+    activity_codes,
     code_fits_parent,
     code_for_path,
     make_code,
@@ -117,6 +119,38 @@ def test_min_digits_boundary() -> None:
     two = NumberingRule(min_digits=2)
     assert code_for_path((9, 9), two) == "09.09"
     assert code_for_path((10, 10), two) == "10.10"
+
+
+def test_activity_codes_follow_wp_code_and_position_in_wp() -> None:
+    """RULE-WBS-001（CR-028）：活動の番号は置き場の WP の ID ＋ WP の中の順番。第 1 階層の WP は .0 を外す（1.0 の活動は 1.1）。"""
+    top_wp = el(1, None, "1.0", 1)
+    wp = el(3, 2, "2.1", 1)
+    deep = el(5, 4, "2.2.1", 1)
+    activities = [
+        ActivitySlot(id=11, work_package_id=3, sort_order=2),
+        ActivitySlot(id=10, work_package_id=3, sort_order=1),
+        ActivitySlot(id=12, work_package_id=3, sort_order=5),  # sort_order の飛びは詰めて数える
+        ActivitySlot(id=20, work_package_id=1, sort_order=1),
+        ActivitySlot(id=30, work_package_id=5, sort_order=1),
+        ActivitySlot(id=31, work_package_id=5, sort_order=1),  # 同じ sort_order は id の順
+    ]
+    codes = activity_codes(activities, {1: top_wp, 3: wp, 5: deep}, DEFAULT)
+    assert codes == {10: "2.1.1", 11: "2.1.2", 12: "2.1.3", 20: "1.1", 30: "2.2.1.1", 31: "2.2.1.2"}
+
+
+def test_activity_codes_follow_rule_and_current_wp_code() -> None:
+    """RULE-WBS-001（CR-028）：区切り・桁数・接頭辞の規則に従い、WP が今持っている ID を頭にする。WP を渡さない活動は返さない。"""
+    rule = NumberingRule(separator="-", min_digits=2, prefix="P", pad_first_level=False)
+    wp = el(2, 1, "P01-03", 3)
+    moved = el(4, 1, "P07-01", 1, needs=True)  # 改番待ちでも今の ID を頭にする
+    activities = [
+        ActivitySlot(id=1, work_package_id=2, sort_order=1),
+        ActivitySlot(id=2, work_package_id=4, sort_order=3),
+        ActivitySlot(id=3, work_package_id=99, sort_order=1),
+    ]
+    assert activity_codes(activities, {2: wp, 4: moved}, rule) == {1: "P01-03-01", 2: "P07-01-01"}
+    # 前の活動を消すと後ろの番号が振り直る（保存しない）
+    assert activity_codes([ActivitySlot(id=5, work_package_id=2, sort_order=2)], {2: wp}, rule) == {5: "P01-03-01"}
 
 
 def test_make_code_for_path_matches_make_code_chain() -> None:

@@ -60,6 +60,7 @@ def activity(activity_id: int, wp: int, sort: int, start: str | None, finish: st
         is_milestone=bool(kw.pop("is_milestone", False)),
         start_date=None if start is None else d(start),
         finish_date=None if finish is None else d(finish),
+        wbs_code=str(kw.pop("wbs_code", f"A-{activity_id}")),  # 活動の番号（CR-028）は呼び手が作って渡す
         **kw,  # type: ignore[arg-type]
     )
 
@@ -82,7 +83,8 @@ def gantt(
 
 
 def test_rows_follow_wbs_order_then_activity_order() -> None:
-    """RULE-SCH-005：行の順は WBS の並び（先行順・兄弟は表示順）→ 活動の並び（sort_order、同じなら id）（SCH-11）。"""
+    """RULE-SCH-005：行の順は WBS の並び（先行順・兄弟は表示順）→ 活動の並び（sort_order、同じなら id）（SCH-11）。
+    行の WBS ID は渡した活動の番号（CR-028）、WP の名前と階層は置き場の WP。"""
     chart = gantt(
         [
             activity(1, 20, 1, "12/01", "12/01"),
@@ -94,7 +96,7 @@ def test_rows_follow_wbs_order_then_activity_order() -> None:
     )
     assert [r.activity_id for r in chart.rows] == [4, 3, 2, 6, 1]
     assert [r.row_index for r in chart.rows] == [0, 1, 2, 3, 4]
-    assert [(r.wbs_code, r.work_package_name, r.depth) for r in chart.rows][:2] == [("1.2", "実装", 2), ("1.1", "設計", 2)]
+    assert [(r.wbs_code, r.work_package_name, r.depth) for r in chart.rows][:2] == [("A-4", "実装", 2), ("A-3", "設計", 2)]
     assert chart.rows[-1].depth == 1
 
 
@@ -320,7 +322,7 @@ def test_bar_range_without_display_range_has_no_limit() -> None:
     """
     finish = START + timedelta(days=MAX_GANTT_RANGE_DAYS + 30)
     long_act = GanttActivity(id=1, work_package_id=11, name="長い活動", sort_order=1, is_milestone=False,
-                             start_date=START, finish_date=finish)
+                             start_date=START, finish_date=finish, wbs_code="1.1.1")
     chart = build_gantt(ELEMENTS, [long_act], [], calendar=CAL, project_start=START)
     assert chart.range_start is not None and chart.range_end is not None
     assert (chart.range_end - chart.range_start).days + 1 > MAX_GANTT_RANGE_DAYS

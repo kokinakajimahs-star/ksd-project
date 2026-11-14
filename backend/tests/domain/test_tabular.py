@@ -61,9 +61,11 @@ LOGINS = ("pm1", "u1", "u2")
 
 # 今の活動：10→11→12（12 はマイルストーン）
 ACTIVITIES_NOW = {
-    10: ActivityRow(10, "1.1", "要件確認", date(2026, 11, 2), 3, False, Decimal("24.00"), (), ("u1",)),
-    11: ActivityRow(11, "1.1", "設計書作成", None, 5, False, Decimal("40.00"), (10,), ("u2", "u1")),
-    12: ActivityRow(12, "1.2", "設計完了", None, 0, True, None, (11,), ()),
+    10: ActivityRow(10, "1.1", "要件確認", date(2026, 11, 2), 3, False, Decimal("24.00"), (), ("u1",),
+                    activity_code="1.1.1"),
+    11: ActivityRow(11, "1.1", "設計書作成", None, 5, False, Decimal("40.00"), (10,), ("u2", "u1"),
+                    activity_code="1.1.2"),
+    12: ActivityRow(12, "1.2", "設計完了", None, 0, True, None, (11,), (), activity_code="1.2.1"),
 }
 WORK_PACKAGES = (2, 3)
 
@@ -140,7 +142,7 @@ def test_columns_follow_design_6_3() -> None:
         "WBS ID", "親のWBS ID", "区分", "名称", "責任者のログインID", "自分の見積（人時）", "成果物", "作業範囲", "完了条件", "前提条件",
     )
     assert COLUMNS[TabularTarget.ACTIVITIES] == (
-        "活動ID", "WPのWBS ID", "名称", "希望開始日", "期間（稼働日）", "マイルストーン（0/1）", "見積（人時）",
+        "活動ID", "活動の番号", "WPのWBS ID", "名称", "希望開始日", "期間（稼働日）", "マイルストーン（0/1）", "見積（人時）",
         "先行の活動ID（; 区切り）", "担当者のログインID（; 区切り）",
     )
     assert COLUMNS[TabularTarget.TIME_ENTRIES] == ("ログインID", "活動ID", "作業日", "工数（人時）", "備考")
@@ -242,10 +244,24 @@ def test_wbs_export_then_import_has_no_changes() -> None:
 def test_activity_export_then_import_has_no_changes() -> None:
     """RULE-INT-001：活動を出力した直後のファイルを取り込むと、変更は 0 件（先行・担当者は昇順で出し、集合で比べる）。"""
     grid = export_grid(TabularTarget.ACTIVITIES, ACTIVITIES_NOW.values())
-    assert grid[2][7:] == ["10", "u1;u2"]
-    assert grid[3][4:6] == ["0", "1"]
+    assert grid[2][:3] == ["11", "1.1.2", "1.1"]  # 活動ID・活動の番号（CR-028）・WP の WBS ID
+    assert grid[2][8:] == ["10", "u1;u2"]
+    assert grid[3][5:7] == ["0", "1"]
     plan = activity_plan(decode_csv(encode_csv(grid)))
     assert plan.ok and plan.changes == () and plan.unchanged == len(ACTIVITIES_NOW)
+
+
+def test_activity_number_column_is_export_only() -> None:
+    """RULE-INT-001：活動の番号（CR-028）は出力だけの列。取込は値を読まない（空・書き換え・数のセルでも変更にならない）。
+    列の無い（CR-028 より前の）ファイルは見出しが違う（HEADER_MISMATCH）。"""
+    for number in ["", "9.9.9", 1.1]:
+        row: list[object] = ["10", number, "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"]
+        plan = activity_plan([list(ACTIVITY_COLUMNS), row])
+        assert plan.ok and plan.changes == () and plan.unchanged == 1, number
+    (change,) = activity_plan(activity_grid(["", "7.7.7", "1.2", "追加", "", "1", "0", "", "", ""])).changes
+    assert change.action is ChangeAction.CREATE and change.row.activity_code is None
+    old = [[c for c in ACTIVITY_COLUMNS if c != "活動の番号"], ["10", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"]]
+    assert codes(activity_plan(old)) == [(1, None, ImportIssueCode.HEADER_MISMATCH)]
 
 
 def test_time_entry_export_then_import_has_no_changes() -> None:
@@ -277,7 +293,7 @@ def test_numeric_cells_in_wbs_id_columns_are_rejected() -> None:
     parent_row[1] = 1  # 1.0 が 1 になる
     assert codes(wbs_plan([list(WBS_COLUMNS), parent_row])) == [(2, "親のWBS ID", ImportIssueCode.INVALID_VALUE)]
     activity: list[object] = list(ACTIVITY_COLUMNS)
-    numeric_wp: list[object] = ["", 1.1, "設計レビュー", "", "1", "0", "", "", ""]
+    numeric_wp: list[object] = ["", "", 1.1, "設計レビュー", "", "1", "0", "", "", ""]
     assert codes(activity_plan([activity, numeric_wp])) == [(2, "WPのWBS ID", ImportIssueCode.INVALID_VALUE)]
     # 文字のセルの WBS ID はそのまま照合する
     assert wbs_plan(wbs_grid(wbs_row(name="基本設計（改）"))).ok
@@ -444,7 +460,7 @@ def test_wbs_inputs_must_agree() -> None:
 
 def test_activity_empty_id_is_added_and_unknown_id_rejected() -> None:
     """RULE-INT-001：活動ID が空なら追加、今の活動に無い ID は NOT_FOUND、同じ ID の 2 行は DUPLICATE_KEY。"""
-    plan = activity_plan(activity_grid(["", "1.3", "結合試験準備", "2026-11-20", "2", "0", "", "12", "u2"]))
+    plan = activity_plan(activity_grid(["", "", "1.3", "結合試験準備", "2026-11-20", "2", "0", "", "12", "u2"]))
     assert plan.ok
     (change,) = plan.changes
     assert (change.action, change.activity_id, change.work_package_id, change.row.work_package_code) == (
@@ -453,18 +469,18 @@ def test_activity_empty_id_is_added_and_unknown_id_rejected() -> None:
     assert change.row.predecessor_ids == (12,) and change.row.assignee_login_ids == ("u2",)
 
     plan = activity_plan(activity_grid(
-        ["99", "1.1", "無い活動", "", "1", "0", "", "", ""],
-        ["10", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"],
-        ["10", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"],
+        ["99", "", "1.1", "無い活動", "", "1", "0", "", "", ""],
+        ["10", "1.1.1", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"],
+        ["10", "1.1.1", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "", "u1"],
     ))
     assert codes(plan) == [(2, "活動ID", ImportIssueCode.NOT_FOUND), (4, "活動ID", ImportIssueCode.DUPLICATE_KEY)]
 
 
 def test_activity_update_compares_lists_as_sets() -> None:
     """RULE-INT-001：先行・担当者は順を問わずに比べ、変わる列だけを返す。"""
-    same = ["11", "1.1", "設計書作成", "", "5", "0", "40", "10", "u2; u1;"]
+    same = ["11", "1.1.2", "1.1", "設計書作成", "", "5", "0", "40", "10", "u2; u1;"]
     assert activity_plan(activity_grid(same)).unchanged == 1
-    changed = ["11", "1.2", "設計書作成", "2026-11-05", "6", "0", "40.5", "", "u1"]
+    changed = ["11", "1.1.2", "1.2", "設計書作成", "2026-11-05", "6", "0", "40.5", "", "u1"]
     (change,) = activity_plan(activity_grid(changed)).changes
     assert change.action is ChangeAction.UPDATE and change.work_package_id == 3
     assert change.changed == ("WPのWBS ID", "希望開始日", "期間（稼働日）", "見積（人時）", "先行の活動ID（; 区切り）",
@@ -477,7 +493,7 @@ def test_activity_update_compares_lists_as_sets() -> None:
 )
 def test_activity_milestone_pairs_with_zero_duration(duration: str, milestone: str, ok: bool) -> None:
     """RULE-INT-001：マイルストーンは期間 0、それ以外は期間 1 以上（4.2）。"""
-    plan = activity_plan(activity_grid(["", "1.1", "節目", "", duration, milestone, "", "", ""]))
+    plan = activity_plan(activity_grid(["", "", "1.1", "節目", "", duration, milestone, "", "", ""]))
     assert codes(plan) == ([] if ok else [(2, "マイルストーン（0/1）", ImportIssueCode.INVALID_VALUE)])
 
 
@@ -502,7 +518,7 @@ def test_activity_milestone_pairs_with_zero_duration(duration: str, milestone: s
 )
 def test_activity_value_checks(column: str, value: str, code: ImportIssueCode | None) -> None:
     """RULE-INT-001：活動の行ごとの検査（日付・整数・0/1・WP の WBS ID・先行・担当者）。"""
-    row = ["", "1.1", "新しい活動", "2026-11-09", "1", "0", "8", "", "u1"]
+    row = ["", "", "1.1", "新しい活動", "2026-11-09", "1", "0", "8", "", "u1"]
     row[ACTIVITY_COLUMNS.index(column)] = value
     plan = activity_plan(activity_grid(row))
     assert codes(plan) == ([] if code is None else [(2, column, code)])
@@ -510,9 +526,9 @@ def test_activity_value_checks(column: str, value: str, code: ImportIssueCode | 
 
 def test_activity_dependency_cycle_is_rejected() -> None:
     """RULE-INT-001：取り込んだ後の依存に RULE-SCH-001 を当てる（10→11→12 に 12→10 を足すと循環）。自分を先行にするのも循環。"""
-    plan = activity_plan(activity_grid(["10", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "12", "u1"]))
+    plan = activity_plan(activity_grid(["10", "1.1.1", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "12", "u1"]))
     assert codes(plan) == [(2, "先行の活動ID（; 区切り）", ImportIssueCode.SCHEDULE_CYCLE)]
-    plan = activity_plan(activity_grid(["10", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "10", "u1"]))
+    plan = activity_plan(activity_grid(["10", "1.1.1", "1.1", "要件確認", "2026-11-02", "3", "0", "24", "10", "u1"]))
     assert codes(plan) == [(2, "先行の活動ID（; 区切り）", ImportIssueCode.SCHEDULE_CYCLE)]
 
 

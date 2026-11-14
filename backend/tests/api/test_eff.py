@@ -217,7 +217,7 @@ def test_list_assignments_filters_and_contractor_scope(world: World, client: Tes
     assert [(r["activity_id"], r["user_id"]) for r in body["items"]] == sorted(
         [(world.a, world.uid("executor")), (world.a, world.uid("planner")), (world.b, world.uid("contractor"))],
         key=lambda p: (p[0] != world.a, p[1]))
-    assert body["items"][0]["wbs_code"] == "1.1"
+    assert [r["wbs_code"] for r in body["items"]] == ["1.1.1", "1.1.1", "1.1.2"]  # 活動の番号（CR-028）
     by_user = client.get(world.url("/assignments"), params={"user_id": world.uid("executor")}, headers=world.h["pm"]).json()
     assert [(r["activity_id"], r["planned_hours"]) for r in by_user["items"]] == [(world.a, 10.0)]
     by_activity = client.get(world.url("/assignments"), params={"activity_id": world.b}, headers=world.h["pm"]).json()
@@ -227,6 +227,7 @@ def test_list_assignments_filters_and_contractor_scope(world: World, client: Tes
     # 委託先は自分の割当の活動の分だけ（9.2 の注記）
     own = client.get(world.url("/assignments"), headers=world.h["contractor"]).json()
     assert [(r["activity_id"], r["user_id"]) for r in own["items"]] == [(world.b, world.uid("contractor"))]
+    assert own["items"][0]["wbs_code"] == "1.1.2"  # 番号は読めない活動も数える
     assert client.get(world.url("/assignments"), headers=world.h["outsider"]).status_code == 403
     assert client.get(f"/api/v1/projects/{MISSING}/assignments", headers=world.admin_h).status_code == 404
 
@@ -249,7 +250,7 @@ def test_put_time_entries_writes_own_assigned_cells(world: World, client: TestCl
     body = world.enter("executor", [cell(world.a, "2026-12-01", 7.5, "設計"), cell(world.a, "2026-12-02", 8)])
     assert body["changed"] == 2 and body["user_id"] == me
     assert [(e["work_date"], e["hours"], e["note"], e["wbs_code"], e["project_id"]) for e in body["entries"]] == [
-        ("2026-12-01", 7.5, "設計", "1.1", world.pid), ("2026-12-02", 8.0, None, "1.1", world.pid)]
+        ("2026-12-01", 7.5, "設計", "1.1.1", world.pid), ("2026-12-02", 8.0, None, "1.1.1", world.pid)]
     assert body["day_totals"] == [{"work_date": "2026-12-01", "hours": 7.5}, {"work_date": "2026-12-02", "hours": 8.0}]
     # 同じ値で送り直しても変えない。0 は行を消す。メモだけの変更も書く
     assert world.enter("executor", [cell(world.a, "2026-12-01", 7.5, "設計")])["changed"] == 0

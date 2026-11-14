@@ -42,7 +42,6 @@ from app.domain.authz import VisibleScope
 from app.domain.effort import TimeEntryValue
 from app.domain.estimate import InputUnit, TargetType, record_estimate
 from app.domain.tabular import (
-    ACTIVITY_COLUMNS,
     COLUMNS,
     HEADER_ROW,
     TIME_ENTRY_COLUMNS,
@@ -345,8 +344,9 @@ def _wbs_rows(
 
 def _activity_rows(
     session: Session, activities: Sequence[Activity], elements: Sequence[WbsElement],
-    predecessors: Mapping[int, set[int]], assignees: Mapping[int, set[int]],
+    predecessors: Mapping[int, set[int]], assignees: Mapping[int, set[int]], activity_codes: Mapping[int, str],
 ) -> dict[int, ActivityRow]:
+    """活動の 6.3 の行。``activity_codes`` は活動の番号（5.2。CR-028。``Plan.activity_codes``。全ての活動で数えた値）。"""
     codes = {e.id: e.wbs_code for e in elements}
     logins = _logins_of(session, (u for users in assignees.values() for u in users))
     return {
@@ -360,6 +360,7 @@ def _activity_rows(
             estimate_hours=_hours(a.estimate_hours),
             predecessor_ids=tuple(sorted(predecessors.get(a.id, ()))),
             assignee_login_ids=tuple(sorted(logins[u] for u in assignees.get(a.id, ()))),
+            activity_code=activity_codes[a.id],
         )
         for a in activities
     }
@@ -420,7 +421,7 @@ def export_data(
         rows = [current[e.id] for e, _ in preorder_elements(plan.elements) if visible is None or e.id in visible.element_ids]
     elif target is TabularTarget.ACTIVITIES:
         rows = _export_activities(session, links, project_id, plan.elements, plan.ordered_activities(),
-                                  plan.dependencies, visible)
+                                  plan.dependencies, visible, plan.activity_codes())
     else:
         rows = [row for entry, row in _time_entry_rows(session, project_id)
                 if visible is None or entry.activity_id in visible.activity_ids]
@@ -436,12 +437,14 @@ def export_data(
 def _export_activities(
     session: Session, links: ScheduleLinks, project_id: int, elements: Sequence[WbsElement],
     ordered: Sequence[Activity], dependencies: Sequence[ActivityDependency], visible: VisibleScope | None,
+    activity_codes: Mapping[int, str],
 ) -> list[ActivityRow]:
     predecessors = _predecessors(dependencies)
     if visible is not None:  # 見えない活動は、行にも先行にも出さない
         ordered = [a for a in ordered if a.id in visible.activity_ids]
         predecessors = {s: {p for p in ps if p in visible.activity_ids} for s, ps in predecessors.items()}
-    current = _activity_rows(session, ordered, elements, predecessors, _assignees(links, session, project_id))
+    current = _activity_rows(session, ordered, elements, predecessors, _assignees(links, session, project_id),
+                             activity_codes)
     return [current[a.id] for a in ordered]
 
 
@@ -756,7 +759,7 @@ def _import_activities(
     plan = load_plan(session, project_id)
     predecessors = _predecessors(plan.dependencies)
     assignees = _assignees(links, session, project_id)
-    current = _activity_rows(session, plan.activities, plan.elements, predecessors, assignees)
+    current = _activity_rows(session, plan.activities, plan.elements, predecessors, assignees, plan.activity_codes())
     assignable = _assignable(session, project_id)
     # 今の担当（無効にした利用者を含む）のログインID → ID（往復の一致と、残す担当の置き換えに使う）
     login_ids = {login: user_id for user_id, login in
@@ -773,7 +776,7 @@ def _import_activities(
     if not result.ok:
         return _rejected(target, file_format, dry_run, result.issues)
     # 新しく置く担当は、置ける利用者（メンバーである有効な利用者）でなければならない（API-EFF-001・API-SCH-004 と同じ）
-    column = ACTIVITY_COLUMNS[8]
+    column = "担当者のログインID（; 区切り）"
     issues: list[ImportIssue] = []
     for change in result.changes:
         before = set() if change.activity_id is None else set(current[change.activity_id].assignee_login_ids)
@@ -789,7 +792,7 @@ def _import_activities(
         start = _written_start(plan, change)
         old = None if change.activity_id is None else plan.activity_by_id[change.activity_id].requested_start
         if start is not None and starts_before_project(project_start, start, old):
-            issues.append(ImportIssue(change.line, ACTIVITY_COLUMNS[3], ImportIssueCode.BEFORE_PROJECT_START,
+            issues.append(ImportIssue(change.line, "希望開始日", ImportIssueCode.BEFORE_PROJECT_START,
                                       f"希望開始日 {start.isoformat()} がプロジェクトの開始日 {project_start.isoformat()} より前です"))
     if issues:
         return _rejected(target, file_format, dry_run, issues)
@@ -877,7 +880,7 @@ def _write_activities(
             if row.estimate_hours is not None:
                 _add_estimate_record(session, project_id, TargetType.ACTIVITY, activity.id, row.estimate_hours,
                                      actor, now)
-        if ACTIVITY_COLUMNS[7] in changed:  # 先行：ファイルの値がその活動の先行の全て
+        if "先行の活動ID（; 区切り）" in changed:  # 先行：ファイルの値がその活動の先行の全て
             wanted = set(row.predecessor_ids)
             kept: set[int] = set()
             for dependency in dependencies.get(activity.id, []):
@@ -888,7 +891,7 @@ def _write_activities(
             for predecessor_id in sorted(wanted - kept):
                 session.add(ActivityDependency(project_id=project_id, predecessor_id=predecessor_id,
                                                successor_id=activity.id))
-        if ACTIVITY_COLUMNS[8] in changed:
+        if "担当者のログインID（; 区切り）" in changed:
             links.assignments.replace_assignees(session, activity.id,
                                                 frozenset(login_ids[x] for x in row.assignee_login_ids))
         keys[change.line] = str(activity.id)
