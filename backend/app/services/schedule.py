@@ -81,9 +81,10 @@ from app.models.wbs import WbsElement
 from app.services.auth import authorize_project, principal_of
 from app.services.project_access import ProjectAccess
 
-# PATCH（API-SCH-003）で受ける項目。``requested_finish`` は保存しない（開始日・期間を求めるのに使う。SCH-03）
-UPDATABLE_FIELDS = frozenset({"name", "requested_start", "requested_finish", "duration_days", "is_milestone"})
-_NON_NULLABLE_FIELDS = frozenset({"name", "duration_days", "is_milestone"})
+# PATCH（API-SCH-003）で受ける項目。``requested_finish``・``planned_finish`` は保存しない（開始日・期間を求めるのに使う。SCH-03・CR-024）
+_DATE_FIELDS = frozenset({"requested_start", "requested_finish", "duration_days", "is_milestone"})
+UPDATABLE_FIELDS = frozenset({"name", *_DATE_FIELDS, "work_package_id", "position", "planned_finish"})
+_NON_NULLABLE_FIELDS = frozenset({"name", "duration_days", "is_milestone", "work_package_id", "planned_finish"})
 WORK_PACKAGE = "WORK_PACKAGE"
 BASELINE_REASON_MANUAL = "MANUAL"
 
@@ -590,10 +591,13 @@ def update_activity(
     activity_id: int,
     changes: Mapping[str, Any],
 ) -> ActivityView:
-    """活動の名称・日付・期間・マイルストーンを変え（schedule.edit）、日程を計算し直す。載せた項目だけを変える。
+    """活動の名称・日付・期間・マイルストーン・置き場を変え（schedule.edit）、日程を計算し直す。載せた項目だけを変える。
 
     終了日だけを載せたら期間を保って開始日を動かす。開始日か期間と組なら残りを求める（SCH-03）。
     求めた希望開始日が今と違い、プロジェクトの開始日より前なら 422 ``BEFORE_PROJECT_START``（CR-018）。
+    ``planned_finish`` は今の予定開始日からその日（前の稼働日へ寄せる）までを期間にし、希望開始日は変えない。
+    ``work_package_id``・``position`` は置き場の WP と WP の中の位置（0 から）を変える（CR-024）。
+    検査は全て書く前に行う（1 つでも不正なら何も変えない）。
     """
     authorize_project(session, access, actor, project_id, "schedule.edit")
     # プロジェクトの開始日（希望開始日の下限。CR-018）を、開始日の変更（API-PRJ-004）と同時に変えないようロックしてから読む（A-49 の 3）
@@ -605,7 +609,11 @@ def update_activity(
     nulls = [n for n in sorted(_NON_NULLABLE_FIELDS & set(changes)) if changes[n] is None]
     if nulls:
         raise _validation_error([{"loc": ["body", n], "message": "空にできません"} for n in nulls])
-    if {"requested_start", "requested_finish", "duration_days", "is_milestone"} & set(changes):
+    planned_duration = (
+        _duration_until(session, project_id, activity, changes) if "planned_finish" in changes else None
+    )
+    new_order = _placement(session, project_id, activity, changes)
+    if _DATE_FIELDS & set(changes):
         is_milestone = changes.get("is_milestone")
         if "duration_days" in changes:
             duration: int | None = changes["duration_days"]
@@ -633,11 +641,61 @@ def update_activity(
         activity.requested_start = new_start
         activity.duration_days = new_duration
         activity.is_milestone = new_duration == 0
+    if planned_duration is not None:
+        activity.duration_days = planned_duration
+    if new_order is not None:
+        target, ordered = new_order
+        activity.work_package_id = target
+        for index, row in enumerate(ordered, start=1):
+            row.sort_order = index
     if "name" in changes:
         activity.name = changes["name"]
     plan, _ = calculate_and_store(session, project_id)
     session.commit()
     return _views(session, links, plan, [activity])[0]
+
+
+def _duration_until(session: Session, project_id: int, activity: Activity, changes: Mapping[str, Any]) -> int:
+    """``planned_finish``：今の予定開始日（日程計算の結果）からその日までの期間（稼働日）。希望開始日は変えない（CR-024）。
+
+    日付・期間・マイルストーンの項目と一緒に載せたら 400。マイルストーン・予定開始日の無い活動・予定開始日より前の終了日も 400。
+    """
+    clash = sorted(_DATE_FIELDS & set(changes))
+    if clash:
+        raise _invalid("planned_finish", f"{'・'.join(clash)} と一緒には指定できません")
+    if activity.is_milestone:
+        raise _invalid("planned_finish", "マイルストーンの期間は 0 です（終了日で期間を決められません）")
+    if activity.start_date is None:
+        raise _invalid("planned_finish", "予定開始日がまだありません（日程を計算し直してから指定します）")
+    try:
+        resolved = work_calendar(session, project_id).resolve_dates(start=activity.start_date,
+                                                                    end=changes["planned_finish"])
+    except CalendarError as exc:
+        raise _invalid("planned_finish", f"予定開始日 {activity.start_date} より前には終われません") from exc
+    return resolved.duration
+
+
+def _placement(
+    session: Session, project_id: int, activity: Activity, changes: Mapping[str, Any]
+) -> tuple[int, list[Activity]] | None:
+    """``work_package_id``・``position``：移す先の WP と、その WP の中の新しい並び（CR-024）。変えないなら None。
+
+    移す先がこのプロジェクトの要素でなければ 400、WP でなければ 422 ``ACTIVITY_NOT_ON_WORK_PACKAGE``（RULE-WBS-003）。
+    位置を省くと、別の WP へは末尾、同じ WP なら並びを変えない。末尾より後の位置は末尾にする。
+    """
+    position = changes.get("position")
+    target = changes.get("work_package_id", activity.work_package_id)
+    if target == activity.work_package_id and position is None:
+        return None
+    plan = load_plan(session, project_id)
+    if target not in plan.element_by_id:
+        raise _invalid("work_package_id", "このプロジェクトの WBS 要素ではありません")
+    _ensure_on_work_package(plan, [ActivityRef(id=a.id, work_package_id=target if a.id == activity.id else a.work_package_id)
+                                   for a in plan.activities])
+    siblings = sorted((a for a in plan.activities if a.work_package_id == target and a.id != activity.id),
+                      key=lambda a: (a.sort_order, a.id))
+    at = len(siblings) if position is None else min(position, len(siblings))
+    return target, [*siblings[:at], plan.activity_by_id[activity.id], *siblings[at:]]
 
 
 def _assignable_user_ids(session: Session, project_id: int) -> frozenset[int]:

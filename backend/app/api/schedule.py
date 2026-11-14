@@ -204,6 +204,8 @@ def update_activity(
 
     権限は schedule.edit。載せた項目だけを変える。終了日だけなら期間を保って開始日を動かす（SCH-03）。
     希望開始日が今と違う値でプロジェクトの開始日より前になるなら 422 ``BEFORE_PROJECT_START``（5.5・CR-018）。
+    ``work_package_id``・``position`` で置き場の WP と WP の中の位置を、``planned_finish`` で今の予定開始日から数えた
+    終了日（期間）を変える（ガントの編集。CR-024）。
     """
     view = schedule_service.update_activity(
         session, access, user, links, project_id, activity_id, body.model_dump(exclude_unset=True)

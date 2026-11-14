@@ -29,7 +29,11 @@ class ActivityCreate(BaseModel):
 
 
 class ActivityUpdate(BaseModel):
-    """活動を変える（API-SCH-003）。載せた項目だけを変える。``requested_start`` の null は希望開始日を空にする。"""
+    """活動を変える（API-SCH-003）。載せた項目だけを変える。``requested_start`` の null は希望開始日を空にする。
+
+    ``work_package_id``・``position`` は置き場の WP と WP の中の位置（0 から）、``planned_finish`` は今の予定開始日から数えた
+    終了日（希望開始日は変えずに期間を決める）。CR-024
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -38,6 +42,9 @@ class ActivityUpdate(BaseModel):
     requested_finish: date | None = None
     duration_days: int | None = Field(default=None, ge=0, le=DURATION_MAX)
     is_milestone: bool | None = None
+    work_package_id: int | None = None
+    position: int | None = Field(default=None, ge=0)
+    planned_finish: date | None = None
 
 
 class ActivityChangeIn(BaseModel):
