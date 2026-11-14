@@ -463,4 +463,53 @@
   :where(p.gantt-legend) {
     color: var(--fgColor-muted);
   }
+
+  /* ガントの編集（7.3。CR-024）：操作の帯・行を足す欄・選んだ行の欄 */
+  :where(.gantt-edit) {
+    margin: var(--space-sm) 0;
+    padding: var(--space-sm) var(--space-md);
+    border: var(--borderWidth-default) solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+    background: var(--bgColor-muted);
+  }
+  :where(.gantt-edit-toolbar, .gantt-edit-add, .gantt-selection-fields > form) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs) var(--space-sm);
+    margin: var(--space-xs) 0;
+  }
+  :where(.gantt-edit-toolbar > span) {
+    margin-inline-end: var(--space-md);
+  }
+  :where(.gantt-edit-add > input) {
+    min-width: calc(var(--base-size-64) * 4);
+  }
+  :where(.gantt-edit-status) {
+    min-height: 1lh;
+    margin: var(--space-xs) 0;
+  }
+  :where(.gantt-edit > .note) {
+    margin: var(--space-xs) 0 0;
+    font-size: var(--text-body-size-small);
+  }
+  :where(.gantt-selection) {
+    margin: var(--space-sm) 0;
+    padding: var(--space-sm) var(--space-md);
+    border: var(--borderWidth-default) solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+  }
+  :where(.gantt-selection > h3) {
+    margin: 0 0 var(--space-xs);
+  }
+  :where(.gantt-selection > h4) {
+    margin: var(--space-sm) 0 var(--space-xxs);
+  }
+  :where(.gantt-selection ul) {
+    margin: 0;
+    padding-inline-start: var(--space-lg);
+  }
+  :where(.gantt-selection li > button) {
+    margin-inline-start: var(--space-sm);
+  }
 }

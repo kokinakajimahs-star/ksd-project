@@ -77,6 +77,22 @@ export function chartRange(gantt: Pick<Gantt, "range_start" | "range_end">, extr
   return { start, end };
 }
 
+/** 編集するとき（7.3 の「編集」。CR-024）にバーの終わりの後ろへ空ける暦日の数（バーを右へ動かせるように） */
+export const EDIT_PAD_DAYS = 28;
+
+/**
+ * 編集するときの範囲の元：バーが無ければプロジェクトの開始日（空の計画にも行を足せるように）。
+ * chartRange・rangeToRefetch に gantt の代わりに渡す（GanttChart と GanttPage で同じ範囲にする）
+ */
+export function editRangeBase(gantt: Pick<Gantt, "project_start" | "range_start" | "range_end">): Pick<Gantt, "range_start" | "range_end"> {
+  return { range_start: gantt.range_start ?? gantt.project_start, range_end: gantt.range_end ?? gantt.project_start };
+}
+
+/** 編集するときに範囲を広げる日付：バーの終わり（無ければプロジェクトの開始日）の EDIT_PAD_DAYS 日後 */
+export function editExtraDates(gantt: Pick<Gantt, "project_start" | "range_end">): string[] {
+  return [addDays(gantt.range_end ?? gantt.project_start, EDIT_PAD_DAYS)];
+}
+
 /** 描く範囲を広げる線（GanttChart の lightning・reportLightning・pastLines と同じもの） */
 export interface RangeLines {
   lightning?: LightningLine | null;
