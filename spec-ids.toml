@@ -193,6 +193,11 @@ skip_note = "要求→設計の写像（GAP・ORPHAN・分母の減少）を確�
 #   流す ui-review のグラフ（graphs/ui-review.toml）か `bash scripts/verify.sh ui` の中だけである。
 #   起動のしかた（開発用）：`.venv/bin/uvicorn` でサーバを 127.0.0.1:8000 に、`npm --prefix frontend run dev` で画面を 5173 に
 #   （vite.config.ts が /api をサーバへ渡す）
+#
+# ログインの要る画面（CR-026）：本番へ向けて利用者の端末で流したときだけ、下の [[ui_runtime.login]] の検証専用の利用者で
+#   ログインしてから開く：KLOOP_UI_RUNTIME_BASE_URL=<本番の URL> bash scripts/verify.sh ui
+#   利用者と秘密は deploy/ui-verify-user.sh が用意する（deploy/README.md の 12 章）。手元（base_url）ではログインせず、
+#   ログインの要る画面は「見ていない」になる。sandbox の中では agent-browser も Google Cloud の資格も見えない
 
 [ui_runtime]
 # vite の開発サーバの既定の口。空にすると実ブラウザでの評価そのものを行わない
@@ -202,37 +207,30 @@ command = ["agent-browser"]
 # axe のタグ。既定は WCAG 2.1 レベル A / AA
 a11y_tags = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]
 # 共有ビュー（UI-RPT-002）は無効なトークンで開き、「リンクが無効」の表示を評価する（有効なトークンは本物の
-# データと共有リンクが要り、決まった値にならないため）
-route_params = { token = "ui-runtime-invalid-token" }
-# **ログインの要る画面は見ない。** agent-browser はログインしないので、RequireAuth がログイン画面へ送り、
-# 別の画面 ID の名でログイン画面を評価することになる（「見た」と数えると誤る）。ログインしてから開く手段が
-# 検証器に入るまでは外す。見るのは UI-CMN-001（ログイン）と UI-RPT-002（共有ビュー）の 2 画面だけ
-skip_routes = [
-  "/admin/users",
-  "/approvals",
-  "/timesheet",
-  "/projects",
-  "/projects/:projectId/settings",
-  "/projects/:projectId/wbs",
-  "/projects/:projectId/wbs/:elementId",
-  "/projects/:projectId/wbs-review",
-  "/projects/:projectId/responsibility",
-  "/projects/:projectId/activities",
-  "/projects/:projectId/gantt",
-  "/projects/:projectId/baselines",
-  "/projects/:projectId/status-reports/:reportId",
-  "/projects/:projectId/status-reports/:reportId/delays",
-  "/projects/:projectId/status-reports/:reportId/meeting",
-  "/projects/:projectId/effort",
-  "/projects/:projectId/change-requests",
-  "/projects/:projectId/corrective-actions",
-  "/projects/:projectId/audit-logs",
-  "/projects/:projectId/import-export",
-]
+# データと共有リンクが要り、決まった値にならないため）。projectId・elementId・reportId は本番の試行のプロジェクトと
+# その WBS の先頭の要素・最も新しい報告日（deploy/ui-verify-user.sh が 2026-11-14 に出した値。消したら流し直して書き直す）
+route_params = { token = "ui-runtime-invalid-token", projectId = "1", elementId = "1", reportId = "1" }
+# 外す画面は無い（CR-026）。ログインの要る画面は外さず、[[ui_runtime.login]] でログインしてから開く（雛形どおり）
+skip_routes = []
 # コンソールのエラーは失敗に数えない（雛形の既定。件数と例は notes に出る）。無効なトークンの共有ビューは
 # サーバの 404 をコンソールに出すことがあり、実装の欠陥と区別できないため
 console_errors_are_failures = false
 timeout_seconds = 60
+
+# 本番（CR-026）。base_url のオリジンがこの origin と一致するときだけログインする。検証専用で読むだけの利用者
+# （ロール VIEWER。システムの権限なし）。ほかの権限が要る画面は、権限の無いときの表示を評価する
+[[ui_runtime.login]]
+origin = "https://ksdp-pmt-imkqx6zkma-an.a.run.app"
+secret = "projects/kc-dbsb-poc-260109/secrets/ksdp-ui-verify-password/versions/latest"
+username = "ui-verify"
+# ログインせずに開く画面：ログインと共有ビュー
+logged_out = ["UI-CMN-001", "UI-RPT-002"]
+# API-CMN-001 の本文の欄
+request = { path = "/api/v1/auth/login", username_field = "login_id", password_field = "password" }
+# 画面が覚えるログインの形（frontend/src/auth/session.tsx の SESSION_STORAGE_KEY と Session。A-25）
+session = { session_storage = { key = "pmt.session", fields = { token = "access_token", expiresAt = "expires_at", user = "user" } } }
+# API-CMN-002（応答の access_token を Authorization: Bearer に付けて失効させる）
+logout = { path = "/api/v1/auth/logout" }
 
 [[checks]]
 name = "ui-runtime"
@@ -247,3 +245,5 @@ skip_note = "実ブラウザでの評価を実行していない。画面が実�
 # **導入が任意であるため false にしてある**（雛形どおり）。外部 CLI（agent-browser）とブラウザに加え、
 # アプリが起動していることも要る。関門ではいつも「見ていない」になるので、true にしない
 required = false
+# 環境ごと（手元・本番）に流すので、検証の結果を再利用しない（雛形どおり。合否は鍵に入らないアプリの応答に依る。CR-026）
+reuse = false
