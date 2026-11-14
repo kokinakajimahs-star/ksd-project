@@ -5,12 +5,13 @@ import { makeActivity, makeGanttRow } from "../../../test/schFixtures";
 import { makeElement, sampleElements } from "../../../test/wbsFixtures";
 import {
   activityStepPlan,
-  addTarget,
+  addPlan,
   deletionPlan,
   elementStepPlan,
   groupActivitiesPlan,
   groupElementsPlan,
   indentPlan,
+  moveTargetPlan,
   outdentPlan,
   rangeKeys,
   stepSelection,
@@ -126,19 +127,84 @@ describe("groupElementsPlan", () => {
   });
 });
 
-describe("addTarget", () => {
-  it("活動の行なら、その WP に活動を足す", () => {
-    expect(addTarget(elements, activities, "a24")).toEqual({ kind: "activity", workPackage: elements[2] });
+describe("addPlan（CR-025：足す先と、名前の入力の行を差し込む位置）", () => {
+  // e100（深さ 1）─ e101（WP：21・22・23）・e102（WP：24）、e103
+  const outline = buildOutline(
+    elements,
+    [
+      makeGanttRow({ row_index: 0, activity_id: 21, work_package_id: 101 }),
+      makeGanttRow({ row_index: 1, activity_id: 22, work_package_id: 101 }),
+      makeGanttRow({ row_index: 2, activity_id: 23, work_package_id: 101 }),
+      makeGanttRow({ row_index: 3, activity_id: 24, work_package_id: 102 }),
+    ],
+    true,
+  );
+
+  it("表示の並びを確かめる", () => {
+    expect(outline.map((r) => `${r.key}:${r.depth}`)).toEqual(["e100:1", "e101:2", "a21:3", "a22:3", "a23:3", "e102:2", "a24:3", "e103:1"]);
   });
 
-  it("WP の行なら、その WP に活動を足す", () => {
-    expect(addTarget(elements, activities, "e101")).toEqual({ kind: "activity", workPackage: elements[1] });
+  it("活動の行なら、同じ WP のその活動の次に活動を足す（WP の末尾なら位置は決めない）", () => {
+    expect(addPlan(elements, activities, outline, "a21")).toEqual({
+      ok: true,
+      value: { kind: "activity", workPackage: elements[1], position: 1, index: 3, depth: 3 },
+    });
+    expect(addPlan(elements, activities, outline, "a23")).toEqual({
+      ok: true,
+      value: { kind: "activity", workPackage: elements[1], position: null, index: 5, depth: 3 },
+    });
   });
 
-  it("WP 以外の要素の行なら子の要素を、何も選んでいなければ最上位の要素を足す", () => {
-    expect(addTarget(elements, activities, "e100")).toEqual({ kind: "element", parent: elements[0] });
-    expect(addTarget(elements, activities, null)).toEqual({ kind: "element", parent: null });
-    expect(addTarget(elements, activities, "e999")).toEqual({ kind: "element", parent: null });
+  it("WP の行なら、その WP の末尾（配下の行の後）に活動を足す", () => {
+    expect(addPlan(elements, activities, outline, "e101")).toEqual({
+      ok: true,
+      value: { kind: "activity", workPackage: elements[1], position: null, index: 5, depth: 3 },
+    });
+  });
+
+  it("WP 以外の要素の行なら子の要素（WP）を配下の行の後に、何も選んでいなければ最上位の要素（WP）を末尾に足す", () => {
+    expect(addPlan(elements, activities, outline, "e100")).toEqual({
+      ok: true,
+      value: { kind: "element", parent: elements[0], elementKind: "WORK_PACKAGE", position: null, index: 7, depth: 2 },
+    });
+    const top = { ok: true, value: { kind: "element", parent: null, elementKind: "WORK_PACKAGE", position: null, index: 8, depth: 1 } };
+    expect(addPlan(elements, activities, outline, null)).toEqual(top);
+    expect(addPlan(elements, activities, outline, "e999")).toEqual(top);
+  });
+
+  it("同じ階層：要素の行の配下の後に、同じ区分の要素を足して次の位置へ置く（兄弟の末尾なら位置は決めない）", () => {
+    expect(addPlan(elements, activities, outline, "e101", true)).toEqual({
+      ok: true,
+      value: { kind: "element", parent: elements[0], elementKind: "WORK_PACKAGE", position: 1, index: 5, depth: 2 },
+    });
+    expect(addPlan(elements, activities, outline, "e102", true)).toEqual({
+      ok: true,
+      value: { kind: "element", parent: elements[0], elementKind: "WORK_PACKAGE", position: null, index: 7, depth: 2 },
+    });
+    expect(addPlan(elements, activities, outline, "e100", true)).toEqual({
+      ok: true,
+      value: { kind: "element", parent: null, elementKind: elements[0]!.kind, position: 1, index: 7, depth: 1 },
+    });
+  });
+
+  it("活動の WP が木に無ければ理由を返す", () => {
+    expect(addPlan(elements, [makeActivity({ id: 21, work_package_id: 999 })], outline, "a21").ok).toBe(false);
+  });
+});
+
+describe("moveTargetPlan（CR-025：活動を移す先）", () => {
+  it("WP の行ならその WP の末尾へ、活動の行ならその活動の次へ（位置は自分を除いた活動の中）", () => {
+    expect(moveTargetPlan(elements, activities, 21, "e102")).toEqual({ ok: true, value: { workPackage: elements[2], position: 1 } });
+    expect(moveTargetPlan(elements, activities, 21, "a24")).toEqual({ ok: true, value: { workPackage: elements[2], position: 1 } });
+    expect(moveTargetPlan(elements, activities, 23, "a21")).toEqual({ ok: true, value: { workPackage: elements[1], position: 1 } });
+  });
+
+  it("WP 以外の要素・自分・木に無い行は理由を返す", () => {
+    const refused = moveTargetPlan(elements, activities, 21, "e100");
+    expect(refused).toEqual({ ok: false, reason: "1.0 要件定義 はワークパッケージではないので、活動を置けません（RULE-WBS-003）" });
+    expect(moveTargetPlan(elements, activities, 21, "a21").ok).toBe(false);
+    expect(moveTargetPlan(elements, activities, 21, "e999").ok).toBe(false);
+    expect(moveTargetPlan(elements, activities, 99, "e102").ok).toBe(false);
   });
 });
 
