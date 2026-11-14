@@ -74,6 +74,12 @@ export interface ActivityUpdateInput {
   requested_finish?: string | null;
   duration_days?: number;
   is_milestone?: boolean;
+  /** 移す先の WP（CR-024） */
+  work_package_id?: number;
+  /** WP の中の位置（0 から。CR-024） */
+  position?: number;
+  /** 今の予定開始日からこの日までを期間にする（日付・期間・マイルストーンの項目と一緒には送らない。CR-024） */
+  planned_finish?: string;
 }
 
 /** 一括更新の 1 件（API-SCH-004）。載せた項目だけを変える。先行・担当は全体の置き換え */

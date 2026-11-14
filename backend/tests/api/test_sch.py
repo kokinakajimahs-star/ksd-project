@@ -337,6 +337,71 @@ def test_update_activity_reschedules_successors(world: World, client: TestClient
     assert client.patch(other.url(f"/activities/{a}"), json={"name": "x"}, headers=other.h["pm"]).status_code == 404
 
 
+def test_update_activity_planned_finish_sets_duration_from_planned_start(world: World, client: TestClient) -> None:
+    """CR-024：``planned_finish`` は今の予定開始日からその日までを期間にし、希望開始日は変えない（ガントの右端のドラッグ）。"""
+    a, b, m, c = chain(world)
+    assert dates(world.activities()[b]) == ("2026-12-04", "2026-12-07")  # 先行 A の後（12/05・06 は週末）
+    response = client.patch(world.url(f"/activities/{b}"), json={"planned_finish": "2026-12-09"}, headers=world.h["planner"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["requested_start"], body["duration_days"], dates(body)) == (None, 4, ("2026-12-04", "2026-12-09"))
+    assert dates(world.activities()[m]) == ("2026-12-09", "2026-12-09")  # 後続へ反映される（SCH-06）
+    # 非稼働日に落としたら前の稼働日へ寄せる
+    weekend = client.patch(world.url(f"/activities/{b}"), json={"planned_finish": "2026-12-06"}, headers=world.h["pm"])
+    assert (weekend.json()["duration_days"], dates(weekend.json())) == (1, ("2026-12-04", "2026-12-04"))
+
+    for activity_id, payload in (
+        (b, {"planned_finish": "2026-12-03"}),  # 予定開始日より前
+        (b, {"planned_finish": "2026-12-09", "duration_days": 2}),  # 期間と一緒
+        (b, {"planned_finish": "2026-12-09", "requested_start": "2026-12-04"}),  # 希望開始日と一緒
+        (b, {"planned_finish": None}),
+        (m, {"planned_finish": "2026-12-10"}),  # マイルストーン
+    ):
+        rejected = client.patch(world.url(f"/activities/{activity_id}"), json=payload, headers=world.h["pm"])
+        assert rejected.status_code == 400, (payload, rejected.text)
+        assert rejected.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert world.activities()[b]["duration_days"] == 1
+    assert client.patch(world.url(f"/activities/{b}"), json={"planned_finish": "2026-12-09"},
+                        headers=world.h["viewer"]).status_code == 403
+
+
+def test_update_activity_moves_between_work_packages_and_reorders(world: World, client: TestClient) -> None:
+    """CR-024：``work_package_id``・``position`` で置き場の WP と WP の中の並びを変える（RULE-WBS-003 の WP だけに置ける）。"""
+    x1, x2, x3 = (world.add(n, duration_days=1)["id"] for n in ("x1", "x2", "x3"))
+    y1 = world.add("y1", wp=world.wp2, duration_days=1)["id"]
+
+    def order() -> list[int]:
+        response = client.get(world.url("/activities"), headers=world.h["viewer"])
+        return [a["id"] for a in response.json()["items"]]
+
+    def patch(activity_id: int, payload: dict[str, Any], who: str = "planner") -> Any:
+        return client.patch(world.url(f"/activities/{activity_id}"), json=payload, headers=world.h[who])
+
+    assert patch(x1, {"position": 2}).status_code == 200  # 同じ WP の中で並べ替える
+    assert order() == [x2, x3, x1, y1]
+    moved = patch(x3, {"work_package_id": world.wp2, "position": 0})  # 別の WP の先頭へ
+    assert moved.status_code == 200, moved.text
+    wp2_code = world.activities()[y1]["wbs_code"]
+    assert (moved.json()["work_package_id"], moved.json()["wbs_code"]) == (world.wp2, wp2_code)
+    assert order() == [x2, x1, x3, y1]
+    assert patch(x2, {"work_package_id": world.wp2}).status_code == 200  # 位置を省けば末尾
+    assert order() == [x1, x3, y1, x2]
+    assert patch(x1, {"work_package_id": world.wp2, "position": 99}).status_code == 200  # 末尾より後は末尾
+    assert order() == [x3, y1, x2, x1]
+    assert patch(x1, {"work_package_id": world.wp}).status_code == 200
+    assert patch(x1, {"work_package_id": world.wp2}).status_code == 200
+    assert order() == [x3, y1, x2, x1]
+
+    not_wp = patch(x1, {"work_package_id": world.deliverable, "name": "変えない"})
+    assert not_wp.status_code == 422 and not_wp.json()["error"]["code"] == "ACTIVITY_NOT_ON_WORK_PACKAGE"
+    other = World(client, world.session, code="PRJ-T")
+    assert patch(x1, {"work_package_id": other.wp}).status_code == 400
+    assert patch(x1, {"work_package_id": None}).status_code == 400
+    assert patch(x1, {"position": -1}).status_code == 400
+    assert world.activities()[x1]["name"] == "x1" and order() == [x3, y1, x2, x1]  # 不正なら何も変えない
+    assert patch(x1, {"work_package_id": world.wp}, who="viewer").status_code == 403
+
+
 # ---------------------------------------------------------------------------
 # API-SCH-004 活動をまとめて変える（SCH-02）
 # ---------------------------------------------------------------------------

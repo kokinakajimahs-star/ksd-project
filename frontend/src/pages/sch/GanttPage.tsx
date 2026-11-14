@@ -4,7 +4,9 @@
 // 非稼働日はサーバから受け取る：描く範囲（バーの範囲を報告日線・頂点・過去の線で広げたもの）が受け取った範囲に収まらなければ、
 // 描く範囲を range_start・range_end に渡して読み直す（7.3）。
 // 日程の再計算（API-SCH-008）のボタンは schedule.edit、報告日を作る部品（API-PRG-001。報告日が無くても出す）は
-// status_report.manage を持つ人にだけ出す（7.2。サーバでも必ず判定する）
+// status_report.manage を持つ人にだけ出す（7.2。サーバでも必ず判定する）。
+// WBS の木（API-WBS-001）から要素の行を差し込み（7.3。読めなければ活動の行だけ）、schedule.edit か wbs.edit を持つ人は
+// 「編集する」で行・日付・依存をこの画面で変えられる（7.3 の「編集」。CR-024）
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -28,10 +30,14 @@ import {
   type ScheduleBaseline,
   type ScheduleResult,
 } from "../../api/sch";
+import { getWbsTree, type WbsTree } from "../../api/wbs";
 import ErrorAlert from "../../components/ErrorAlert";
 import GanttChart from "../../components/gantt/GanttChart";
+import { buildOutline } from "../../components/gantt/outline";
 import {
   chartExtraDates,
+  editExtraDates,
+  editRangeBase,
   judgementColor,
   JUDGEMENT_LABELS,
   rangeToRefetch,
@@ -42,6 +48,8 @@ import {
 } from "../../components/gantt/scale";
 import CreateReportForm from "../prg/CreateReportForm";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
+import { GanttEditBar, GanttSelectionPanel } from "./gantt/GanttEditBar";
+import { useGanttEditor } from "./gantt/useGanttEditor";
 import { LIST_LIMIT_MAX } from "./limits";
 
 const UNITS: GanttUnit[] = ["day", "week", "month"];
@@ -94,6 +102,13 @@ export default function GanttPage() {
   const [calculating, setCalculating] = useState(false);
   const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
   const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
+  /** WBS の木（要素の行に使う）。読めなければ null（要素の行を出さない） */
+  const [tree, setTree] = useState<WbsTree | null>(null);
+  const [treeFailed, setTreeFailed] = useState(false);
+  const [editing, setEditing] = useState(false);
+  /** ガント・WBS の木を読み終えた reloadKey（読めなかったときも。保存の後の読み直しが終わるまで編集の操作を受けない） */
+  const [ganttKey, setGanttKey] = useState<number | null>(null);
+  const [treeKey, setTreeKey] = useState<number | null>(null);
 
   // 自分の権限・基準の版・報告日（全件。画面を開いたときに 1 回）
   useEffect(() => {
@@ -131,16 +146,19 @@ export default function GanttPage() {
       return;
     }
     let cancelled = false;
+    const key = reloadKey;
     setGanttFailed(false);
     getGantt(projectId, baselineId ?? undefined, requestedRange ?? undefined).then(
       (result) => {
         if (!cancelled) {
           setGantt(result);
+          setGanttKey(key);
         }
       },
       (e: unknown) => {
         if (!cancelled) {
           setGanttFailed(true);
+          setGanttKey(key);
           setError(toErrorView(e));
         }
       },
@@ -200,11 +218,42 @@ export default function GanttPage() {
     };
   }, [projectId, pastReportIds, reloadKey]);
 
-  // 描く範囲を広げる日付（GanttChart と同じ関数。7.3）
-  const extraDates = useMemo(
-    () => (gantt === null ? [] : chartExtraDates(gantt.rows, { lightning, pastLines })),
-    [gantt, lightning, pastLines],
-  );
+  // WBS の木（要素の行。保存の後も読み直す）。読めなければ要素の行を出さずに今までどおり描く（7.3）
+  useEffect(() => {
+    if (projectId === null) {
+      return;
+    }
+    let cancelled = false;
+    const key = reloadKey;
+    getWbsTree(projectId).then(
+      (result) => {
+        if (!cancelled) {
+          setTree(result);
+          setTreeFailed(false);
+          setTreeKey(key);
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setTree(null);
+          setTreeFailed(true);
+          setTreeKey(key);
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, reloadKey]);
+
+  // 描く範囲を広げる日付（GanttChart と同じ関数。7.3）。編集するときはバーの終わりの後ろへ広げる
+  const extraDates = useMemo(() => {
+    if (gantt === null) {
+      return [];
+    }
+    const lines = chartExtraDates(gantt.rows, { lightning, pastLines });
+    return editing ? [...lines, ...editExtraDates(gantt)] : lines;
+  }, [gantt, lightning, pastLines, editing]);
 
   // 今のガントの行に当てられず描かない頂点の数（GanttChart と同じ当て方。黙って落とさず注記する。A-49 の 13）
   const unplaced = useMemo(
@@ -218,11 +267,30 @@ export default function GanttPage() {
     if (gantt === null) {
       return;
     }
-    const next = rangeToRefetch(gantt, extraDates, requestedRange);
+    const next = rangeToRefetch(editing ? editRangeBase(gantt) : gantt, extraDates, requestedRange);
     if (next !== null) {
       setRequestedRange(next);
     }
-  }, [gantt, extraDates, requestedRange]);
+  }, [gantt, extraDates, requestedRange, editing]);
+
+  const outline = useMemo(
+    () => (gantt === null || tree === null ? undefined : buildOutline(tree.elements, gantt.rows, editing)),
+    [gantt, tree, editing],
+  );
+  const canEditSchedule = me !== null && projectId !== null && hasProjectPermission(me, projectId, "schedule.edit");
+  const canEditWbs = me !== null && projectId !== null && hasProjectPermission(me, projectId, "wbs.edit");
+  const editor = useGanttEditor({
+    projectId: projectId ?? 0,
+    enabled: editing && projectId !== null && tree !== null && gantt !== null,
+    gantt,
+    elements: tree?.elements ?? null,
+    outline: outline ?? [],
+    canEditSchedule,
+    canEditWbs,
+    reloadKey,
+    pageSettled: ganttKey === reloadKey && treeKey === reloadKey,
+    onChanged: () => setReloadKey((k) => k + 1),
+  });
 
   const finalized = useMemo(() => reports.filter((r) => r.status === "FINALIZED"), [reports]);
   const listedRows = useMemo(() => {
@@ -244,7 +312,6 @@ export default function GanttPage() {
     );
   }
 
-  const canEditSchedule = me !== null && hasProjectPermission(me, projectId, "schedule.edit");
   const canManageReports = me !== null && hasProjectPermission(me, projectId, "status_report.manage");
 
   async function handleCalculate() {
@@ -329,6 +396,11 @@ export default function GanttPage() {
             日程を計算し直す
           </button>
         )}
+        {(canEditSchedule || canEditWbs) && (
+          <button type="button" aria-pressed={editing} onClick={() => setEditing((e) => !e)}>
+            {editing ? "編集を終える" : "編集する"}
+          </button>
+        )}
       </div>
 
       {canManageReports && <CreateReportForm projectId={projectId} onCreated={handleReportCreated} />}
@@ -368,7 +440,31 @@ export default function GanttPage() {
             {gantt.baseline !== null ? `基準：第 ${gantt.baseline.version} 版 ${gantt.baseline.name}` : "基準の版はまだ無い"}
             {lightning !== null && `／報告日：${lightning.report.report_date}（許容幅 ${lightning.tolerance_days} 日）`}
           </p>
-          <GanttChart gantt={gantt} unit={unit} lightning={lightning} pastLines={pastLines} />
+          {editing && tree === null && (
+            <p role={treeFailed ? "alert" : undefined} className={treeFailed ? undefined : "loading"}>
+              {treeFailed ? "WBS を読めないので編集できません。読み直してください" : "WBS を読み込み中…"}
+            </p>
+          )}
+          {editing && tree !== null && !editor.ready && (
+            <p role={editor.loadError !== null ? "alert" : undefined} className={editor.loadError !== null ? undefined : "loading"}>
+              {editor.loadError !== null
+                ? `活動の一覧を読めないので編集できません（${editor.loadError.message}）。編集を終えてから入り直してください`
+                : "活動を読み込み中…"}
+            </p>
+          )}
+          {editor.ready && tree !== null && <GanttEditBar editor={editor} tree={tree} />}
+          {editor.ready && outline !== undefined && outline.length === 0 && (
+            <p className="note">WBS の要素がまだ無い。「行を足す」で最上位の要素を作る</p>
+          )}
+          <GanttChart
+            gantt={gantt}
+            unit={unit}
+            lightning={lightning}
+            pastLines={pastLines}
+            outline={outline}
+            edit={editor.chartEdit}
+          />
+          {editor.ready && <GanttSelectionPanel editor={editor} projectId={projectId} />}
           {unplaced !== null && unplaced.lightning > 0 && (
             <p className="note">{`今の計画に無い活動の頂点 ${unplaced.lightning} 件は描いていない`}</p>
           )}

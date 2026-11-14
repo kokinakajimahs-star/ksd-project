@@ -5,7 +5,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { test } from "@playwright/test";
+import { test, type Page } from "@playwright/test";
 
 import { SESSION_STORAGE_KEY } from "../src/auth/session";
 import { makeChangeRequest } from "../src/test/chgFixtures";
@@ -51,10 +51,43 @@ const COMMON: Record<string, unknown> = {
 
 interface Screen {
   id: string;
+  /** 写しのファイル名（省けば id）。同じ画面を操作の後でも撮るとき */
+  name?: string;
   path: string;
   login?: boolean;
   routes?: Record<string, unknown>;
+  /** 開いた後の操作（撮る前） */
+  act?: (page: Page) => Promise<void>;
 }
+
+/** UI-SCH-002：1.0 要件定義 ─ 1.1 業務整理（WP 101）・1.2 画面設計（WP 102）の行と活動 2 件（CR-024 の要素の行） */
+const GANTT_ROUTES: Record<string, unknown> = {
+  "GET /api/v1/projects/3/gantt": makeGantt({
+    rows: [
+      makeGanttRow(),
+      makeGanttRow({
+        row_index: 1,
+        activity_id: 22,
+        work_package_id: 102,
+        wbs_code: "1.2",
+        name: "基本設計",
+        work_package_name: "基本設計",
+        is_critical: true,
+        total_float: 0,
+        planned: makeBar("PLANNED", "2026-12-08", "2026-12-15"),
+        actual: makeBar("ACTUAL", "2026-12-08", "2026-12-12"),
+        percent_complete: 40,
+      }),
+    ],
+  }),
+  "GET /api/v1/projects/3/schedule-baselines": emptyPage,
+  "GET /api/v1/projects/3/status-reports": emptyPage,
+  "GET /api/v1/projects/3/wbs": makeTree(),
+  "GET /api/v1/projects/3/activities": activityList([
+    makeActivity({ start_date: "2026-12-01", finish_date: "2026-12-21" }),
+    makeActivity({ id: 22, work_package_id: 102, wbs_code: "1.2", name: "基本設計", requested_start: "2026-12-08" }),
+  ]),
+};
 
 const SCREENS: Screen[] = [
   { id: "UI-CMN-001", path: "/login", login: false },
@@ -97,29 +130,59 @@ const SCREENS: Screen[] = [
       ]),
     },
   },
+  { id: "UI-SCH-002", path: "/projects/3/gantt", routes: GANTT_ROUTES },
   {
     id: "UI-SCH-002",
+    name: "UI-SCH-002-edit",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').dispatchEvent("mousedown", { button: 0 });
+      await page.getByRole("region", { name: "選んだ行" }).waitFor();
+    },
+  },
+  {
+    // バーの本体を 2 日右へドラッグしている途中（離さない）：落とす先の日付の影
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-drag",
+    path: "/projects/3/gantt",
+    routes: GANTT_ROUTES,
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      const box = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
+      if (box !== null) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width / 2 + 24, box.y + box.height / 2, { steps: 4 });
+        await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2, { steps: 4 });
+      }
+    },
+  },
+  {
+    // 選んだ活動の右の丸を別の活動のバーへドラッグして離す：依存を足す（API-SCH-006）
+    id: "UI-SCH-002",
+    name: "UI-SCH-002-link",
     path: "/projects/3/gantt",
     routes: {
-      "GET /api/v1/projects/3/gantt": makeGantt({
-        rows: [
-          makeGanttRow(),
-          makeGanttRow({
-            row_index: 1,
-            activity_id: 22,
-            wbs_code: "1.2",
-            name: "基本設計",
-            work_package_name: "基本設計",
-            is_critical: true,
-            total_float: 0,
-            planned: makeBar("PLANNED", "2026-12-08", "2026-12-15"),
-            actual: makeBar("ACTUAL", "2026-12-08", "2026-12-12"),
-            percent_complete: 40,
-          }),
-        ],
-      }),
-      "GET /api/v1/projects/3/schedule-baselines": emptyPage,
-      "GET /api/v1/projects/3/status-reports": emptyPage,
+      ...GANTT_ROUTES,
+      "POST /api/v1/projects/3/dependencies": { id: 91, predecessor_id: 21, successor_id: 22, dep_type: "FS", lag_days: 0 },
+    },
+    act: async (page) => {
+      await page.getByRole("button", { name: "編集する" }).click();
+      await page.getByRole("toolbar", { name: "編集の操作" }).waitFor();
+      await page.locator('[data-layer="row-labels"] > g[data-row-key="a21"]').click();
+      const handle = await page.locator('[data-handle="link"]').boundingBox();
+      const target = await page.locator('[data-handle="move"][data-activity-id="22"]').boundingBox();
+      if (handle !== null && target !== null) {
+        await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 8 });
+        await page.mouse.up();
+      }
+      await page.getByText(/依存「.*」→「.*」を足した/).waitFor();
     },
   },
   {
@@ -169,7 +232,7 @@ test.afterAll(() => {
 });
 
 for (const screen of SCREENS) {
-  test(`${screen.id} ${screen.path}`, async ({ page }) => {
+  test(`${screen.name ?? screen.id} ${screen.path}`, async ({ page }) => {
     const unknown: string[] = [];
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -202,10 +265,14 @@ for (const screen of SCREENS) {
     await page.goto(screen.path);
     await page.locator(`[data-screen-id="${screen.id}"]`).first().waitFor();
     await page.waitForLoadState("networkidle");
-    await page.screenshot({ path: `${DIR}/${screen.id}.png`, fullPage: true });
+    if (screen.act !== undefined) {
+      await screen.act(page);
+      await page.waitForLoadState("networkidle");
+    }
+    await page.screenshot({ path: `${DIR}/${screen.name ?? screen.id}.png`, fullPage: true });
 
     notes.push(
-      `- ${screen.id} \`${screen.path}\`: 定めていない要求 ${unknown.length === 0 ? "なし" : unknown.join("・")}／` +
+      `- ${screen.name ?? screen.id} \`${screen.path}\`: 定めていない要求 ${unknown.length === 0 ? "なし" : unknown.join("・")}／` +
         `エラー ${errors.length === 0 ? "なし" : errors.join("・")}`,
     );
   });

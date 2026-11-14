@@ -1,6 +1,6 @@
 {
   "generated_from": "pmt-design.md",
-  "document_sha256": "0f130af275ded835",
+  "document_sha256": "53d3e6e77e06d86e",
   "kinds": {
     "db": {
       "label": "テーブル",
@@ -1516,7 +1516,7 @@
         },
         {
           "id": "API-SCH-003",
-          "name": "活動を変える（日程を再計算する。希望開始日はプロジェクトの開始日以降。CR-018）",
+          "name": "活動を変える（日程を再計算する。希望開始日はプロジェクトの開始日以降。CR-018。置き場の WP（`work_package_id`）と WP の中の位置（`position`。0 から。省けば別の WP へは末尾、同じ WP では並びを変えない）、今の予定開始日から数えた終了日（`planned_finish`。希望開始日は変えずに期間を決める。他の日付・期間・マイルストーンの項目と一緒には指定できない）も変えられる。CR-024）",
           "endpoints": [
             {
               "methods": [
@@ -2292,6 +2292,6 @@
     "ui": 22,
     "total": 193
   },
-  "source_sha256": "0f130af275ded83540dcfba7571840503e370e83f80cebc35240501bf556c26e:c7344081c0e9a8b931e28e80fc48eb5521cbee117b923bf808e28b3d20347596",
+  "source_sha256": "53d3e6e77e06d86ed4e9d5cc67a4dd3926e56d820e666d2de13c34e4b28b9e24:c7344081c0e9a8b931e28e80fc48eb5521cbee117b923bf808e28b3d20347596",
   "extractor_sha256": "b8d15ead6b061f8c9cd8001f4d4df78defe0d47749b77e3c74f15a631afde9d2"
 }
