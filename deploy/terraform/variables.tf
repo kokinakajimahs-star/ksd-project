@@ -81,6 +81,39 @@ variable "db_backup_start_time" {
   default     = "18:00"
 }
 
+variable "db_disk_autoresize_limit_gb" {
+  description = "Cloud SQL のディスクを自動で増やす上限（GB。0 は上限なし）。ディスクは減らせない"
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = floor(var.db_disk_autoresize_limit_gb) == var.db_disk_autoresize_limit_gb && (var.db_disk_autoresize_limit_gb == 0 || var.db_disk_autoresize_limit_gb >= 10)
+    error_message = "db_disk_autoresize_limit_gb は整数で、0（上限なし）か 10 以上にする（最初のディスクが 10 GB）。"
+  }
+}
+
+variable "registry_keep_recent" {
+  description = "Artifact Registry に残すイメージの数（イメージ pmt・pmt-test ごとに新しい順）。前のイメージへ戻すときはこの中から選ぶ"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = floor(var.registry_keep_recent) == var.registry_keep_recent && var.registry_keep_recent >= 2
+    error_message = "registry_keep_recent は 2 以上の整数にする（今のイメージと 1 つ前を残す）。"
+  }
+}
+
+variable "registry_delete_older_than_days" {
+  description = "Artifact Registry で、残す数より古いイメージを消すまでの日数"
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = floor(var.registry_delete_older_than_days) == var.registry_delete_older_than_days && var.registry_delete_older_than_days >= 1
+    error_message = "registry_delete_older_than_days は 1 以上の整数にする。"
+  }
+}
+
 variable "db_deletion_protection" {
   description = "Cloud SQL のインスタンスの削除保護（設計書 8 NFR-06）。全てを片付けるときだけ偽にする"
   type        = bool

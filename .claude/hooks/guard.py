@@ -1414,6 +1414,238 @@ def _cloud_texts_of(words: list[str], depth: int) -> list[str]:
     return [shlex.join([stem, *args])] if stem in CLOUD_CLIS else []
 
 
+#: 雛形（ksd-loop/templates/claude/hooks/guard.py。kloop 11.14.1）の CR-144 の部分だけを写したもの（2026-11-14。利用者の判断）。
+#: 雛形の RQ-KL-017・CR-139（heredoc の中身を外す）は写していない
+def _command_words(words: list[str]) -> list[str]:
+    i = 0
+    while i < len(words) and (words[i] in _RESERVED or _is_assignment(words[i])):
+        i += 1
+    return words[i:]
+
+
+#: **kloop release の流す口を止める**（ksd-ls の作業 RQ-KL-021。CR-144。`FIXED_BASH_RULES` と同じく `[bash].deny` では外れない）。
+#: 導入先のリリース（関門 → escalate → push dev → push main）を流すのは受け手（systemd のユーザーの単位）か人の端末で、
+#: エージェントは `kloop release request` で頼むだけ。`run`・`install`・`uninstall`・知らない口は止め、`request`・`status` は通す。
+#: kloop を起動する形（`kloop`・`…/bin/kloop`・`python -m ksdloop`・前置き・`sh -c`・`eval`）は ksdls と同じに見て、
+#: 見分けられない形は止める（fail closed）。kloop と release の両方の語を含まない Bash は見ない
+KLOOP_RELEASE_ALLOWED = frozenset({"request", "status"})
+KLOOP_RELEASE_ALTERNATIVE = (
+    "kloop release request で頼む（流すのは受け手か人の端末）。受け手が入っているかは kloop release status で見て、"
+    "入っていなければ人に kloop release install を 1 回頼む（人に関門・escalate・push のコマンドを打たせない）"
+)
+_KLOOP_RELEASE_UNKNOWN_HEAD = "kloop guard: kloop release を流す口で呼ぶかを見分けられない形"
+_KLOOP_MODULES = frozenset({"ksdloop", "ksdloop.cli", "ksdloop.__main__"})
+#: kloop の共通の選択肢のうち値を次の語に取るもの（argparse は長い名の略も受けるので、略も値を取るとみなす）
+_KLOOP_LONG_WITH_VALUE = ("--project", "--config")
+
+
+def _release_denied(what: str) -> str:
+    return (
+        f"kloop guard: {what}はエージェントの Bash から呼ばない（流すのは受け手か人の端末。CR-144）。"
+        f" 代替: {KLOOP_RELEASE_ALTERNATIVE}"
+    )
+
+
+def _release_unknown(why: str) -> str:
+    return f"{_KLOOP_RELEASE_UNKNOWN_HEAD}（{why}）なので止めた（fail closed。CR-144）。 代替: {KLOOP_RELEASE_ALTERNATIVE}"
+
+
+def _kloop_word(word: str) -> bool:
+    return "kloop" in word or "ksdloop" in word
+
+
+def _kloop_option_takes_value(word: str) -> bool:
+    """kloop の共通の選択肢が次の語を値に取るか（`-C`・`--project`・`--config` と略・`-vC` の束）."""
+    if word.startswith("--"):
+        return "=" not in word and len(word) > 2 and any(opt.startswith(word) for opt in _KLOOP_LONG_WITH_VALUE)
+    body = word[1:]
+    for at, ch in enumerate(body):
+        if ch == "C":
+            return at == len(body) - 1
+        if ch not in "vhV":
+            return False
+    return False
+
+
+def _kloop_positional(args: list[str], start: int) -> tuple[str | None, int]:
+    """start から、共通の選択肢を飛ばした最初の位置の引数（無ければ None）と、その次の位置."""
+    i = start
+    while i < len(args):
+        word = args[i]
+        if word.startswith("-") and len(word) > 1:
+            i += 2 if _kloop_option_takes_value(word) else 1
+            continue
+        return word, i + 1
+    return None, i
+
+
+def kloop_release_args_denial(args: list[str]) -> str:
+    """kloop の引数（コマンドの名前の後ろ）が release の流す口・見分けられない形なら理由、そうでなければ空文字列（CR-144）."""
+    command, at = _kloop_positional(args, 0)
+    if command is None:
+        return ""
+    if command != "release":
+        if _KSDLS_EXPANDS.search(command):
+            return _release_unknown(f"kloop の口 {command!r} がシェルの展開を含む")
+        return ""
+    action, _ = _kloop_positional(args, at)
+    if action is None:
+        return ""
+    if _KSDLS_EXPANDS.search(action) or any(_KSDLS_EXPANDS.search(w) for w in args[at:]):
+        return _release_unknown("kloop release の引数がシェルの展開を含む")
+    if action in KLOOP_RELEASE_ALLOWED:
+        return ""
+    return _release_denied(f"kloop release {action}（{'リリースを流す・受け手を入れ外しする口' if action in ('run', 'install', 'uninstall') else '知らない口'}）")
+
+
+def _release_python(args: list[str], appended: bool) -> str:
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if word == "-":
+            return _release_unknown("python が標準入力のコードを流す")
+        if word in ("--check-hash-based-pycs",):
+            i += 2
+            continue
+        if word.startswith("--"):
+            i += 1
+            continue
+        if word.startswith("-") and len(word) > 1:
+            for at, ch in enumerate(word[1:], start=1):
+                tail = word[at + 1:]
+                if ch in "XW":
+                    if not tail:
+                        i += 1
+                    break
+                if ch in "cm":
+                    value = tail or (args[i + 1] if i + 1 < len(args) else "")
+                    after = args[i + 1:] if tail else args[i + 2:]
+                    if ch == "c":
+                        return _release_unknown("python -c のコードが kloop を含む") if appended or _kloop_word(value) else ""
+                    if value in _KLOOP_MODULES:
+                        return _release_unknown("後から引数を足す形（xargs・find -exec）") if appended else kloop_release_args_denial(after)
+                    if value.startswith("ksdloop."):
+                        return _release_unknown(f"python -m {value}")
+                    return ""
+            i += 1
+            continue
+        if _kloop_word(word):
+            return _release_unknown(f"python が kloop のファイル {word!r} を流す")
+        return ""
+    return "" if appended else _release_unknown("python が標準入力のコードを流す")
+
+
+def _release_shell(args: list[str], depth: int, appended: bool) -> str:
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if word in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+            if appended or i + 1 >= len(args):
+                return _release_unknown("シェルの -c の文が見えない")
+            return _release_command(args[i + 1], depth + 1)
+        if word.startswith(("-", "+")):
+            i += 1
+            continue
+        if _kloop_word(word) or appended:
+            return _release_unknown(f"シェルのスクリプト {word!r}")
+        return ""
+    return _release_unknown("シェルが標準入力の文を流す")
+
+
+def _release_simple(words: list[str], depth: int, appended: bool = False) -> str:
+    """1 つの単純なコマンド（`_simple_denial` と同じ見方。`appended` は xargs・find -exec の中）."""
+    words = _command_words(words)
+    if not words:
+        return ""
+    for word in words:
+        if _kloop_word(word) and any(mark in word for mark in ("`", "$(", "<(", ">(")):
+            return _release_unknown("$(…)・`…` の中")
+    head, args = words[0], words[1:]
+    if "$" in head or "`" in head:
+        return _release_unknown(f"コマンドの名前 {head!r} が変数")
+    name = os.path.basename(head)
+    mentions = any(_kloop_word(w) for w in words)
+    if name == "kloop":
+        return _release_unknown("後から引数を足す形（xargs・find -exec）") if appended else kloop_release_args_denial(args)
+    if _PYTHON.match(name):
+        return _release_python(args, appended)
+    if name in _SHELLS:
+        return _release_shell(args, depth, appended)
+    if name == "eval":
+        return _release_unknown("eval") if appended else _release_command(" ".join(args), depth + 1)
+    if name in _WRAPPERS or (name in _RUNNERS and args[:1] == ["run"]) or name == "uvx":
+        with_value, skip = _WRAPPERS.get(name, (frozenset(), 0))
+        inner = _unwrap(words if name not in _RUNNERS else words[1:], with_value, skip)
+        if inner is None:
+            return _release_unknown(f"{name} の後ろのコマンド")
+        if not inner:
+            return _release_unknown(f"{name} が後から足す引数を起動する") if appended else ""
+        return _release_simple(inner, depth, appended or name == "xargs")
+    if name == "find":
+        for at, word in enumerate(args):
+            if word in ("-exec", "-execdir", "-ok", "-okdir"):
+                inner = []
+                for item in args[at + 1:]:
+                    if item in (";", "+"):
+                        break
+                    inner.append(item)
+                found = _release_simple(inner, depth, appended=True)
+                if found:
+                    return found
+        return ""
+    if name in _INERT:
+        return ""
+    if name in _SCRIPTABLE or name == "git":
+        if not mentions:
+            return "" if not appended else _release_unknown(f"{name} が後から足す引数を解く")
+        if name == "git":
+            if any(w in _GIT_EXEC or w.split("=", 1)[0] in _GIT_EXEC for w in args):
+                return _release_unknown("git がほかのコマンドを起動しうる語（--exec・run・foreach・-c など）")
+            if any(_kloop_word(w) and "!" in w for w in args):
+                return _release_unknown("git の alias の ! が kloop を含む")
+            return ""
+        if any(_kloop_word(w) and _SCRIPT_CHARS.intersection(w) for w in args):
+            return _release_unknown(f"{name} の文が kloop を含む")
+        return ""
+    if not mentions and not appended:
+        return ""
+    return _release_unknown(f"{name} が kloop を起動するかを見分けられない")
+
+
+def _release_command(command: str, depth: int = 0) -> str:
+    if depth > 4:
+        return _release_unknown("入れ子のシェルが深い")
+    text = command.replace("\\\n", "")
+    plain = re.sub(r"[\"'\\]", "", text)
+    if not (_kloop_word(plain) and "release" in plain):
+        return ""
+    try:
+        tokens = _ksdls_tokens(text)
+    except ValueError as exc:
+        return _release_unknown(f"コマンドを語に分けられない：{exc}")
+    for words in _simple_commands(tokens):
+        found = _release_simple(words, depth)
+        if found:
+            return found
+    return ""
+
+
+def kloop_release_denial(command: str) -> str:
+    """kloop release の流す口（run・install・uninstall・知らない口）・見分けられない形なら理由、そうでなければ空文字列（CR-144）.
+
+    kloop（か ksdloop）と release の両方の語を含まない Bash は見ない（引用符と \\ を除いて探す）。`kloop release request`・
+    `kloop release status` は通す。heredoc の中身も見る（雛形の RQ-KL-017 の除外は写していない。止める側）。
+    **見えないもの**：書いたスクリプトの中・名前を組み立てる形（ksdls の口と同じ）。判定の途中の想定外の例外は止める側に倒す。
+    """
+    try:
+        return _release_command(command)
+    except Exception as exc:  # noqa: BLE001 - 見分けられないものは止める（fail closed）
+        return _release_unknown(f"判定の途中の例外 {type(exc).__name__}")
+
+
 def fixed_bash_denial(command: str, cwd: Path) -> str:
     """置き換えられない拒否（`FIXED_BASH_RULES`・`protected_branch_denial()`）。当たらなければ空文字列（CR-073）。"""
     for pattern, reason, alternative in FIXED_BASH_RULES:
@@ -1422,6 +1654,9 @@ def fixed_bash_denial(command: str, cwd: Path) -> str:
     ksdls = ksdls_write_denial(command)
     if ksdls:
         return ksdls
+    release = kloop_release_denial(command)
+    if release:
+        return release
     try:
         texts = cloud_command_texts(command)
     except Exception as exc:  # noqa: BLE001 - 見分けられないものは止める（fail closed。ksdls_write_denial と同じ）

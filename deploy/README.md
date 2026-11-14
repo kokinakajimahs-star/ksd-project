@@ -184,16 +184,46 @@ gcloud sql instances delete ksdp-pg-pitr --project "$PROJECT"
 gcloud storage rm --recursive "gs://ksdp-restore-$PROJECT"
 ```
 
+### 6.4 戻せることを確かめる訓練（本番を変えない）
+
+`deploy/restore-drill.sh` は、6.2・6.3 と同じ操作を訓練用のインスタンス `ksdp-pg-drill`（Terraform の外）に向けて流す。
+
+- 本番の `ksdp-pg` に触れるのは、複製の元・バックアップの元・件数を読む先としてだけである
+- 書き込む先（複製の先・戻す先・消す先）は、名前に `-drill` を含むインスタンスだけにしている。本番や 6.3 の `ksdp-pg-pitr` を渡しても止まる
+- 書き出しの置き場は訓練だけの `ksdp-restore-drill-<project>` で、6.3 の置き場とは別である
+- 本番のデータは変えない。ただし複製と CSV の書き出しは、本番のインスタンスの操作として走る。インスタンスごとに操作は同時に 1 つしか走らないので、
+  その間は `deploy.sh apply` を流さない
+- 訓練用のインスタンスは、残している間は本番と同じほどの費用が掛かる
+- 消したインスタンスの名前は、しばらく（最長 1 週間ほど）使えない。続けて訓練するなら `DRILL_INSTANCE=ksdp-pg-drill-2` のように別の名前を渡す
+
+```bash
+bash deploy/restore-drill.sh clone            # 10 分前の状態を ksdp-pg-drill へ複製する（6.3。DRILL_POINT_IN_TIME で時刻を選べる）
+bash deploy/restore-drill.sh check            # 複製の pmt の件数と最後の変更履歴の時刻（CSV の書き出しで読む。DB へつながない）
+bash deploy/restore-drill.sh check ksdp-pg    # 本番の同じ値（複製した時刻より後に書き込みが無ければ一致する）
+bash deploy/restore-drill.sh restore-backup   # 本番の最新の自動バックアップを ksdp-pg-drill へ戻す（6.2 の操作）
+bash deploy/restore-drill.sh check            # 戻したバックアップの時点の件数
+bash deploy/restore-drill.sh cleanup          # 訓練用のインスタンスと書き出しの置き場を消す
+```
+
+確かめること：
+
+- 複製と戻すのに掛かった時間（出力に出る）
+- `schema_version` が本番と同じこと
+- 件数が本番と合うこと（複製）、またはバックアップの時点の値であること
+- `last_audit_utc` が、複製した時刻・バックアップを取った時刻より前であること
+
+結果は `docs/decisions/ASSUMPTIONS.md` に残す。
+
 ## 7. 費用の目安と止め方
 
 費用のほとんどは Cloud SQL が常に動いている分である。金額は目安で、確かめていない（最新は Google Cloud の料金表と請求の画面で確かめる）。
 
 | 資源 | 費用を決める値 | 目安 |
 |---|---|---|
-| Cloud SQL | `db_tier`（既定 `db-custom-1-3840`：1 vCPU・3.75 GB）・`db_edition`（`ENTERPRISE`）・`db_availability_type`（`ZONAL`。`REGIONAL` でおよそ 2 倍）・ディスク（SSD 10 GB から自動で増える）・バックアップ 7 世代とログ 7 日分 | 東京でおよそ月 60〜80 米ドル |
+| Cloud SQL | `db_tier`（既定 `db-custom-1-3840`：1 vCPU・3.75 GB）・`db_edition`（`ENTERPRISE`）・`db_availability_type`（`ZONAL`。`REGIONAL` でおよそ 2 倍）・ディスク（SSD 10 GB から自動で増える。上限は `db_disk_autoresize_limit_gb`、既定 50 GB。増えたディスクは減らせない）・バックアップ 7 世代とログ 7 日分 | 東京でおよそ月 60〜80 米ドル |
 | Cloud Run のサービス | `max_instances`（既定 2）・`run_memory`（既定 1Gi）・CPU 1。最小 0 インスタンスで、要求を処理している間だけ CPU を割り当てる | 使っていない間は掛からない。少ない利用なら無料枠の範囲の見込み |
 | Cloud Run のジョブ | 移行（CPU 1・`run_memory`）・検証（CPU 2・2Gi。最長 1 時間） | 流した時間だけ |
-| Artifact Registry | ビルドのたびにイメージが増える（古いものを消す方針は置いていない） | 1 GB あたり月 0.1 米ドルほど |
+| Artifact Registry | ビルドのたびにイメージが増える。イメージ（`pmt`・`pmt-test`）ごとに新しい `registry_keep_recent`（既定 10）個を残す。それより古く `registry_delete_older_than_days`（既定 30）日を過ぎたものは、掃除の方針で消す（消えるまで 1 日ほど掛かる） | 1 GB あたり月 0.1 米ドルほど |
 | Cloud Build | ビルドの分数 | 無料枠の範囲の見込み |
 | Secret Manager・Cloud Storage・Cloud Logging | 秘密 3 つ・状態とソースの置き場（ソースは 7 日で消す）・ログの量 | わずか |
 
@@ -259,21 +289,28 @@ gcloud run services logs read ksdp-pmt --region "$REGION" --project "$PROJECT" -
 
 ## 11. この手順書と配置の部品で確かめていないこと
 
-ここまでの手順は書いたうえでクラウドに流していない。初回の配置で確かめる：
+配置は 2026-11-13 から利用者が流している（記録は `docs/decisions/ASSUMPTIONS.md` の A-50・A-51）。流して確かめたもの：
 
-- `terraform validate`・`plan`・`apply`（作った環境ではプロバイダを起動できず、属性はプロバイダ 8.11.0 の文書と突き合わせただけ）
-- `docker build`（Dockerfile は手元でビルドしていない。同じ並びのファイルで、移行・起動・ログイン・一部の試験を確かめた）
-- Cloud Build を専用のサービスアカウントで流すこと、Docker Hub からベースのイメージを取るときの回数の制限
-- Cloud Run から Cloud SQL への Unix ソケットの接続、起動の確認（`/api/v1/health`）が時間内に通ること
-- 組織のポリシー（`invoker_iam_disabled`・公開の IP を持つ Cloud SQL・リージョン）で止められないこと
-- IAM の付与が広まるまでの待ち（初回にもう一度流す必要があるか）
-- 6 章の復元と 7.2 の片付けの手順（流していない）
-- 費用の金額
-- PostgreSQL での検証は、試験の側（`backend/tests` の conftest）が `PMT_TEST_DATABASE_URL` を読むようになってから意味を持つ
+- `terraform plan`・`apply`（プロバイダ 8.11.0。A-51 で足した掃除の方針とディスクの上限の属性も受け付けた）
+- Cloud Build を専用のサービスアカウントで流すビルド（`docker build`）、移行のジョブ、Cloud Run から Cloud SQL への Unix ソケットの接続と起動の確認（`/api/v1/health`）
+- 組織のポリシー（`invoker_iam_disabled`・公開の IP を持つ Cloud SQL・リージョン）で配置が止められなかったこと
+- PostgreSQL での検証（7 章の pgverify。試験の側の conftest が `PMT_TEST_DATABASE_URL` を読む）
+- 6.4 の訓練（2026-11-14）：10 分前の状態の複製（操作は約 11 分）と、最新の自動バックアップの復元（約 6 分）を訓練用のインスタンスに流し、
+  件数と最後の変更の時刻が、複製した時刻・バックアップを取った時刻と食い違わないことを確かめた。終えた後に訓練用の資源を消した
+
+まだ確かめていない：
+
+- 6.2・6.3 を本番に向けて流すこと（訓練は同じ操作を訓練用のインスタンスへ流しただけ）
+- 業務のデータ（WBS・活動・工数）が入った状態での復元と、その所要時間（訓練のときの本番は、利用者 1・プロジェクト 1 で業務の行が 0 件だった）
+- 7.2 の片付けの手順（流していない）
+- IAM の付与が広まるまでの待ちが要るか（記録していない）
+- Docker Hub からベースのイメージを取るときの回数の制限（今までのビルドでは当たっていない）
+- 費用の金額（請求で確かめていない）
 
 運用の上で知っておくこと：
 
 - Terraform の状態（`ksdp-tfstate-<project>`）には秘密の値（DB のパスワード・最初の管理者のパスワード）が平文で入る。状態のバケットを読めるのはオーナーだけにする
 - サービスの URL はインターネットから届く。守りはアプリのログインと共有リンクだけ（CR-020）
 - 検証用の DB は本番と同じインスタンスにある
-- 独自のドメイン・監視と通知・イメージの掃除は置いていない
+- 独自のドメイン・監視と通知は置いていない
+- 前のイメージへ戻す（5 章）ときに選べるのは、Artifact Registry に残っているイメージだけ（新しい `registry_keep_recent` 個と、30 日を過ぎていないもの）

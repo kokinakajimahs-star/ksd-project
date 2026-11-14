@@ -141,6 +141,17 @@ function actionLabel(actions: readonly CorrectiveAction[], id: number | null): s
   return a === undefined ? `#${id}` : `#${a.id} ${a.action}`;
 }
 
+/**
+ * 集計と差異が同じ理由で読めない（effort.view が無くて 403・接続できない など）ときの、1 回だけ出す誤り。
+ * 理由が違えば null（それぞれの節に出す）
+ */
+export function sharedError(a: ErrorView | null, b: ErrorView | null): ErrorView | null {
+  if (a === null || b === null || a.message !== b.message) {
+    return null;
+  }
+  return a.details.length === b.details.length && a.details.every((d, i) => d === b.details[i]) ? a : null;
+}
+
 interface Editing {
   row: EffortVarianceRow;
   reason: string;
@@ -234,7 +245,7 @@ export default function EffortPage() {
       return;
     }
     let cancelled = false;
-    setSummaryError(null);
+    // 前の誤りは、新しい応答が届くまで残す（消すと、差異と同じ誤りが一度ばらけて出し直される）
     getEffortSummary(projectId, {
       axis,
       report_id: reportId ?? undefined,
@@ -243,6 +254,7 @@ export default function EffortPage() {
       (result) => {
         if (!cancelled) {
           setSummary(result);
+          setSummaryError(null);
         }
       },
       (e: unknown) => {
@@ -263,13 +275,13 @@ export default function EffortPage() {
       return;
     }
     let cancelled = false;
-    setVarianceError(null);
     setEditing(null);
     setNoteSaved(null);
     getEffortVariance(projectId, { report_id: reportId ?? undefined, baseline_id: baselineId ?? undefined }).then(
       (result) => {
         if (!cancelled) {
           setVariance(result);
+          setVarianceError(null);
         }
       },
       (e: unknown) => {
@@ -339,6 +351,7 @@ export default function EffortPage() {
   }
 
   const selectedReport = reports.find((r) => r.id === reportId) ?? null;
+  const pageError = sharedError(summaryError, varianceError);
 
   return (
     <section data-screen-id="UI-EFF-002" className="effort-page">
@@ -348,6 +361,7 @@ export default function EffortPage() {
         <Link to={`/projects/${projectId}/baselines`}>ベースライン</Link>
         <Link to={`/projects/${projectId}/corrective-actions`}>是正措置</Link>
       </nav>
+      <ErrorAlert error={pageError} />
 
       <div role="group" aria-label="集計の条件" className="effort-basis">
         <label>
@@ -392,7 +406,7 @@ export default function EffortPage() {
 
       <section aria-labelledby="effort-summary-heading">
         <h3 id="effort-summary-heading">多軸集計</h3>
-        <ErrorAlert error={summaryError} />
+        <ErrorAlert error={pageError === null ? summaryError : null} />
         {summary !== null && (
           <>
             <p>
@@ -406,7 +420,7 @@ export default function EffortPage() {
 
       <section aria-labelledby="effort-variance-heading">
         <h3 id="effort-variance-heading">差異の分析</h3>
-        <ErrorAlert error={varianceError} />
+        <ErrorAlert error={pageError === null ? varianceError : null} />
         {variance !== null && (
           <>
             <p>

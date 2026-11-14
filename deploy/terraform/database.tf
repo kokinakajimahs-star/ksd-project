@@ -14,6 +14,8 @@ resource "google_sql_database_instance" "main" {
     activation_policy = var.db_activation_policy
     disk_type         = "PD_SSD"
     disk_autoresize   = true
+    # 自動で増やす上限（GB。A-51）。ディスクは増やせても減らせないので、暴走した書き込みで費用が際限なく増えないようにする
+    disk_autoresize_limit = var.db_disk_autoresize_limit_gb
 
     deletion_protection_enabled = var.db_deletion_protection
 

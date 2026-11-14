@@ -18,7 +18,7 @@ import { makeMe, makeUser } from "../../test/fixtures";
 import { errorResponse, jsonResponse, mockApi, type RouteHandler } from "../../test/mockApi";
 import { makeScheduleBaseline, makeStatusReport } from "../../test/schFixtures";
 import { bucketLabel, depthOf, rateText } from "./labels";
-import EffortPage, { baselineText, reportBasisText } from "./EffortPage";
+import EffortPage, { baselineText, reportBasisText, sharedError } from "./EffortPage";
 
 const BASE = "/api/v1/projects/3";
 
@@ -398,7 +398,7 @@ describe("UI-EFF-002 工数の集計と差異", () => {
     expect(await screen.findByText("閾値を超えた要素はありません")).toBeInTheDocument();
   });
 
-  it("effort.view が無ければサーバの 403 の文言を出す", async () => {
+  it("effort.view が無ければサーバの 403 の文言を 1 回だけ出す（集計と差異が同じ理由で読めないため）", async () => {
     mockApi(
       routes({
         "GET /api/v1/me": () => jsonResponse(200, meWith([])),
@@ -408,9 +408,72 @@ describe("UI-EFF-002 工数の集計と差異", () => {
     );
     renderAt();
 
-    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
-    expect(screen.getAllByRole("alert")[0]).toHaveTextContent("この操作の権限がありません");
+    const summarySection = screen.getByRole("region", { name: "多軸集計" });
+    const varianceSection = screen.getByRole("region", { name: "差異の分析" });
+    await waitFor(() => {
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(within(summarySection).queryByRole("alert")).toBeNull();
+      expect(within(varianceSection).queryByRole("alert")).toBeNull();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("この操作の権限がありません");
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("条件を変えて読み直している間も、まとめた誤りをばらさない", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let summaryCalls = 0;
+    mockApi(
+      routes({
+        "GET /api/v1/me": () => jsonResponse(200, meWith([])),
+        [`GET ${BASE}/effort/summary`]: async () => {
+          summaryCalls += 1;
+          if (summaryCalls > 1) {
+            await held;
+          }
+          return errorResponse(403, "FORBIDDEN", "この操作の権限がありません");
+        },
+        [`GET ${BASE}/effort/variance`]: () => errorResponse(403, "FORBIDDEN", "この操作の権限がありません"),
+      }),
+    );
+    renderAt();
+
+    const summarySection = screen.getByRole("region", { name: "多軸集計" });
+    const varianceSection = screen.getByRole("region", { name: "差異の分析" });
+    await waitFor(() => {
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(within(varianceSection).queryByRole("alert")).toBeNull();
+    });
+    const shared = screen.getByRole("alert");
+
+    fireEvent.change(screen.getByLabelText("集計の軸"), { target: { value: "member" } });
+    await waitFor(() => expect(summaryCalls).toBe(2));
+    // 応答を待っている間も、上の 1 つのまま（同じ要素。節には出さない）
+    expect(screen.getAllByRole("alert")).toEqual([shared]);
+    expect(within(summarySection).queryByRole("alert")).toBeNull();
+    expect(within(varianceSection).queryByRole("alert")).toBeNull();
+
+    release();
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+    expect(screen.getByRole("alert")).toBe(shared);
+  });
+
+  it("集計と差異の誤りが違えば、それぞれの節に出す", async () => {
+    mockApi(
+      routes({
+        [`GET ${BASE}/effort/summary`]: () => errorResponse(500, "INTERNAL", "集計できません"),
+        [`GET ${BASE}/effort/variance`]: () => errorResponse(409, "NO_BASELINE", "基準がありません"),
+      }),
+    );
+    renderAt();
+
+    const summarySection = screen.getByRole("region", { name: "多軸集計" });
+    const varianceSection = screen.getByRole("region", { name: "差異の分析" });
+    expect(await within(summarySection).findByRole("alert")).toHaveTextContent("集計できません");
+    expect(await within(varianceSection).findByRole("alert")).toHaveTextContent("基準がありません");
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
   });
 
   it("ID が正しくなければ API を呼ばずに見つからないことを示す", () => {
@@ -443,6 +506,15 @@ describe("UI-EFF-002 の表示の計算", () => {
     expect(bucketLabel("month", row({ bucket_kind: "UNSCHEDULED" }))).toBe("日付なし（日程の無い計画・基準）");
     expect(bucketLabel("member", row({ bucket_kind: "BASELINE_REMOVED" }))).toBe("基準にあって今は無い");
     expect(bucketLabel("wbs", row({ bucket_kind: "BASELINE_REMOVED" }))).toBe("基準にあって今は無い");
+  });
+
+  it("集計と差異の誤りは、文言と理由が同じときだけ 1 つにまとめる", () => {
+    const forbidden = { message: "この操作の権限がありません", details: [] };
+    expect(sharedError(forbidden, { ...forbidden })).toBe(forbidden);
+    expect(sharedError(forbidden, null)).toBeNull();
+    expect(sharedError(null, forbidden)).toBeNull();
+    expect(sharedError(forbidden, { message: "基準がありません", details: [] })).toBeNull();
+    expect(sharedError({ message: "入力に誤りがあります", details: ["a"] }, { message: "入力に誤りがあります", details: ["b"] })).toBeNull();
   });
 
   it("差異率は割合を百分率で出す。閾値は符号を付けない", () => {

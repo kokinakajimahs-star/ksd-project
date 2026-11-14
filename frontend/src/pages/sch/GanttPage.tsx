@@ -89,6 +89,8 @@ export default function GanttPage() {
   const [judgementFilter, setJudgementFilter] = useState<Judgement | "">("");
   const [reloadKey, setReloadKey] = useState(0);
   const [error, setError] = useState<ErrorView | null>(null);
+  /** ガントの描画データ（API-SCH-010）を読めなかった（読み込み中の表示を消す。他の API の誤りでは消さない） */
+  const [ganttFailed, setGanttFailed] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [calculated, setCalculated] = useState<ScheduleResult | null>(null);
   const [createdReport, setCreatedReport] = useState<StatusReport | null>(null);
@@ -129,6 +131,7 @@ export default function GanttPage() {
       return;
     }
     let cancelled = false;
+    setGanttFailed(false);
     getGantt(projectId, baselineId ?? undefined, requestedRange ?? undefined).then(
       (result) => {
         if (!cancelled) {
@@ -137,6 +140,7 @@ export default function GanttPage() {
       },
       (e: unknown) => {
         if (!cancelled) {
+          setGanttFailed(true);
           setError(toErrorView(e));
         }
       },
@@ -355,6 +359,8 @@ export default function GanttPage() {
         </p>
       )}
 
+      {/* 描画データが届くまで図の場所が空にならないよう、読んでいることを示す */}
+      {gantt === null && !ganttFailed && <p className="loading">読み込み中…</p>}
       {gantt !== null && (
         <>
           {gantt.restricted && <p className="note">自分の割当の活動だけを表示している</p>}

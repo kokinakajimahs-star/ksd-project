@@ -470,6 +470,63 @@ describe("UI-SCH-002 ガントチャート・イナズマ線", () => {
     expect(layer(container, "planned").querySelector('[data-activity-id="1000"]')).toBeNull();
   });
 
+  it("描画データが届くまで読み込み中を示し、届いたら消す", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/gantt`]: async () => {
+          await held;
+          return jsonResponse(200, GANTT);
+        },
+      }),
+    );
+    const { container } = renderAt();
+
+    expect(screen.getByText("読み込み中…")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "ガントチャート" })).toBeNull();
+    release();
+    await chart(container);
+    expect(screen.queryByText("読み込み中…")).toBeNull();
+  });
+
+  it("ガントと関係ない API の誤りでは、読み込み中を消さない（描画データが届くまで出す）", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/gantt`]: async () => {
+          await held;
+          return jsonResponse(200, GANTT);
+        },
+        [`GET ${BASE}/status-reports/41/lightning-line`]: () => errorResponse(404, "NOT_FOUND", "報告日が見つかりません"),
+      }),
+    );
+    renderAt();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("報告日が見つかりません");
+    expect(screen.getByText("読み込み中…")).toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("img", { name: "ガントチャート" })).toBeInTheDocument();
+    expect(screen.queryByText("読み込み中…")).toBeNull();
+  });
+
+  it("描画データを読めなければ、読み込み中を消して理由を出す", async () => {
+    mockApi(
+      routes(meWith(["project.view"]), {
+        [`GET ${BASE}/gantt`]: () => errorResponse(403, "FORBIDDEN", "この操作の権限がありません"),
+      }),
+    );
+    renderAt();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("この操作の権限がありません");
+    expect(screen.queryByText("読み込み中…")).toBeNull();
+  });
+
   it("報告日が無ければイナズマ線を出さない。活動が無ければその旨を出す", async () => {
     mockApi(
       routes(meWith(["project.view"]), {
