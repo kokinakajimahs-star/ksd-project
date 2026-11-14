@@ -106,6 +106,9 @@ export default function GanttPage() {
   const [tree, setTree] = useState<WbsTree | null>(null);
   const [treeFailed, setTreeFailed] = useState(false);
   const [editing, setEditing] = useState(false);
+  /** ガント・WBS の木を読み終えた reloadKey（読めなかったときも。保存の後の読み直しが終わるまで編集の操作を受けない） */
+  const [ganttKey, setGanttKey] = useState<number | null>(null);
+  const [treeKey, setTreeKey] = useState<number | null>(null);
 
   // 自分の権限・基準の版・報告日（全件。画面を開いたときに 1 回）
   useEffect(() => {
@@ -143,16 +146,19 @@ export default function GanttPage() {
       return;
     }
     let cancelled = false;
+    const key = reloadKey;
     setGanttFailed(false);
     getGantt(projectId, baselineId ?? undefined, requestedRange ?? undefined).then(
       (result) => {
         if (!cancelled) {
           setGantt(result);
+          setGanttKey(key);
         }
       },
       (e: unknown) => {
         if (!cancelled) {
           setGanttFailed(true);
+          setGanttKey(key);
           setError(toErrorView(e));
         }
       },
@@ -218,17 +224,20 @@ export default function GanttPage() {
       return;
     }
     let cancelled = false;
+    const key = reloadKey;
     getWbsTree(projectId).then(
       (result) => {
         if (!cancelled) {
           setTree(result);
           setTreeFailed(false);
+          setTreeKey(key);
         }
       },
       () => {
         if (!cancelled) {
           setTree(null);
           setTreeFailed(true);
+          setTreeKey(key);
         }
       },
     );
@@ -279,6 +288,7 @@ export default function GanttPage() {
     canEditSchedule,
     canEditWbs,
     reloadKey,
+    pageSettled: ganttKey === reloadKey && treeKey === reloadKey,
     onChanged: () => setReloadKey((k) => k + 1),
   });
 
@@ -433,6 +443,13 @@ export default function GanttPage() {
           {editing && tree === null && (
             <p role={treeFailed ? "alert" : undefined} className={treeFailed ? undefined : "loading"}>
               {treeFailed ? "WBS を読めないので編集できません。読み直してください" : "WBS を読み込み中…"}
+            </p>
+          )}
+          {editing && tree !== null && !editor.ready && (
+            <p role={editor.loadError !== null ? "alert" : undefined} className={editor.loadError !== null ? undefined : "loading"}>
+              {editor.loadError !== null
+                ? `活動の一覧を読めないので編集できません（${editor.loadError.message}）。編集を終えてから入り直してください`
+                : "活動を読み込み中…"}
             </p>
           )}
           {editor.ready && tree !== null && <GanttEditBar editor={editor} tree={tree} />}

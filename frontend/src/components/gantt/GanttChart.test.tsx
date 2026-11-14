@@ -1,9 +1,18 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { makeBar, makeGantt, makeGanttRow } from "../../test/schFixtures";
+import {
+  makeBar,
+  makeGantt,
+  makeGanttRow,
+  makeLightningLine,
+  makeLightningRow,
+  makeOverlaidLine,
+} from "../../test/schFixtures";
+import { sampleElements } from "../../test/wbsFixtures";
 import GanttChart from "./GanttChart";
-import { DAY_WIDTH, LABEL_WIDTH } from "./scale";
+import { buildOutline } from "./outline";
+import { DAY_WIDTH, HEADER_HEIGHT, LABEL_WIDTH, ROW_HEIGHT } from "./scale";
 
 const w = DAY_WIDTH.day;
 
@@ -92,5 +101,44 @@ describe("バーの担当者名・進捗率のラベル（SCH-13・7.3）", () =
     expect(label(container, 11)).toBeNull();
     expect(label(container, 12)).toHaveAttribute("x", String(LABEL_WIDTH + 2 * w + 10));
     expect(label(container, 13)).toBeNull();
+  });
+});
+
+describe("要素の行を差し込んでも、イナズマ線・過去の線は活動の行に当てる（CR-024。7.3）", () => {
+  it("頂点は活動の行の中心に描き、線は要素の行をまたいで次の活動の頂点へ結ぶ", () => {
+    // 1.0 要件定義 ─ 1.1 業務整理（WP 101：活動 21）・1.2 画面設計（WP 102：活動 22）。2.0 管理は活動が無いので出さない
+    const gantt = makeGantt({
+      range_start: "2026-12-01",
+      range_end: "2026-12-21",
+      rows: [
+        makeGanttRow({ row_index: 0, activity_id: 21, work_package_id: 101, planned: makeBar("PLANNED", "2026-12-01", "2026-12-10") }),
+        makeGanttRow({ row_index: 1, activity_id: 22, work_package_id: 102, planned: makeBar("PLANNED", "2026-12-07", "2026-12-18") }),
+      ],
+    });
+    const outline = buildOutline(sampleElements(), gantt.rows, false);
+    expect(outline.map((r) => r.key)).toEqual(["e100", "e101", "a21", "e102", "a22"]);
+    const lightning = makeLightningLine([
+      makeLightningRow({ row_index: 0, activity_id: 21 }),
+      makeLightningRow({ row_index: 1, activity_id: 22, judgement: "AHEAD" }),
+    ]);
+    const past = makeOverlaidLine();
+    const pastVertex = { ...past.vertices[0]!, row_index: 1, activity_id: 22 };
+    const { container } = render(
+      <GanttChart gantt={gantt} unit="day" lightning={lightning} pastLines={[{ ...past, vertices: [pastVertex] }]} outline={outline} />,
+    );
+    const center = (position: number) => HEADER_HEIGHT + position * ROW_HEIGHT + ROW_HEIGHT / 2;
+    const cys = (selector: string) => [...container.querySelectorAll(selector)].map((c) => Number(c.getAttribute("cy")));
+
+    expect(cys('[data-layer="lightning"] circle[data-judgement]')).toEqual([center(2), center(4)]);
+    const ys = container
+      .querySelector('[data-layer="lightning"] polyline')!
+      .getAttribute("points")!
+      .split(" ")
+      .map((point) => Number(point.split(",")[1]));
+    expect(ys).toEqual([HEADER_HEIGHT, center(2), center(4), HEADER_HEIGHT + 5 * ROW_HEIGHT]);
+    // 過去の線は row_index で当てる（サーバの行は増やしていない）
+    expect(cys('[data-layer="past-lines"] circle[data-judgement]')).toEqual([center(4)]);
+    // 要素の行には頂点を描かない
+    expect(cys('[data-layer="lightning"] circle[data-judgement]')).not.toContain(center(3));
   });
 });

@@ -177,21 +177,26 @@ export function rangeKeys(outline: OutlineRow[], from: string, to: string): stri
 }
 
 export interface DeletionPlan {
-  /** 消す要素（配下ごと消えるので、選んだ要素の配下の要素は入れない） */
-  elementIds: number[];
-  /** 消す活動（選んだ要素の配下の WP の活動は要素と一緒に消えるので入れない） */
+  /** 消す活動（選んだ活動の全て。要素より先に 1 件ずつ消す。API-SCH-005） */
   activityIds: number[];
+  /** 消す要素（配下ごと消えるので、選んだ要素の配下の要素は入れない。API-WBS-005） */
+  elementIds: number[];
+  /** 選んでいない活動が残る WP（API-WBS-005 は活動のある WP を配下に含む要素を 422 で拒む。OQ-18 (1)） */
+  blockedWorkPackages: WbsElement[];
 }
 
-/** 選んだ行を消す順：要素は配下ごと（API-WBS-005）、活動は 1 件ずつ（API-SCH-005） */
+/** 選んだ行を消す順：活動を先に 1 件ずつ、次に要素を配下ごと。選んでいない活動を配下に残す要素は消さない */
 export function deletionPlan(elements: WbsElement[], activities: Activity[], keys: Iterable<string>): DeletionPlan {
   const chosen = new Set(keys);
   const selectedElements = elements.filter((e) => chosen.has(elementKey(e.id)));
   const ids = new Set(selectedElements.map((e) => e.id));
   const elementIds = selectedElements.filter((e) => !isDescendant(elements, e.id, ids)).map((e) => e.id);
-  const activityIds = activities
-    .filter((a) => chosen.has(activityKey(a.id)))
-    .filter((a) => !ids.has(a.work_package_id) && !isDescendant(elements, a.work_package_id, ids))
-    .map((a) => a.id);
-  return { elementIds, activityIds };
+  const activityIds = activities.filter((a) => chosen.has(activityKey(a.id))).map((a) => a.id);
+  const blocked = new Set(
+    activities
+      .filter((a) => !chosen.has(activityKey(a.id)))
+      .filter((a) => ids.has(a.work_package_id) || isDescendant(elements, a.work_package_id, ids))
+      .map((a) => a.work_package_id),
+  );
+  return { activityIds, elementIds, blockedWorkPackages: elements.filter((e) => blocked.has(e.id)) };
 }

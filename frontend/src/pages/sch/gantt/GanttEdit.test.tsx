@@ -1,4 +1,4 @@
-// UI-SCH-002 の WBS の要素の行と編集（設計書 7.3。CR-024）
+// ガント（UI-SCH-002）の WBS の要素の行と編集（設計書 7.3。CR-024）
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,6 +92,22 @@ function label(container: HTMLElement, key: string): Element {
 function rowY(container: HTMLElement, key: string): number {
   return HEADER_HEIGHT + rowKeys(container).indexOf(key) * ROW_HEIGHT + ROW_HEIGHT / 2;
 }
+
+/** 活動の予定のバーの中ほどの x（本体の掴みから） */
+function barX(container: HTMLElement, activityId: number): number {
+  const grip = container.querySelector(`[data-handle="move"][data-activity-id="${activityId}"]`);
+  if (grip === null) {
+    throw new Error(`活動 ${activityId} のバーが無い`);
+  }
+  return Number(grip.getAttribute("x")) + Number(grip.getAttribute("width")) / 2;
+}
+
+/** 保存の後の読み直しが終わるまで待つ（終わるまで次の操作は受けない） */
+async function settled() {
+  await waitFor(() => expect(screen.getByRole("button", { name: "名前を変える" })).toBeEnabled());
+}
+
+const WAIT_TEXT = "前の操作の保存・読み直しが終わっていません。終わってからもう一度操作します";
 
 async function startEditing(permissions = PLANNER, overrides: Record<string, RouteHandler> = {}) {
   const api = mockApi(routes(permissions, overrides));
@@ -276,19 +292,24 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     const handle = container.querySelector('[data-handle="link"][data-activity-id="22"]');
     expect(handle).not.toBeNull();
     fireEvent.mouseDown(handle!, { clientX: 500, clientY: rowY(container, "a22") });
-    fireEvent.mouseMove(window, { clientX: 520, clientY: rowY(container, "a21") });
+    fireEvent.mouseMove(window, { clientX: barX(container, 21), clientY: rowY(container, "a21") });
     expect(container.querySelector('[data-ghost="link"]')).not.toBeNull();
-    fireEvent.mouseUp(window, { clientX: 520, clientY: rowY(container, "a21") });
+    fireEvent.mouseUp(window, { clientX: barX(container, 21), clientY: rowY(container, "a21") });
     await waitFor(() => expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(1));
     expect(sent(calls, "POST", `${BASE}/dependencies`)[0]?.body).toEqual({ predecessor_id: 22, successor_id: 21 });
     expect(await screen.findByText("依存が循環します")).toBeInTheDocument();
   });
 
-  it("要素の行へ落としても依存は足さない", async () => {
+  it("バーの外（要素の行・行の空いた所・目盛りの帯）へ落としても依存は足さない", async () => {
     const { container, calls } = await startEditing();
     fireEvent.mouseDown(label(container, "a21"));
-    fireEvent.mouseDown(container.querySelector('[data-handle="link"]')!, { clientX: 500, clientY: rowY(container, "a21") });
-    fireEvent.mouseUp(window, { clientX: 520, clientY: rowY(container, "e102") });
+    const drop = (clientX: number, clientY: number) => {
+      fireEvent.mouseDown(container.querySelector('[data-handle="link"]')!, { clientX: 500, clientY: rowY(container, "a21") });
+      fireEvent.mouseUp(window, { clientX, clientY });
+    };
+    drop(barX(container, 23), rowY(container, "e102"));
+    drop(barX(container, 22) + 400, rowY(container, "a22"));
+    drop(barX(container, 22), HEADER_HEIGHT / 2);
     expect(sent(calls, "POST", `${BASE}/dependencies`)).toHaveLength(0);
   });
 
@@ -350,7 +371,9 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     const form = screen.getByRole("form", { name: "まとめる" });
     fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "調整" } });
     fireEvent.submit(form);
-    expect(await screen.findByText("他の人が変えました（1 件は移した。移せなかった活動：整理）")).toBeInTheDocument();
+    expect(
+      await screen.findByText("他の人が変えました（新しい WP「調整」は作った。1 件は移した。移せなかった活動：整理）"),
+    ).toBeInTheDocument();
   });
 
   it("選んだ要素を新しい上位の要素にまとめる（区分は WP 以外。既定は構成要素）", async () => {
@@ -377,6 +400,25 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     ]);
   });
 
+  it("要素 1 件でも新しい上位の要素にまとめられる（その要素の位置に作る）", async () => {
+    const { container, calls } = await startEditing(PLANNER, {
+      [`POST ${BASE}/wbs/elements`]: () => jsonResponse(201, makeElement({ id: 130, parent_id: 100, kind: "COMPONENT" })),
+      [`POST ${BASE}/wbs/elements/130/move`]: () => jsonResponse(200, makeElement({ id: 130 })),
+      [`POST ${BASE}/wbs/elements/102/move`]: () => jsonResponse(200, sampleElements()[2]),
+    });
+    fireEvent.mouseDown(label(container, "e102"));
+    const form = screen.getByRole("form", { name: "まとめる" });
+    expect(form).toHaveTextContent("選んだ要素 1 件を新しい上位の要素にまとめる");
+    fireEvent.change(within(form).getByRole("textbox", { name: "まとめる先の名前" }), { target: { value: "設計" } });
+    fireEvent.submit(form);
+    await screen.findByText("要素 1 件を新しい要素「設計」にまとめた");
+    expect(calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
+      { parent_id: 100, kind: "COMPONENT", name: "設計" },
+      { parent_id: 100, position: 1 },
+      { parent_id: 130 },
+    ]);
+  });
+
   it("活動と要素を混ぜて選んだらまとめる欄を出さない", async () => {
     const { container } = await startEditing();
     fireEvent.mouseDown(label(container, "e102"));
@@ -384,17 +426,21 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(screen.queryByRole("form", { name: "まとめる" })).toBeNull();
   });
 
-  it("Delete で確かめてから消す：要素は配下ごと（API-WBS-005）、配下の活動は別に消さない", async () => {
+  it("Delete で確かめてから消す：選んだ活動を先に 1 件ずつ（API-SCH-005）、次に要素を配下ごと（API-WBS-005）", async () => {
     const { container, calls, viewport } = await startEditing(PLANNER, {
-      [`DELETE ${BASE}/wbs/elements/101`]: () => jsonResponse(204, null),
+      [`DELETE ${BASE}/activities/21`]: () => jsonResponse(204, null),
+      [`DELETE ${BASE}/activities/22`]: () => jsonResponse(204, null),
       [`DELETE ${BASE}/activities/23`]: () => jsonResponse(204, null),
+      [`DELETE ${BASE}/wbs/elements/101`]: () => jsonResponse(204, null),
     });
     fireEvent.mouseDown(label(container, "e101"));
-    fireEvent.mouseDown(label(container, "a21"), { ctrlKey: true });
+    fireEvent.mouseDown(label(container, "a22"), { shiftKey: true });
     fireEvent.mouseDown(label(container, "a23"), { ctrlKey: true });
     fireEvent.keyDown(viewport, { key: "Delete" });
     const confirm = screen.getByRole("group", { name: "行を消すことの確かめ" });
-    expect(confirm).toHaveTextContent("要素 1 件（配下の要素と活動ごと）と活動 1 件を消す");
+    expect(confirm).toHaveTextContent(
+      "要素 1 件（1.1 業務整理。配下の要素ごと）と活動 3 件（1.1 聞き取り、1.1 整理、1.2 画面案）を消す。消した行は戻せない",
+    );
     fireEvent.click(within(confirm).getByRole("button", { name: "やめる" }));
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
 
@@ -402,10 +448,106 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     fireEvent.click(within(screen.getByRole("group", { name: "行を消すことの確かめ" })).getByRole("button", { name: "消す" }));
     await waitFor(() =>
       expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
-        `${BASE}/wbs/elements/101`,
+        `${BASE}/activities/21`,
+        `${BASE}/activities/22`,
         `${BASE}/activities/23`,
+        `${BASE}/wbs/elements/101`,
       ]),
     );
+  });
+
+  it("選んでいない活動が残る WP を含む要素は、理由を示して消さない（API-WBS-005 は 422。OQ-18 (1)）", async () => {
+    const { container, calls, viewport } = await startEditing();
+    fireEvent.mouseDown(label(container, "e100"));
+    fireEvent.keyDown(viewport, { key: "Delete" });
+    expect(screen.queryByRole("group", { name: "行を消すことの確かめ" })).toBeNull();
+    expect(
+      screen.getByText(
+        "活動のある WP は消せません：1.1 業務整理、1.2 画面設計（先に活動を消すか、別の WP へ移す。活動も一緒に選べば、活動を先に消す）",
+      ),
+    ).toBeInTheDocument();
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+  });
+
+  it("確かめの後に矢印で選び直すと確かめを取り消す（確かめていない行を消さない）", async () => {
+    const { container, calls, viewport } = await startEditing();
+    fireEvent.mouseDown(label(container, "a21"));
+    fireEvent.keyDown(viewport, { key: "Delete" });
+    expect(screen.getByRole("group", { name: "行を消すことの確かめ" })).toHaveTextContent("活動 1 件（1.1 聞き取り）を消す");
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    expect(screen.queryByRole("group", { name: "行を消すことの確かめ" })).toBeNull();
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+  });
+
+  it("保存の後、読み直しが終わるまで次の操作を受けない（古い木・一覧で位置を数えない）", async () => {
+    let wbsCalls = 0;
+    let release: () => void = () => undefined;
+    const { container, calls, viewport } = await startEditing(PLANNER, {
+      [`GET ${BASE}/wbs`]: () => {
+        wbsCalls += 1;
+        if (wbsCalls === 1) {
+          return jsonResponse(200, makeTree());
+        }
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(jsonResponse(200, makeTree()));
+        });
+      },
+      [`PATCH ${BASE}/activities/21`]: () => jsonResponse(200, ACTIVITIES[0]),
+    });
+    const down = () => fireEvent.keyDown(viewport, { key: "ArrowDown", altKey: true, shiftKey: true });
+    fireEvent.mouseDown(label(container, "a21"));
+    down();
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1));
+    expect(await screen.findByText("読み直しています…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下へ" })).toBeDisabled();
+    down();
+    expect(screen.getByText(WAIT_TEXT)).toBeInTheDocument();
+    expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(1);
+
+    release();
+    await settled();
+    down();
+    await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/21`)).toHaveLength(2));
+  });
+
+  it("活動の一覧を読めなければ編集できないことを示す", async () => {
+    mockApi(routes(PLANNER, { [`GET ${BASE}/activities`]: () => errorResponse(500, "INTERNAL", "失敗") }));
+    renderAt();
+    await screen.findByRole("img", { name: "ガントチャート" });
+    fireEvent.click(await screen.findByRole("button", { name: "編集する" }));
+    expect(await screen.findByText(/^活動の一覧を読めないので編集できません（.+）。編集を終えてから入り直してください$/)).toBeInTheDocument();
+    expect(screen.queryByRole("toolbar", { name: "編集の操作" })).toBeNull();
+  });
+
+  it("選択を外すと最上位に足す（Ctrl＋クリックで外す・Esc で外す）", async () => {
+    const { container, viewport } = await startEditing();
+    const form = () => screen.getByRole("form", { name: "行を足す" });
+    fireEvent.mouseDown(label(container, "e100"));
+    expect(form()).toHaveTextContent("1.0 要件定義 の下に要素を足す");
+    fireEvent.mouseDown(label(container, "e100"), { ctrlKey: true });
+    expect(form()).toHaveTextContent("最上位に要素を足す");
+    fireEvent.mouseDown(label(container, "a21"));
+    expect(form()).toHaveTextContent("1.1 業務整理 に活動を足す");
+    fireEvent.keyDown(viewport, { key: "Escape" });
+    expect(form()).toHaveTextContent("最上位に要素を足す");
+  });
+
+  it("選んだ活動の欄は、保存して読み直した値に合わせる（古い値で巻き戻さない）", async () => {
+    let current = ACTIVITIES;
+    const { container } = await startEditing(PLANNER, {
+      [`GET ${BASE}/activities`]: () => jsonResponse(200, activityList(current, { dependencies: DEPENDENCIES })),
+      [`PATCH ${BASE}/activities/21`]: () => {
+        current = [{ ...ACTIVITIES[0]!, duration_days: 7 }, ...ACTIVITIES.slice(1)];
+        return jsonResponse(200, current[0]);
+      },
+    });
+    fireEvent.mouseDown(label(container, "a21"));
+    const duration = () => within(screen.getByRole("region", { name: "選んだ行" })).getByRole("spinbutton", { name: "期間（稼働日）" });
+    expect(duration()).toHaveValue(5);
+    fireEvent.mouseDown(container.querySelector('[data-handle="resize"][data-activity-id="21"]')!, { clientX: 400 });
+    fireEvent.mouseMove(window, { clientX: 448 });
+    fireEvent.mouseUp(window, { clientX: 448 });
+    await waitFor(() => expect(duration()).toHaveValue(7));
   });
 
   it("選んだ活動の欄：希望開始日を外す・別の WP へ移す・先行を外す", async () => {
@@ -418,6 +560,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     fireEvent.click(within(panel).getByRole("button", { name: "希望開始日を外す" }));
     await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(1));
     expect(sent(calls, "PATCH", `${BASE}/activities/22`)[0]?.body).toEqual({ requested_start: null });
+    await settled();
 
     const moveForm = within(panel).getByRole("form", { name: "移す先の WP" });
     const options = within(moveForm).getAllByRole("option").map((o) => o.textContent);
@@ -426,6 +569,7 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     fireEvent.submit(moveForm);
     await waitFor(() => expect(sent(calls, "PATCH", `${BASE}/activities/22`)).toHaveLength(2));
     expect(sent(calls, "PATCH", `${BASE}/activities/22`)[1]?.body).toEqual({ work_package_id: 102 });
+    await settled();
 
     fireEvent.click(within(panel).getByRole("button", { name: "先行 1.1 聞き取り を外す" }));
     await waitFor(() => expect(sent(calls, "DELETE", `${BASE}/dependencies/91`)).toHaveLength(1));
@@ -437,6 +581,9 @@ describe("UI-SCH-002 の WBS の要素の行と編集（CR-024）", () => {
     expect(container.querySelector('[data-handle="move"]')).not.toBeNull();
     fireEvent.mouseDown(label(container, "e100"));
     expect(screen.queryByRole("form", { name: "行を足す" })).toBeNull();
+    // Insert でも足す欄は出さず、理由を示す
+    fireEvent.keyDown(screen.getByTestId("gantt-viewport"), { key: "Insert" });
+    expect(screen.getByText("要素を足す権限（wbs.edit）がありません")).toBeInTheDocument();
   });
 
   it("wbs.edit だけの人にはバーの掴みを出さない", async () => {

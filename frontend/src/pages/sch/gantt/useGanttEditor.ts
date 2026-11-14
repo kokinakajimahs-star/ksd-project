@@ -1,5 +1,6 @@
 // ガントの編集（設計書 7.3 の「編集」。CR-024）の状態と操作。どの操作も既存の API を呼んでその場で保存し、
 // 保存の後に onChanged で呼び手（GanttPage）にガント・WBS・活動を読み直させる。元に戻す操作は無い。
+// 読み直しが終わるまで次の操作は受けない（古い木・一覧で位置を数えない）。
 // 操作はその権限を持つときだけ行う（活動・日付・依存は schedule.edit、要素は wbs.edit。サーバでも必ず判定する）
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 
@@ -32,6 +33,7 @@ import {
   rangeKeys,
   stepSelection,
   type AddTarget,
+  type DeletionPlan,
   type ElementMove,
   type Planned,
 } from "./editOps";
@@ -48,6 +50,8 @@ export interface GanttEditorInput {
   canEditWbs: boolean;
   /** 読み直すたびに変わる値（活動の一覧も読み直す） */
   reloadKey: number;
+  /** ガントと WBS を今の reloadKey で読み終えた（読めなかったときも含む。読めなかったことは呼び手が示す） */
+  pageSettled: boolean;
   /** 保存した後に呼ぶ（ガント・WBS・活動を読み直す） */
   onChanged: () => void;
 }
@@ -65,8 +69,15 @@ export interface GanttEditor {
   chartEdit: GanttChartEdit | undefined;
   canEditSchedule: boolean;
   canEditWbs: boolean;
+  /** 保存しているか、保存の後に読み直している（操作のボタンを押せなくする） */
   busy: boolean;
+  /** 保存している */
+  saving: boolean;
+  /** 保存の後に読み直している（終わるまで次の操作を受けない） */
+  reloading: boolean;
   error: ErrorView | null;
+  /** 活動の一覧を読めなかった（読み直せるまで操作を受けない） */
+  loadError: ErrorView | null;
   message: string | null;
   selection: Selection;
   activities: Activity[];
@@ -101,13 +112,24 @@ class PartialFailure extends Error {
   }
 }
 
-function partialFailure(error: unknown, moved: number, left: string[], what: string): PartialFailure {
+/** 誤りの文言に、そこまでにしたことを添える */
+function partialFailure(error: unknown, note: string): PartialFailure {
   const view = toErrorView(error);
-  return new PartialFailure({
-    message: `${view.message}（${moved} 件は移した。移せなかった${what}：${left.join("、")}）`,
-    details: view.details,
-  });
+  return new PartialFailure({ message: `${view.message}（${note}）`, details: view.details });
 }
+
+/** 行の名前を並べる（多ければ先頭の 3 件と残りの件数） */
+function listText(names: string[]): string {
+  return names.length <= 3 ? names.join("、") : `${names.slice(0, 3).join("、")} ほか ${names.length - 3} 件`;
+}
+
+/** 確かめた時点の消す計画と文言（確かめた後に選び直しても、確かめていない行を消さない） */
+interface PendingDeletion {
+  plan: DeletionPlan;
+  summary: string;
+}
+
+const WAIT_MESSAGE = "前の操作の保存・読み直しが終わっていません。終わってからもう一度操作します";
 
 function isActivityKey(key: string): boolean {
   return key.startsWith("a");
@@ -129,40 +151,48 @@ async function loadActivities(projectId: number): Promise<{ items: Activity[]; d
 }
 
 export function useGanttEditor(input: GanttEditorInput): GanttEditor {
-  const { projectId, enabled, gantt, outline, canEditSchedule, canEditWbs, reloadKey, onChanged } = input;
+  const { projectId, enabled, gantt, outline, canEditSchedule, canEditWbs, reloadKey, pageSettled, onChanged } = input;
   const elements = useMemo(() => input.elements ?? [], [input.elements]);
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
+  /** 活動の一覧を読めた reloadKey */
+  const [activitiesKey, setActivitiesKey] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<ErrorView | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [cursor, setCursor] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [selectedLink, setSelectedLink] = useState<string | null>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorView | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
-  // 操作を重ねて流さない（state は次の描画まで変わらないので ref でも見る）
+  // 操作を重ねて流さない・保存の後の読み直しが終わるまで次の操作を受けない（state は次の描画まで変わらないので ref でも見る）
   const busyRef = useRef(false);
+  const awaitingReloadRef = useRef(false);
+  // 編集を終えるたびに進める（終えた後に届いた操作の結果の文言を出さない）
+  const generation = useRef(0);
 
-  // 活動の一覧（並びの位置・希望開始日・依存の ID に要る）
+  // 活動の一覧（並びの位置・希望開始日・依存の ID に要る）。読み直せなければ前の一覧を残し、操作は受けない
   useEffect(() => {
     if (!enabled) {
       return;
     }
     let cancelled = false;
+    const key = reloadKey;
     loadActivities(projectId).then(
       (result) => {
         if (!cancelled) {
           setActivities(result.items);
           setDependencies(result.dependencies);
+          setActivitiesKey(key);
+          setLoadError(null);
         }
       },
       (e: unknown) => {
         if (!cancelled) {
-          setActivities(null);
-          setError(toErrorView(e));
+          setLoadError(toErrorView(e));
         }
       },
     );
@@ -171,19 +201,33 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     };
   }, [projectId, enabled, reloadKey]);
 
-  // 編集を終えたら選択と確かめを消す
+  // 編集を終えたら、選択・確かめ・文言と活動の一覧を消す（入り直したら読み直す）
   useEffect(() => {
     if (!enabled) {
+      generation.current += 1;
+      setActivities(null);
+      setDependencies([]);
+      setActivitiesKey(null);
+      setLoadError(null);
       setSelected(new Set());
       setCursor(null);
       setAnchor(null);
       setRenaming(null);
       setSelectedLink(null);
-      setConfirmingDelete(false);
+      setPendingDeletion(null);
       setMessage(null);
       setError(null);
     }
   }, [enabled]);
+
+  // 今の reloadKey でガント・WBS・活動を読み終えた
+  const settled = pageSettled && activitiesKey === reloadKey;
+  useEffect(() => {
+    if (settled) {
+      awaitingReloadRef.current = false;
+    }
+  }, [settled, reloadKey]);
+  const reloading = enabled && !settled;
 
   const list = useMemo(() => activities ?? [], [activities]);
   const workPackages = useMemo(() => elements.filter((e) => e.kind === "WORK_PACKAGE"), [elements]);
@@ -220,32 +264,61 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     };
   }, [selected, list, elements, outline]);
 
-  const target = useMemo(() => addTarget(elements, list, cursor), [elements, list, cursor]);
-  const plannedDeletion = useMemo(() => deletionPlan(elements, list, selected), [elements, list, selected]);
-  const deleteSummary = [
-    plannedDeletion.elementIds.length > 0 ? `要素 ${plannedDeletion.elementIds.length} 件（配下の要素と活動ごと）` : "",
-    plannedDeletion.activityIds.length > 0 ? `活動 ${plannedDeletion.activityIds.length} 件` : "",
-  ]
-    .filter((t) => t !== "")
-    .join("と");
+  // 足す先は選んでいる行で決める（何も選んでいなければ最上位の要素。7.3）
+  const addKey = cursor !== null && selected.has(cursor) ? cursor : null;
+  const target = useMemo(() => addTarget(elements, list, addKey), [elements, list, addKey]);
 
-  /** 1 つの操作を流す：誤りは示し、成否に関わらず読み直す */
+  function activityName(id: number): string {
+    const a = list.find((x) => x.id === id);
+    return a === undefined ? String(id) : `${a.wbs_code} ${a.name}`;
+  }
+
+  function elementName(id: number): string {
+    const e = elements.find((x) => x.id === id);
+    return e === undefined ? String(id) : `${e.wbs_code} ${e.name}`;
+  }
+
+  function deletionSummary(plan: DeletionPlan): string {
+    const parts: string[] = [];
+    if (plan.elementIds.length > 0) {
+      parts.push(`要素 ${plan.elementIds.length} 件（${listText(plan.elementIds.map(elementName))}。配下の要素ごと）`);
+    }
+    if (plan.activityIds.length > 0) {
+      parts.push(`活動 ${plan.activityIds.length} 件（${listText(plan.activityIds.map(activityName))}）`);
+    }
+    return parts.join("と");
+  }
+
+  /** 保存も読み直しもしていない */
+  function idle(): boolean {
+    return !busyRef.current && !awaitingReloadRef.current && settled;
+  }
+
+  /** 1 つの操作を流す：誤りは示し、成否に関わらず読み直す。読み直しが終わるまで次の操作は受けない */
   async function run(action: () => Promise<string | null>): Promise<boolean> {
-    if (busyRef.current) {
+    if (!idle()) {
+      refuse(WAIT_MESSAGE);
       return false;
     }
     busyRef.current = true;
+    const current = generation.current;
     setBusy(true);
     setError(null);
     setMessage(null);
     let ok = false;
     try {
-      setMessage(await action());
+      const done = await action();
+      if (current === generation.current) {
+        setMessage(done);
+      }
       ok = true;
     } catch (e) {
-      setError(e instanceof PartialFailure ? e.view : toErrorView(e));
+      if (current === generation.current) {
+        setError(e instanceof PartialFailure ? e.view : toErrorView(e));
+      }
     } finally {
       busyRef.current = false;
+      awaitingReloadRef.current = true;
       setBusy(false);
       onChanged();
     }
@@ -261,16 +334,23 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     return isActivityKey(key) ? canEditSchedule : canEditWbs;
   }
 
+  /** 選択を変える（変えたら消すことの確かめは取り消す。確かめていない行を消さない） */
+  function setSelection(keys: Iterable<string>, nextCursor: string | null, nextAnchor?: string | null) {
+    setSelected(new Set(keys));
+    setCursor(nextCursor);
+    if (nextAnchor !== undefined) {
+      setAnchor(nextAnchor);
+    }
+    setPendingDeletion(null);
+  }
+
   function selectOnly(key: string) {
-    setSelected(new Set([key]));
-    setCursor(key);
-    setAnchor(key);
+    setSelection([key], key, key);
     setSelectedLink(null);
   }
 
   function onSelectRow(key: string, how: SelectHow) {
     setSelectedLink(null);
-    setConfirmingDelete(false);
     if (how === "only") {
       selectOnly(key);
       return;
@@ -287,10 +367,10 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
       });
       setCursor(key);
       setAnchor(key);
+      setPendingDeletion(null);
       return;
     }
-    setSelected(new Set(rangeKeys(outline, anchor ?? key, key)));
-    setCursor(key);
+    setSelection(rangeKeys(outline, anchor ?? key, key), key);
   }
 
   function startRename(key: string) {
@@ -307,6 +387,10 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     const trimmed = name.trim();
     const current = isActivityKey(key) ? list.find((a) => a.id === idOf(key))?.name : elements.find((e) => e.id === idOf(key))?.name;
     if (trimmed === "" || trimmed === current) {
+      return;
+    }
+    if (!idle()) {
+      refuse(`名前は変えていない（${WAIT_MESSAGE}）`);
       return;
     }
     void run(async () => {
@@ -370,33 +454,58 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
   }
 
   function askDelete() {
-    if (selected.size === 0 || (plannedDeletion.elementIds.length === 0 && plannedDeletion.activityIds.length === 0)) {
+    if (!idle()) {
+      refuse(WAIT_MESSAGE);
+      return;
+    }
+    const plan = deletionPlan(elements, list, selected);
+    if (plan.elementIds.length === 0 && plan.activityIds.length === 0) {
       refuse("消す行を選びます");
       return;
     }
-    if ((plannedDeletion.elementIds.length > 0 && !canEditWbs) || (plannedDeletion.activityIds.length > 0 && !canEditSchedule)) {
+    if ((plan.elementIds.length > 0 && !canEditWbs) || (plan.activityIds.length > 0 && !canEditSchedule)) {
       refuse("選んだ行を消す権限がありません");
       return;
     }
-    setConfirmingDelete(true);
+    // API-WBS-005 は活動のある WP を配下に含む要素を 422 で拒む（OQ-18 (1)）。送る前に同じ理由を示す
+    if (plan.blockedWorkPackages.length > 0) {
+      refuse(
+        `活動のある WP は消せません：${listText(plan.blockedWorkPackages.map((e) => `${e.wbs_code} ${e.name}`))}` +
+          "（先に活動を消すか、別の WP へ移す。活動も一緒に選べば、活動を先に消す）",
+      );
+      return;
+    }
+    setPendingDeletion({ plan, summary: deletionSummary(plan) });
   }
 
+  /** 確かめた計画を消す：活動を先に 1 件ずつ（API-SCH-005）、次に要素を配下ごと（API-WBS-005） */
   async function confirmDelete() {
-    setConfirmingDelete(false);
-    const plan = plannedDeletion;
+    const pending = pendingDeletion;
+    setPendingDeletion(null);
+    if (pending === null) {
+      return;
+    }
+    const steps = [
+      ...pending.plan.activityIds.map((id) => ({ name: activityName(id), remove: () => deleteActivity(projectId, id) })),
+      ...pending.plan.elementIds.map((id) => ({ name: elementName(id), remove: () => deleteElement(projectId, id) })),
+    ];
     const ok = await run(async () => {
-      for (const id of plan.elementIds) {
-        await deleteElement(projectId, id);
+      let done = 0;
+      try {
+        for (const step of steps) {
+          await step.remove();
+          done += 1;
+        }
+      } catch (e) {
+        if (done === 0) {
+          throw e;
+        }
+        throw partialFailure(e, `${done} 件は消した。消せなかった行：${listText(steps.slice(done).map((s) => s.name))}`);
       }
-      for (const id of plan.activityIds) {
-        await deleteActivity(projectId, id);
-      }
-      return `${deleteSummary}を消した`;
+      return `${pending.summary}を消した`;
     });
     if (ok) {
-      setSelected(new Set());
-      setCursor(null);
-      setAnchor(null);
+      setSelection([], null, null);
     }
   }
 
@@ -434,11 +543,12 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
       refuse("まとめる先の名前を入れます");
       return false;
     }
-    if (selection.kind === "none" || selection.kind === "element" || (selection.kind === "many" && selection.elementIds.length > 0 && selection.activityIds.length > 0)) {
+    if (selection.kind === "none" || (selection.kind === "many" && selection.elementIds.length > 0 && selection.activityIds.length > 0)) {
       refuse("活動だけ、または要素だけを選んでまとめます");
       return false;
     }
-    const activityIds = selection.kind === "activity" ? [selection.activity.id] : selection.activityIds;
+    const activityIds = selection.kind === "activity" ? [selection.activity.id] : selection.kind === "many" ? selection.activityIds : [];
+    const elementIds = selection.kind === "element" ? [selection.element.id] : selection.kind === "many" ? selection.elementIds : [];
     if (activityIds.length > 0) {
       if (!canEditWbs || !canEditSchedule) {
         refuse("活動を新しい WP にまとめるには、wbs.edit と schedule.edit の両方が要ります");
@@ -451,16 +561,16 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
       }
       return run(async () => {
         const wp = await createElement(projectId, { parent_id: plan.value.parentId, kind: "WORK_PACKAGE", name: trimmed });
-        await moveElement(projectId, wp.id, plan.value.parentId, plan.value.position);
         let moved = 0;
         try {
+          await moveElement(projectId, wp.id, plan.value.parentId, plan.value.position);
           for (const id of plan.value.ids) {
             await updateActivity(projectId, id, { work_package_id: wp.id });
             moved += 1;
           }
         } catch (e) {
           const left = plan.value.ids.slice(moved).map((id) => list.find((a) => a.id === id)?.name ?? String(id));
-          throw partialFailure(e, moved, left, "活動");
+          throw partialFailure(e, `新しい WP「${trimmed}」は作った。${moved} 件は移した。移せなかった活動：${left.join("、")}`);
         }
         return `活動 ${moved} 件を新しい WP「${trimmed}」にまとめた`;
       });
@@ -469,23 +579,23 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
       refuse("要素をまとめる権限（wbs.edit）がありません");
       return false;
     }
-    const plan = groupElementsPlan(elements, selection.kind === "many" ? selection.elementIds : []);
+    const plan = groupElementsPlan(elements, elementIds);
     if (!plan.ok) {
       refuse(plan.reason);
       return false;
     }
     return run(async () => {
       const parent = await createElement(projectId, { parent_id: plan.value.parentId, kind, name: trimmed });
-      await moveElement(projectId, parent.id, plan.value.parentId, plan.value.position);
       let moved = 0;
       try {
+        await moveElement(projectId, parent.id, plan.value.parentId, plan.value.position);
         for (const id of plan.value.ids) {
           await moveElement(projectId, id, parent.id, null);
           moved += 1;
         }
       } catch (e) {
         const left = plan.value.ids.slice(moved).map((id) => elements.find((el) => el.id === id)?.wbs_code ?? String(id));
-        throw partialFailure(e, moved, left, "要素");
+        throw partialFailure(e, `新しい要素「${trimmed}」は作った。${moved} 件は移した。移せなかった要素：${left.join("、")}`);
       }
       return `要素 ${moved} 件を新しい要素「${trimmed}」にまとめた`;
     });
@@ -585,8 +695,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
         return;
       }
       if (event.shiftKey) {
-        setSelected(new Set(rangeKeys(outline, anchor ?? next, next)));
-        setCursor(next);
+        setSelection(rangeKeys(outline, anchor ?? next, next), next);
       } else {
         selectOnly(next);
       }
@@ -601,25 +710,40 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     }
     if (key === "Insert") {
       event.preventDefault();
-      addInputRef.current?.focus();
+      if (addInputRef.current === null) {
+        refuse(target.kind === "activity" ? "活動を足す権限（schedule.edit）がありません" : "要素を足す権限（wbs.edit）がありません");
+      } else {
+        addInputRef.current.focus();
+      }
       return;
     }
     if (key === "Delete") {
       event.preventDefault();
       if (selectedLink !== null) {
+        if (!canEditSchedule) {
+          refuse("依存を外す権限（schedule.edit）がありません");
+          return;
+        }
         const [p, s] = selectedLink.split("-").map(Number);
         const dependency = dependencies.find((d) => d.predecessor_id === p && d.successor_id === s);
-        if (dependency !== undefined && canEditSchedule) {
-          void removeDependency(dependency.id);
+        if (dependency === undefined) {
+          refuse(WAIT_MESSAGE);
+          return;
         }
+        void removeDependency(dependency.id);
         return;
       }
       askDelete();
       return;
     }
+    // Esc：矢印の選択・消すことの確かめを取り消す。何も無ければ行の選択を外す（最上位に足せるように）
     if (key === "Escape") {
-      setSelectedLink(null);
-      setConfirmingDelete(false);
+      if (selectedLink !== null || pendingDeletion !== null) {
+        setSelectedLink(null);
+        setPendingDeletion(null);
+      } else {
+        setSelection([], null, null);
+      }
     }
   }
 
@@ -638,7 +762,7 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
         onCancelRename: () => setRenaming(null),
         onSelectLink: (link) => {
           setSelectedLink(link);
-          setConfirmingDelete(false);
+          setPendingDeletion(null);
         },
         onKeyDown,
         onBarDrop,
@@ -651,8 +775,11 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     chartEdit,
     canEditSchedule,
     canEditWbs,
-    busy,
+    busy: busy || reloading,
+    saving: busy,
+    reloading,
     error,
+    loadError,
     message,
     selection,
     activities: list,
@@ -660,15 +787,15 @@ export function useGanttEditor(input: GanttEditorInput): GanttEditor {
     workPackages,
     addTarget: target,
     addInputRef,
-    confirmingDelete,
-    deleteSummary,
+    confirmingDelete: pendingDeletion !== null,
+    deleteSummary: pendingDeletion?.summary ?? "",
     rename: () => (cursor === null ? refuse("名前を変える行を選びます") : startRename(cursor)),
     indent: () => moveElementBy(indentPlan, "インデントした"),
     outdent: () => moveElementBy(outdentPlan, "アウトデントした"),
     stepUp: () => step(-1),
     stepDown: () => step(1),
     askDelete,
-    cancelDelete: () => setConfirmingDelete(false),
+    cancelDelete: () => setPendingDeletion(null),
     confirmDelete,
     addRow,
     groupSelected,

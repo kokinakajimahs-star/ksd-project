@@ -167,16 +167,26 @@ describe("stepSelection と rangeKeys", () => {
 });
 
 describe("deletionPlan", () => {
-  it("要素は配下ごと消えるので、選んだ要素の配下の要素と活動は入れない", () => {
-    expect(deletionPlan(elements, activities, ["e100", "e101", "a21", "a24"])).toEqual({ elementIds: [100], activityIds: [] });
+  it("選んだ活動は先に 1 件ずつ消し、要素は配下ごと（選んだ要素の配下の要素は入れない）", () => {
+    expect(deletionPlan(elements, activities, ["e100", "e101", "a21", "a22", "a23", "a24"])).toEqual({
+      activityIds: [21, 22, 23, 24],
+      elementIds: [100],
+      blockedWorkPackages: [],
+    });
+    expect(deletionPlan(elements, activities, ["a23", "a21"])).toEqual({ activityIds: [21, 23], elementIds: [], blockedWorkPackages: [] });
   });
 
-  it("要素の配下でない活動は 1 件ずつ消す", () => {
-    expect(deletionPlan(elements, activities, ["e101", "a22", "a24"])).toEqual({ elementIds: [101], activityIds: [24] });
-    expect(deletionPlan(elements, activities, ["a23", "a21"])).toEqual({ elementIds: [], activityIds: [21, 23] });
+  it("選んでいない活動を配下に残す要素は、その WP を示す（API-WBS-005 は 422 で拒む。OQ-18 (1)）", () => {
+    const plan = deletionPlan(elements, activities, ["e100", "a21", "a24"]);
+    expect(plan.blockedWorkPackages.map((e) => e.id)).toEqual([101]);
+    expect(deletionPlan(elements, activities, ["e101", "a22", "a24"]).blockedWorkPackages.map((e) => e.id)).toEqual([101]);
+  });
+
+  it("活動の無い要素は止めない", () => {
+    expect(deletionPlan(elements, activities, ["e103"])).toEqual({ activityIds: [], elementIds: [103], blockedWorkPackages: [] });
   });
 
   it("何も選んでいなければ空", () => {
-    expect(deletionPlan(elements, activities, [])).toEqual({ elementIds: [], activityIds: [] });
+    expect(deletionPlan(elements, activities, [])).toEqual({ activityIds: [], elementIds: [], blockedWorkPackages: [] });
   });
 });

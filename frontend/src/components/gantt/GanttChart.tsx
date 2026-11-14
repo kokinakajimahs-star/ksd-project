@@ -158,6 +158,12 @@ function labelX(depth: number, indent: number): number {
   return 8 + Math.max(0, depth - 1) * indent;
 }
 
+/** 動かした幅を日に丸める（左右で同じ丸め。0.5 日ちょうどは遠い方へ） */
+function daysOf(dx: number, dayWidth: number): number {
+  const days = Math.round(Math.abs(dx) / dayWidth);
+  return days === 0 ? 0 : dx < 0 ? -days : days;
+}
+
 function selectHow(event: ReactMouseEvent): SelectHow {
   return event.shiftKey ? "range" : event.ctrlKey || event.metaKey ? "toggle" : "only";
 }
@@ -245,9 +251,9 @@ export default function GanttChart({
 
   // ドラッグの間の受け手は window に付ける（描画域の外へ出ても追う）。最新の値は ref から読む（state の更新関数の中で
   // 呼び手の操作を呼ばない：React は更新関数を 2 回呼ぶことがある）
-  const latest = useRef({ edit, rows });
+  const latest = useRef({ edit, rows, range, scrollTop });
   useEffect(() => {
-    latest.current = { edit, rows };
+    latest.current = { edit, rows, range, scrollTop };
   });
   const dragRef = useRef<DragState | null>(null);
   function startDrag(next: DragState | null) {
@@ -274,7 +280,7 @@ export default function GanttChart({
       }
       if (d.kind === "bar") {
         const dx = event.clientX - d.originX;
-        update({ ...d, days: Math.round(dx / dayWidth), moved: d.moved || Math.abs(dx) >= DRAG_THRESHOLD });
+        update({ ...d, days: daysOf(dx, dayWidth), moved: d.moved || Math.abs(dx) >= DRAG_THRESHOLD });
       } else {
         const p = svgPoint(event);
         update({ ...d, toX: p.x, toY: p.y });
@@ -283,20 +289,32 @@ export default function GanttChart({
     function onUp(event: MouseEvent) {
       const d = dragRef.current;
       update(null);
-      const { edit: current, rows: currentRows } = latest.current;
+      const { edit: current, rows: currentRows, range: currentRange, scrollTop: currentScroll } = latest.current;
       if (d === null || current === undefined) {
         return;
       }
       if (d.kind === "bar") {
         const dx = event.clientX - d.originX;
-        const days = Math.round(dx / dayWidth);
+        const days = daysOf(dx, dayWidth);
         if ((d.moved || Math.abs(dx) >= DRAG_THRESHOLD) && days !== 0) {
           current.onBarDrop(d.activityId, d.how, days);
         }
         return;
       }
-      const target = currentRows[Math.floor((svgPoint(event).y - HEADER_HEIGHT) / ROW_HEIGHT)];
-      if (target?.kind === "activity" && target.row.activity_id !== d.activityId) {
+      // 落とした先は別の活動の予定のバー（7.3）。目盛りの帯（縦に送っても上に残る）の上は行に当てない
+      const p = svgPoint(event);
+      if (currentRange === null || p.y - currentScroll < HEADER_HEIGHT) {
+        return;
+      }
+      const target = currentRows[Math.floor((p.y - HEADER_HEIGHT) / ROW_HEIGHT)];
+      if (target?.kind !== "activity" || target.row.activity_id === d.activityId || target.row.planned === null) {
+        return;
+      }
+      const planned = target.row.planned;
+      const slack = planned.is_milestone ? 10 : 4;
+      const x1 = LABEL_WIDTH + xOfPoint(currentRange.start, planned.start.calendar, dayWidth) - slack;
+      const x2 = LABEL_WIDTH + xOfPoint(currentRange.start, planned.end.calendar, dayWidth) + slack;
+      if (p.x >= x1 && p.x <= x2) {
         current.onLinkDrop(d.activityId, target.row.activity_id);
       }
     }
@@ -316,6 +334,23 @@ export default function GanttChart({
       window.removeEventListener("keydown", onKey, true);
     };
   }, [dragging, dayWidth]);
+
+  // 上下の矢印などで選んだ行が見えていなければ、図を縦に送る（描画の済んでいない画面では何もしない）
+  const cursorKey = edit?.cursor ?? null;
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const position = cursorKey === null ? -1 : latest.current.rows.findIndex((r) => r.key === cursorKey);
+    if (viewport === null || position < 0 || viewport.clientHeight <= HEADER_HEIGHT) {
+      return;
+    }
+    const rowTopY = position * ROW_HEIGHT;
+    const shownHeight = viewport.clientHeight - HEADER_HEIGHT;
+    if (rowTopY < viewport.scrollTop) {
+      viewport.scrollTop = rowTopY;
+    } else if (rowTopY + ROW_HEIGHT > viewport.scrollTop + shownHeight) {
+      viewport.scrollTop = rowTopY + ROW_HEIGHT - shownHeight;
+    }
+  }, [cursorKey]);
 
   if (range === null || (rows.length === 0 && !editing)) {
     return <p className="gantt-empty">描く活動がありません</p>;
@@ -490,8 +525,10 @@ export default function GanttChart({
     const planned = row.row.planned;
     const dx = drag.days * dayWidth;
     const x1 = x(planned.start) + (drag.how === "move" ? dx : 0);
-    const x2 = x(planned.end) + dx;
-    const date = drag.how === "move" ? addDays(planned.start_date, drag.days) : addDays(planned.end_date, drag.days);
+    // 右端を予定開始日より前へ寄せたときは、送る値（開始日。期間 1 稼働日）と同じに見せる
+    const x2 = drag.how === "move" ? x(planned.end) + dx : Math.max(x(planned.end) + dx, x1 + dayWidth);
+    const proposed = drag.how === "move" ? addDays(planned.start_date, drag.days) : addDays(planned.end_date, drag.days);
+    const date = drag.how === "resize" && proposed < planned.start_date ? planned.start_date : proposed;
     const y = rowTop(position);
     return (
       <g data-ghost={drag.how} pointerEvents="none">
@@ -588,18 +625,18 @@ export default function GanttChart({
         )}
 
         {/* ② ベースラインのバー（細い灰色） */}
-        <g data-layer="baseline" clipPath={plotClip}>
+        <g data-layer="baseline" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {visibleActivities.map(({ row, position }) => row.baseline && bar(row, position, row.baseline, "baseline"))}
         </g>
 
         {/* ③ 予定のバー（クリティカルは赤い枠。マイルストーンは菱形）と要素の行の要約のバー */}
-        <g data-layer="planned" clipPath={plotClip}>
+        <g data-layer="planned" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {visibleActivities.map(({ row, position }) => row.planned && bar(row, position, row.planned, "planned"))}
           {visibleElements.map(({ r, position }) => summaryBar(r, position))}
         </g>
 
         {/* ④ 実績のバー（未完了なら報告日まで） */}
-        <g data-layer="actual" clipPath={plotClip}>
+        <g data-layer="actual" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {visibleActivities.map(({ row, position }) => row.actual && bar(row, position, row.actual, "actual"))}
         </g>
 
@@ -687,7 +724,7 @@ export default function GanttChart({
         </g>
 
         {/* ⑥ 報告日線（縦の破線） */}
-        <g data-layer="report-line" clipPath={plotClip}>
+        <g data-layer="report-line" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {mainLine !== null && (
             <line
               x1={x(mainLine.reportLine)}
@@ -703,7 +740,7 @@ export default function GanttChart({
         </g>
 
         {/* ⑦ イナズマ線（判定で頂点の色を変える） */}
-        <g data-layer="lightning" clipPath={plotClip}>
+        <g data-layer="lightning" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {mainLine !== null && (
             <>
               <polyline
@@ -733,7 +770,7 @@ export default function GanttChart({
         </g>
 
         {/* ⑧ 過去の線（選んだ報告日ごと。線の種類を変える） */}
-        <g data-layer="past-lines" clipPath={plotClip}>
+        <g data-layer="past-lines" clipPath={plotClip} pointerEvents={editing ? "none" : undefined}>
           {pastLines.map((line) => {
             const vertices: (LineVertex & { judgement: OverlaidLine["vertices"][number]["judgement"] })[] = [];
             for (const v of line.vertices) {
@@ -1018,7 +1055,8 @@ function RenameInput({
       onFocus={(e) => e.currentTarget.select()}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+        // IME の確定の Enter は保存にしない（Safari は確定の後に keyCode 229 の keydown を出すことがある）
+        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
           e.preventDefault();
           done.current = true;
           onCommit(e.currentTarget.value, true);

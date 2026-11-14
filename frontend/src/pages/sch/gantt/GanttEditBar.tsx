@@ -22,7 +22,8 @@ export function GanttEditBar({ editor, tree }: { editor: GanttEditor; tree: WbsT
   const canAdd = target.kind === "activity" ? editor.canEditSchedule : editor.canEditWbs;
   const groupsActivities =
     selection.kind === "activity" || (selection.kind === "many" && selection.elementIds.length === 0 && selection.activityIds.length > 0);
-  const groupsElements = selection.kind === "many" && selection.activityIds.length === 0 && selection.elementIds.length > 0;
+  const groupsElements =
+    selection.kind === "element" || (selection.kind === "many" && selection.activityIds.length === 0 && selection.elementIds.length > 0);
   const canGroup = groupsActivities ? editor.canEditWbs && editor.canEditSchedule : groupsElements && editor.canEditWbs;
 
   async function handleAdd(event: FormEvent) {
@@ -123,7 +124,7 @@ export function GanttEditBar({ editor, tree }: { editor: GanttEditor; tree: WbsT
           <span>
             {groupsActivities
               ? `選んだ活動 ${selection.kind === "many" ? selection.activityIds.length : 1} 件を新しい WP にまとめる`
-              : `選んだ要素 ${selection.kind === "many" ? selection.elementIds.length : 0} 件を新しい上位の要素にまとめる`}
+              : `選んだ要素 ${selection.kind === "many" ? selection.elementIds.length : 1} 件を新しい上位の要素にまとめる`}
           </span>
           <input aria-label="まとめる先の名前" value={groupName} onChange={(e) => setGroupName(e.target.value)} />
           {groupsElements && (
@@ -142,12 +143,15 @@ export function GanttEditBar({ editor, tree }: { editor: GanttEditor; tree: WbsT
       )}
 
       <ErrorAlert error={editor.error} />
+      {editor.loadError !== null && (
+        <p role="alert">{`活動の一覧を読み直せません（${editor.loadError.message}）。編集を終えてから入り直してください`}</p>
+      )}
       {/* 結果の行は常に置く（文言が出入りしても図が上下に動かない） */}
       <p role="status" className="gantt-edit-status">
-        {editor.message ?? (editor.busy ? "保存しています…" : "")}
+        {editor.message ?? (editor.saving ? "保存しています…" : editor.reloading ? "読み直しています…" : "")}
       </p>
       <p className="note">
-        行をクリックで選ぶ（Ctrl＋クリックで足す、Shift＋クリックで範囲）。上下の矢印で選び、F2 で名前、Insert で行を足す欄へ、
+        行をクリックで選ぶ（Ctrl＋クリックで足す、Shift＋クリックで範囲、Esc で外す）。上下の矢印で選び、F2 で名前、Insert で行を足す欄へ、
         Delete で消す。Alt+Shift+矢印でインデント・アウトデント・上下へ。バーの本体をドラッグすると開始、右端をドラッグすると終わりが動く（Esc で取り消す）。
         選んだ活動のバーの右の丸を別の活動のバーへドラッグすると依存をつなぐ。矢印を選んで Delete で外す
       </p>
@@ -179,7 +183,9 @@ export function GanttSelectionPanel({ editor, projectId }: { editor: GanttEditor
       </section>
     );
   }
-  return <ActivityPanel key={selection.activity.id} editor={editor} activity={selection.activity} />;
+  // 保存して読み直した値に欄を合わせる（同じ活動を選んだままでも、値が変われば欄を作り直す）
+  const a = selection.activity;
+  return <ActivityPanel key={`${a.id}:${a.requested_start ?? ""}:${a.duration_days}:${a.work_package_id}`} editor={editor} activity={a} />;
 }
 
 function ActivityPanel({ editor, activity }: { editor: GanttEditor; activity: Activity }) {
