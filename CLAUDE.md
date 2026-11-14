@@ -52,7 +52,7 @@ ksdx trace verify                  # 要求→設計の写像（要求 64 / GAP 
 `docs/branch-rules.md` に従う。作業は `dev`（または `wt/<task_id>`）。**`main` へ直接コミットしない。**
 `main` へは関門（`ksdls test gate --verify`）を通した後に `ksdls escalate` で入れる。流すのは次の節の `kloop release` で、
 エージェントは関門・escalate・`git push` を自分の Bash で打たない。
-リモートは GitHub Enterprise の非公開リポジトリ `ProductExperiencePlatform/ksd-project`。
+リモートは GitHub Enterprise の非公開リポジトリ `origin`（URL は `git remote -v` で見る。利用者の名前を含むので文書・コミットに写さない）。
 
 ## 本番へ出す（ksd-ls の導入先）
 

@@ -1,10 +1,11 @@
 // ルートの定義（設計書 2.1・7.1）。7.1 の画面のルートは全てここに書く。
 // 画面は frontend/src/pages/<群>/ に置き、下の <Routes> に 1 行ずつ足す。
 import { useState } from "react";
-import { Link, Route, Routes, useNavigate } from "react-router-dom";
+import { Link, Route, Routes, useMatch, useNavigate } from "react-router-dom";
 
 import { logout } from "./api/cmn";
 import { RequireAuth, SessionProvider, useSession } from "./auth/session";
+import ProjectNav from "./components/ProjectNav";
 import AuditLogsPage from "./pages/chg/AuditLogsPage";
 import ChangeRequestsPage from "./pages/chg/ChangeRequestsPage";
 import CorrectiveActionsPage from "./pages/chg/CorrectiveActionsPage";
@@ -56,8 +57,10 @@ function SessionMenu() {
 
   if (session === null) {
     return (
-      <nav aria-label="利用者">
-        <Link to="/login">ログイン</Link>
+      <nav aria-label="利用者" className="app-nav">
+        <span className="app-nav-end">
+          <Link to="/login">ログイン</Link>
+        </span>
       </nav>
     );
   }
@@ -74,18 +77,32 @@ function SessionMenu() {
     navigate("/login", { replace: true });
   }
 
+  // 上のバー（A-53）：左にプロジェクト（一覧から切り替える）、右に自分の行き先・名前・ログアウト
   return (
-    <nav aria-label="利用者">
+    <nav aria-label="利用者" className="app-nav">
       <Link to="/projects">プロジェクト</Link>
-      <Link to="/timesheet">タイムシート</Link>
-      <Link to="/approvals">承認待ち</Link>
-      {session.user.is_system_admin && <Link to="/admin/users">ユーザー管理</Link>}
-      <span>{session.user.display_name}</span>
-      <button type="button" onClick={() => void handleLogout()} disabled={busy}>
-        ログアウト
-      </button>
+      <span className="app-nav-end">
+        <Link to="/timesheet">タイムシート</Link>
+        <Link to="/approvals">承認待ち</Link>
+        {session.user.is_system_admin && <Link to="/admin/users">ユーザー管理</Link>}
+        <span>{session.user.display_name}</span>
+        <button type="button" onClick={() => void handleLogout()} disabled={busy}>
+          ログアウト
+        </button>
+      </span>
     </nav>
   );
+}
+
+/** プロジェクトの中の画面（/projects/:projectId/*）では、ログインしていれば左メニューを出す */
+function ProjectMenu() {
+  const { session } = useSession();
+  const match = useMatch("/projects/:projectId/*");
+  const projectId = Number(match?.params.projectId);
+  if (session === null || !Number.isInteger(projectId) || projectId <= 0) {
+    return null;
+  }
+  return <ProjectNav projectId={projectId} userId={session.user.id} />;
 }
 
 export default function App() {
@@ -98,6 +115,7 @@ export default function App() {
           </h1>
           <SessionMenu />
         </header>
+        <ProjectMenu />
         <main>
           <Routes>
             <Route path="/" element={<Home />} />

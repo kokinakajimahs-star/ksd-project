@@ -1,97 +1,343 @@
 /*
- * 画面の最小の見た目（読みやすさのためだけ。A-51）。
+ * 画面の見た目（A-53：Primer の値で OpenProject に寄せる）。
+ * - 値は @primer/primitives の CSS 変数だけを使う（main.tsx で読み込み、index.html の <html> に
+ *   data-color-mode="light" data-light-theme="light" を付けて明るい配色の値を有効にする）。
+ *   例外は文字の並び（Primer の並びに日本語の書体が無いので、日本語の書体を足した並びを使う）と、
+ *   狭い画面の境（メディア問い合わせには変数を使えないので、Primer の medium の境 48rem を書く）
  * - 画面の表示にだけ当てる（@media screen）。印刷は会議レポートの印刷用の CSS（MEETING_REPORT_CSS）だけで決める
- * - 選択子は :where() で包み、詳細度を 0 にする。部品が持つ CSS・style 属性が常に勝つ
+ * - 選択子は :where() で包み、詳細度を 0 にする。部品が持つ CSS・style 属性（ガントの 7.3 の色など）が常に勝つ
+ * - 詳細度が全て 0 なので、後に書いた規則が勝つ。要素の既定（1 章）→ 画面全体の枠（2 章）→ 画面の中の並び（3 章）の順に書く
  */
 @media screen {
+  /* ===== 1. 要素の既定 ===== */
+
   :where(body) {
     margin: 0;
-    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
-    font-size: 14px;
-    line-height: 1.5;
-    color: #1f2328;
-    background: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", Meiryo, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    font-size: var(--text-body-size-medium);
+    line-height: var(--text-body-lineHeight-medium);
+    color: var(--fgColor-default);
+    background: var(--bgColor-default);
   }
 
-  /* ヘッダ：題名と行き先を 1 行に並べ、リンクの間を空ける */
+  ::selection {
+    background: var(--selection-bgColor);
+  }
+
+  /* 見出し */
+  :where(h2) {
+    margin: 0 0 var(--space-md);
+    padding-bottom: var(--space-sm);
+    font-size: var(--text-title-size-medium);
+    font-weight: var(--text-title-weight-medium);
+    line-height: var(--text-title-lineHeight-medium);
+    border-bottom: var(--borderWidth-default) solid var(--borderColor-muted);
+  }
+  :where(h3) {
+    margin: var(--space-lg) 0 var(--space-sm);
+    font-size: var(--text-title-size-small);
+    font-weight: var(--text-title-weight-small);
+  }
+  :where(h4) {
+    margin: var(--space-md) 0 var(--space-xs);
+    font-size: var(--text-body-size-medium);
+    font-weight: var(--base-text-weight-semibold);
+  }
+
+  /* リンク：文の中は下線を残す（色だけで見分けさせない） */
+  :where(a) {
+    color: var(--fgColor-link);
+    text-decoration: none;
+  }
+  :where(a:hover, p a, li a, .note a, .hint a) {
+    text-decoration: underline;
+    text-underline-offset: var(--space-xxs);
+  }
+
+  /* ボタン（Primer の既定のボタン） */
+  :where(button) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--control-medium-gap);
+    min-height: var(--control-medium-size);
+    padding: 0 var(--control-medium-paddingInline-normal);
+    font: inherit;
+    font-weight: var(--base-text-weight-medium);
+    color: var(--button-default-fgColor-rest);
+    background: var(--button-default-bgColor-rest);
+    border: var(--borderWidth-default) solid var(--button-default-borderColor-rest);
+    border-radius: var(--borderRadius-medium);
+    box-shadow: var(--button-default-shadow-resting);
+    cursor: pointer;
+  }
+  :where(button:hover:not(:disabled)) {
+    background: var(--button-default-bgColor-hover);
+    border-color: var(--button-default-borderColor-hover);
+  }
+  :where(button:active:not(:disabled)) {
+    background: var(--button-default-bgColor-active);
+  }
+  :where(button:disabled) {
+    color: var(--button-default-fgColor-disabled);
+    background: var(--button-default-bgColor-disabled);
+    border-color: var(--button-default-borderColor-disabled);
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+  /* 表の中は 1 段小さく */
+  :where(td button) {
+    min-height: var(--control-small-size);
+    padding: 0 var(--control-small-paddingInline-condensed);
+  }
+
+  /* 入力 */
+  :where(input:not([type="checkbox"], [type="radio"], [type="file"]), select, textarea) {
+    min-height: var(--control-medium-size);
+    padding: 0 var(--control-medium-paddingInline-condensed);
+    font: inherit;
+    color: var(--fgColor-default);
+    background: var(--bgColor-default);
+    border: var(--borderWidth-default) solid var(--control-borderColor-rest);
+    border-radius: var(--borderRadius-medium);
+    box-shadow: var(--shadow-inset);
+    box-sizing: border-box;
+  }
+  :where(textarea) {
+    padding: var(--control-medium-paddingBlock) var(--control-medium-paddingInline-condensed);
+  }
+  :where(td :is(input:not([type="checkbox"], [type="radio"], [type="file"]), select)) {
+    min-height: var(--control-small-size);
+  }
+  :where(input:disabled, select:disabled, textarea:disabled) {
+    color: var(--control-fgColor-disabled);
+    background: var(--control-bgColor-disabled);
+    cursor: not-allowed;
+  }
+  /* 擬似要素は :where() に入れられない（詳細度は要素 1 つ分） */
+  :where(input, textarea)::placeholder {
+    color: var(--control-fgColor-placeholder);
+  }
+  :where(input[type="checkbox"], input[type="radio"]) {
+    accent-color: var(--bgColor-accent-emphasis);
+  }
+
+  /* 名札：文字と、中に入れた入力の間を空ける */
+  :where(label) {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs);
+    margin-right: var(--space-sm);
+  }
+  :where(fieldset) {
+    margin: var(--space-sm) 0;
+    padding: var(--space-sm) var(--space-md) var(--space-md);
+    border: var(--borderWidth-default) solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+  }
+  :where(legend) {
+    padding: 0 var(--space-xs);
+    font-weight: var(--base-text-weight-semibold);
+  }
+
+  /* キーボードで移ったときの枠 */
+  :where(button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible) {
+    outline: var(--focus-outline);
+    outline-offset: var(--focus-outline-offset);
+  }
+  :where(a:focus-visible) {
+    outline: var(--focus-outline);
+    outline-offset: var(--space-xxs);
+  }
+
+  /* 表：行を詰め、見出しに薄い背景、罫線は横だけ。指した行と選んだ行の色を変える */
+  :where(table) {
+    border-collapse: collapse;
+    margin: var(--space-sm) 0;
+    border-top: var(--borderWidth-default) solid var(--borderColor-default);
+  }
+  :where(th, td) {
+    padding: var(--space-xs) var(--space-sm);
+    text-align: left;
+    vertical-align: top;
+    border-bottom: var(--borderWidth-default) solid var(--borderColor-muted);
+  }
+  :where(thead th) {
+    font-weight: var(--base-text-weight-semibold);
+    color: var(--fgColor-muted);
+    background: var(--bgColor-muted);
+    border-bottom-color: var(--borderColor-default);
+    white-space: nowrap;
+  }
+  :where(tbody tr:hover) {
+    background: var(--bgColor-muted);
+  }
+  :where(tr.selected, tr.selected:hover) {
+    background: var(--bgColor-accent-muted);
+  }
+
+  /* 注記・警告・エラー */
+  :where(.note, .hint, .loading) {
+    color: var(--fgColor-muted);
+  }
+  :where(.warning) {
+    color: var(--fgColor-attention);
+  }
+  :where([role="alert"]) {
+    color: var(--fgColor-danger);
+  }
+  :where(.error-alert) {
+    margin: var(--space-sm) 0;
+    padding: var(--space-sm) var(--space-lg);
+    color: var(--fgColor-default);
+    background: var(--bgColor-danger-muted);
+    border: var(--borderWidth-default) solid var(--borderColor-danger-muted);
+    border-radius: var(--borderRadius-medium);
+  }
+  :where(.error-alert p, .error-alert ul) {
+    margin: var(--space-xs) 0;
+  }
+
+  /* ===== 2. 画面全体の枠：上のバー・左メニュー（プロジェクトの中だけ。無ければ幅 0）・本文 ===== */
+
+  :where(.app) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "header header"
+      "menu main";
+    min-height: 100vh;
+  }
+  :where(.app > main) {
+    grid-area: main;
+    min-width: 0;
+    padding: var(--stack-padding-normal) var(--space-xl) var(--base-size-32);
+  }
+
+  /* 上のバー：濃い色の 1 行。左にアプリ名とプロジェクト、右に自分の行き先・名前・ログアウト */
   :where(.app-header) {
+    grid-area: header;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 24px;
-    padding: 8px 16px;
-    border-bottom: 1px solid #d0d7de;
-    background: #f6f8fa;
+    gap: var(--space-sm) var(--space-xl);
+    min-height: var(--base-size-48);
+    padding: 0 var(--space-lg);
+    color: var(--header-fgColor-default);
+    background: var(--header-bgColor);
   }
   :where(.app-header h1) {
     margin: 0;
-    font-size: 18px;
+    font-size: var(--text-title-size-small);
+    font-weight: var(--base-text-weight-semibold);
   }
-  :where(.app-header nav) {
+  :where(.app-nav, .app-nav-end) {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 16px;
+    gap: var(--space-xs) var(--space-lg);
+  }
+  :where(.app-nav) {
+    flex: 1;
+  }
+  :where(.app-nav-end) {
+    margin-left: auto;
+  }
+  :where(.app-header a) {
+    color: var(--header-fgColor-default);
+    font-weight: var(--base-text-weight-semibold);
+    text-decoration: none;
+  }
+  :where(.app-header h1 a, .app-header a:hover) {
+    color: var(--header-fgColor-logo);
+    text-decoration: none;
+  }
+  :where(.app-header button) {
+    min-height: var(--control-small-size);
+    padding: 0 var(--control-small-paddingInline-normal);
+    color: var(--header-fgColor-logo);
+    background: transparent;
+    border-color: var(--header-borderColor-divider);
+    box-shadow: none;
+  }
+  :where(.app-header button:hover:not(:disabled)) {
+    background: transparent;
+    border-color: var(--header-fgColor-logo);
   }
 
-  :where(main) {
-    padding: 8px 16px 32px;
+  /* プロジェクトの左メニュー：縦に並べ、今の画面（aria-current）を強調する */
+  :where(.project-nav) {
+    grid-area: menu;
+    width: calc(var(--base-size-64) * 3);
+    padding: var(--space-md) var(--space-sm);
+    background: var(--bgColor-muted);
+    border-right: var(--borderWidth-default) solid var(--borderColor-default);
+    box-sizing: border-box;
+  }
+  :where(.project-nav ul) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xxs);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  :where(.project-nav a) {
+    display: block;
+    padding: var(--control-small-paddingBlock) var(--control-small-paddingInline-condensed);
+    color: var(--fgColor-default);
+    text-decoration: none;
+    border-radius: var(--borderRadius-medium);
+  }
+  :where(.project-nav a:hover) {
+    background: var(--control-transparent-bgColor-hover);
+    text-decoration: none;
+  }
+  :where(.project-nav a[aria-current="page"]) {
+    font-weight: var(--base-text-weight-semibold);
+    background: var(--control-transparent-bgColor-selected);
+    box-shadow: inset var(--borderWidth-thicker) 0 0 var(--borderColor-accent-emphasis);
   }
 
-  /* 画面の中の行き先・操作のボタンの並び */
-  :where(.page-links, .actions, .form-actions, .filters, .view-switch, .week-nav, .gantt-controls, .effort-basis) {
+  /* 狭い画面（48rem 未満）：左メニューを本文の上へ移し、横に並べる */
+  @media (max-width: 47.99rem) {
+    :where(.app) {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto 1fr;
+      grid-template-areas:
+        "header"
+        "menu"
+        "main";
+    }
+    :where(.app > main) {
+      padding-inline: var(--space-lg);
+    }
+    :where(.project-nav) {
+      width: auto;
+      padding: var(--space-xs) var(--space-sm);
+      border-right: 0;
+      border-bottom: var(--borderWidth-default) solid var(--borderColor-default);
+    }
+    :where(.project-nav ul) {
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
+  }
+
+  /* ===== 3. 画面の中の並び ===== */
+
+  /* 行き先・操作のボタンの並び */
+  :where(.page-links, .project-destinations, .actions, .form-actions, .filters, .view-switch, .week-nav, .gantt-controls, .effort-basis) {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 16px;
-    margin: 8px 0;
+    gap: var(--space-sm) var(--space-lg);
+    margin: var(--space-sm) 0;
   }
-
-  :where(a) {
-    color: #0969da;
-  }
-
-  :where(button) {
-    font: inherit;
-    padding: 2px 10px;
-  }
-
-  :where(input, select, textarea) {
-    font: inherit;
-  }
-
-  :where(label) {
-    margin-right: 8px;
-  }
-
-  /* 表：罫線と余白 */
-  :where(table) {
-    border-collapse: collapse;
-    margin: 8px 0;
-  }
-  :where(th, td) {
-    border: 1px solid #d0d7de;
-    padding: 2px 8px;
-    text-align: left;
-    vertical-align: top;
-  }
-  :where(thead th) {
-    background: #f6f8fa;
-  }
-  :where(tr.selected) {
-    background: #fff8c5;
-  }
-
-  :where(.note, .hint) {
-    color: #59636e;
-  }
-  :where(.warning) {
-    color: #9a6700;
-  }
-  :where(.error-alert, [role="alert"]) {
-    color: #d1242f;
-  }
-  :where(.loading) {
-    color: #59636e;
+  :where(.project-destinations) {
+    gap: var(--space-xxs) var(--space-md);
+    margin: 0;
   }
 }
