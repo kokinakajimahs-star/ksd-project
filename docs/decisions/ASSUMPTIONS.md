@@ -1864,6 +1864,17 @@
     日の単位の目盛りは年月と日の 2 段）。マークアップは変えず CSS で寄せた（フォームの形を画面ごとに書き換えると試験の書き直しが要るため）。
     「ページの見出しの操作の位置」は見出しと行き先の並びを今の順のままにした（動かすと画面ごとのマークアップの変更になる）
   - 4 で見ていないもの：ui-shots に入れていない画面（UI-CHG-002・UI-WBS-002 など）・狭い画面の幅・印刷（A3）・本物のデータでの表示
+  - 5 の B（CR-023）：`spec-ids.toml` に `[ui_runtime]` と `[[checks]] ui-runtime`（`required = false`）を足した。`base_url` は手元の
+    vite の開発サーバ（`http://localhost:5173`）で、**検証器だけが読む値**（アプリの設定ではない。`spec-ids.toml` はイメージに入らず、
+    画面は `/api` を相対で呼ぶので本番の動きに関わらない）。本番の URL にしないのは、確かめたいのが「これからコミットする手元の変更」で、
+    本番は release と deploy の後の版だから。agent-browser はログインしないので、ログインの要る 20 のルートは `skip_routes` で外し、
+    見るのはログイン（UI-CMN-001）と共有ビュー（UI-RPT-002。無効なトークン）の 2 画面だけ。関門ではいつも「見ていない」になる
+  - 5 の B を初めて流した結果（2026-11-14。dev 7203765。利用者の端末）：2 画面を見て failures 0・人の確認 0・コンソールのエラーと
+    axe の保留の注記 0。流し方の前提として分かったこと：(1) agent-browser は Claude Code の sandbox の中では動かない（daemon の
+    Unix ソケットの bind を sandbox が禁じる。Playwright の画面写しは pipe なので動く）ので、利用者の端末（`!`）で流す。
+    (2) `agent-browser install` の Chrome の取得は利用者の環境で証明書の誤り（UnknownIssuer）で落ちるので、
+    `AGENT_BROWSER_EXECUTABLE_PATH` を Playwright の chromium-1243（`~/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`）へ向ける。
+    (3) アプリはサーバ（uvicorn。一時の SQLite）と画面（vite の 5173）を別の端末で起動する
 
 ## A-54: 2026-11-14 に推奨案で決めたその他のこと
 
