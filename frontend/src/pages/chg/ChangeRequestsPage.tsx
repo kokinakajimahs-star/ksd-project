@@ -27,6 +27,7 @@ import { getProject } from "../../api/prj";
 import { listActivities, type Activity } from "../../api/sch";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
+import StatusBadge, { CHANGE_STATUS_TONES } from "../../components/StatusBadge";
 import { formatDateTime } from "../../lib/format";
 import { wbsStatusLabel } from "../prj/labels";
 import { parseProjectId } from "../prj/ProjectSettingsPage";
@@ -332,7 +333,9 @@ export default function ChangeRequestsPage() {
                   >
                     <td>#{item.number}</td>
                     <td>{item.title}</td>
-                    <td>{CHANGE_STATUS_LABELS[item.status]}</td>
+                    <td>
+                      <StatusBadge tone={CHANGE_STATUS_TONES[item.status]}>{CHANGE_STATUS_LABELS[item.status]}</StatusBadge>
+                    </td>
                     <td>{item.target_codes.join(", ")}</td>
                     <td>{userLabel(names, item.created_by)}</td>
                     <td>{item.submitted_at === null ? "—" : formatDateTime(item.submitted_at)}</td>
@@ -357,7 +360,9 @@ export default function ChangeRequestsPage() {
           </h3>
           <dl>
             <dt>状態</dt>
-            <dd>{CHANGE_STATUS_LABELS[selected.status]}</dd>
+            <dd>
+              <StatusBadge tone={CHANGE_STATUS_TONES[selected.status]}>{CHANGE_STATUS_LABELS[selected.status]}</StatusBadge>
+            </dd>
             <dt>理由</dt>
             <dd>{selected.reason}</dd>
             <dt>対象の WBS ID</dt>

@@ -1,0 +1,74 @@
+{
+  "result": "allow",
+  "remote": "origin",
+  "branch": "dev",
+  "range": "origin/dev..HEAD",
+  "head": "792920ff08788a8e59178225eea72b585f834203",
+  "argv": [
+    "git",
+    "push",
+    "origin",
+    "792920ff08788a8e59178225eea72b585f834203:refs/heads/dev"
+  ],
+  "changed_path_count": 16,
+  "rules": [
+    {
+      "id": "no_force_push",
+      "status": "pass",
+      "detail": "argv: git push origin 792920ff08788a8e59178225eea72b585f834203:refs/heads/dev"
+    },
+    {
+      "id": "branch_is_base",
+      "status": "pass",
+      "detail": "dev は kloop release の中だけで許す（人の同意は受け手を入れたことと人の端末の run。[push].allowed_branches には依らない）"
+    },
+    {
+      "id": "head_is_branch",
+      "status": "pass",
+      "detail": "HEAD は `dev`"
+    },
+    {
+      "id": "verify_result_present",
+      "status": "pass",
+      "detail": "検証結果は PASS: /home/nakajima/ksd-project/.kloop/release/run_20261114T055943_fcd231/gate-verify-result.json"
+    },
+    {
+      "id": "remote_reachable",
+      "status": "pass",
+      "detail": "git fetch origin dev に成功した"
+    },
+    {
+      "id": "fast_forward_required",
+      "status": "pass",
+      "detail": "origin/dev は HEAD の祖先"
+    },
+    {
+      "id": "no_state_dirs",
+      "status": "pass",
+      "detail": "16 パスに禁止パターンの一致なし"
+    },
+    {
+      "id": "no_sensitive_paths",
+      "status": "pass",
+      "detail": "秘匿情報らしいパスは無い"
+    },
+    {
+      "id": "no_secret_content",
+      "status": "pass",
+      "detail": "追加行と commit メッセージに既知の秘密パターン（9 種）の一致なし。merge 1 件も走査した"
+    },
+    {
+      "id": "change_size_bounded",
+      "status": "pass",
+      "detail": "16 パス"
+    },
+    {
+      "id": "no_oversized_blob",
+      "status": "pass",
+      "detail": "5242880 バイト超の blob は無い"
+    }
+  ],
+  "blocking": [],
+  "evaluated_at": "2026-11-14T06:05:15Z",
+  "policy": "指示書 §6.8（実装: src/ksdloop/push_policy.py）"
+}

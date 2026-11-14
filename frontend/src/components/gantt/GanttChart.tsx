@@ -47,6 +47,14 @@ export interface GanttChartProps {
 }
 
 const CRITICAL_COLOR = "#d32f2f";
+// 線と文字の色（A-53：Primer の値に合わせる）。7.3 の色の規則に関わる色（バー・クリティカル・非稼働日・報告日線とイナズマ線・
+// 判定の色）は変えない。CSS 変数は main.tsx が読む Primer の値で、SVG の属性には変数を書けないので style で当てる。
+// 変数が無いとき（試験など）の値を後ろに書く
+const INK = "var(--fgColor-default, #1f2328)";
+const INK_MUTED = "var(--fgColor-muted, #59636e)";
+const LINE_MUTED = "var(--borderColor-emphasis, #818b98)";
+const SURFACE = "var(--bgColor-default, #ffffff)";
+const SURFACE_MUTED = "var(--bgColor-muted, #f6f8fa)";
 const ARROW_ID = "gantt-arrowhead";
 const PLOT_CLIP_ID = "gantt-plot-clip";
 
@@ -232,7 +240,7 @@ export default function GanttChart({
       >
         <defs>
           <marker id={ARROW_ID} viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#616161" />
+            <path d="M0,0 L8,4 L0,8 z" style={{ fill: INK_MUTED }} />
           </marker>
           <clipPath id={PLOT_CLIP_ID}>
             <rect x={LABEL_WIDTH} y={0} width={width - LABEL_WIDTH} height={height} />
@@ -294,7 +302,7 @@ export default function GanttChart({
                 x={labelX}
                 y={rowCenter(shown.first + i) + 4}
                 fontSize={11}
-                fill="#424242"
+                style={{ fill: INK_MUTED }}
               >
                 {text}
               </text>
@@ -321,7 +329,7 @@ export default function GanttChart({
                 data-link={`${link.predecessor_id}-${link.successor_id}`}
                 d={`M${x1},${rowCenter(from)} H${x1 + 6} V${rowCenter(to)} H${x2}`}
                 fill="none"
-                stroke="#616161"
+                style={{ stroke: INK_MUTED }}
                 markerEnd={`url(#${ARROW_ID})`}
               />
             );
@@ -388,11 +396,18 @@ export default function GanttChart({
             const reportX = x(line.report_line);
             return (
               <g key={line.report_id} data-report-id={line.report_id} data-dash={dash}>
-                <line x1={reportX} x2={reportX} y1={top} y2={height} stroke="#9e9e9e" strokeDasharray={dash} />
+                <line
+                  x1={reportX}
+                  x2={reportX}
+                  y1={top}
+                  y2={height}
+                  style={{ stroke: LINE_MUTED }}
+                  strokeDasharray={dash}
+                />
                 <polyline
                   points={lightningPolyline(vertices, reportX, rowCount, ROW_HEIGHT, top)}
                   fill="none"
-                  stroke="#757575"
+                  style={{ stroke: INK_MUTED }}
                   strokeDasharray={dash}
                 >
                   <title>{`報告日 ${line.report_date} の線`}</title>
@@ -422,12 +437,12 @@ export default function GanttChart({
             const position = shown.first + i;
             return (
               <g key={row.activity_id} data-row={row.row_index} data-activity-id={row.activity_id}>
-                <rect x={0} y={rowTop(position)} width={LABEL_WIDTH} height={ROW_HEIGHT} fill="#ffffff" />
+                <rect x={0} y={rowTop(position)} width={LABEL_WIDTH} height={ROW_HEIGHT} style={{ fill: SURFACE }} />
                 <text
                   x={8 + Math.max(0, row.depth - 1) * 8}
                   y={rowCenter(position) + 4}
                   fontSize={12}
-                  fill={row.is_critical ? CRITICAL_COLOR : "#212121"}
+                  style={{ fill: row.is_critical ? CRITICAL_COLOR : INK }}
                 >
                   {`${row.wbs_code} ${row.name}`}
                   {row.total_float !== null ? `（余裕 ${row.total_float} 日）` : ""}
@@ -439,12 +454,32 @@ export default function GanttChart({
 
         {/* 目盛り（縦に送っても上に残す） */}
         <g data-layer="header" transform={`translate(0, ${scrollTop})`}>
-          <rect x={0} y={0} width={width} height={HEADER_HEIGHT} fill="#fafafa" />
-          {ticks(range, unit).map((t) => (
-            <text key={t.date} x={LABEL_WIDTH + xOfDate(range.start, t.date, dayWidth) + 2} y={20} fontSize={10}>
-              {t.label}
-            </text>
-          ))}
+          <rect x={0} y={0} width={width} height={HEADER_HEIGHT} style={{ fill: SURFACE_MUTED }} />
+          <line x1={0} x2={width} y1={HEADER_HEIGHT - 0.5} y2={HEADER_HEIGHT - 0.5} style={{ stroke: LINE_MUTED }} />
+          {ticks(range, unit).map((t, i) => {
+            const x = LABEL_WIDTH + xOfDate(range.start, t.date, dayWidth) + 2;
+            if (unit !== "day") {
+              return (
+                <text key={t.date} x={x} y={20} fontSize={10} style={{ fill: INK_MUTED }}>
+                  {t.label}
+                </text>
+              );
+            }
+            // 日の単位は 2 段：上に年月（範囲の最初と月の 1 日）、下に日。1 段だと「11/12」が隣の日の数字に重なる
+            const [year, month, day] = t.date.split("-");
+            return (
+              <g key={t.date}>
+                {(i === 0 || day === "01") && (
+                  <text x={x} y={13} fontSize={10} style={{ fill: INK_MUTED }}>
+                    {`${year}年${Number(month)}月`}
+                  </text>
+                )}
+                <text x={x} y={27} fontSize={10} style={{ fill: INK_MUTED }}>
+                  {Number(day)}
+                </text>
+              </g>
+            );
+          })}
         </g>
       </svg>
     </div>

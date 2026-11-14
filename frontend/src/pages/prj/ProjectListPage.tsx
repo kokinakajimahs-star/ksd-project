@@ -9,6 +9,7 @@ import { toErrorView, type ErrorView } from "../../api/errors";
 import { createProject, listProjects, type Project } from "../../api/prj";
 import ErrorAlert from "../../components/ErrorAlert";
 import Pager from "../../components/Pager";
+import StatusBadge, { WBS_STATUS_TONES } from "../../components/StatusBadge";
 import { optionalText } from "../../lib/form";
 import { wbsStatusLabel } from "./labels";
 import { loadActiveUsers } from "./activeUsers";
@@ -272,7 +273,9 @@ export default function ProjectListPage() {
                   <td>{project.name}</td>
                   <td>{formatPeriod(project)}</td>
                   <td>{project.owner.display_name}</td>
-                  <td>{wbsStatusLabel(project.wbs_status)}</td>
+                  <td>
+                    <StatusBadge tone={WBS_STATUS_TONES[project.wbs_status]}>{wbsStatusLabel(project.wbs_status)}</StatusBadge>
+                  </td>
                   <td>
                     <ProjectDestinations me={me} project={project} />
                   </td>
